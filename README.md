@@ -137,13 +137,18 @@ Raise `CONTEXTFOLD_MODEL_CONCURRENCY` if you load the model with a larger window
 
 ```bash
 # Load the extension into a Pi session:
-pi -e /home/willow/library/jake/context-fold/src/adapters/pi/index.ts
+pi -e /home/willow/projects/extensions/context-fold/src/adapters/pi/index.ts
 
 # Or install via the self-built-tooling convention: a SYMLINK into ~/.pi/agent/extensions.
 # NOTE dev == prod under a symlink: an edit in this repo is live in every new Pi session
 # immediately. Keep main green; use CONTEXTFOLD=0 to disable a session without touching the link.
-ln -sfn /home/willow/library/jake/context-fold ~/.pi/agent/extensions/context-fold
+ln -sfn /home/willow/projects/extensions/context-fold ~/.pi/agent/extensions/context-fold
 ```
+
+`/context-fold` reports fold status plus measured prompt-cache telemetry (session cacheRead/
+cacheWrite totals and hit ratios, read from Pi's per-message provider usage). With
+`CONTEXTFOLD_DUMP` set, a `<dump>.telemetry.json` sidecar carries the same numbers for e2e
+assertions; `CONTEXTFOLD_DEBUG=1` prints the cache line each assistant turn.
 
 Enable the L0 gate per model with the allowlist form, e.g.
 `export CONTEXTFOLD_L0='Qwen3.6,gpt-5.6'` (current host rollout; gpt-5.5 remains excluded after its

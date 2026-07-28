@@ -28,6 +28,7 @@ import { Gate, gateConfigFromEnv, gateModelIdentity } from "./gate";
 import { SpoolStore } from "./spool";
 import { recordGateFold, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
 import { spoolRetainMsFromEnv, sweepSpools } from "./retention";
+import { CacheTelemetry } from "./cache-telemetry";
 
 // Qwen3.5-4B-MTP: benchmarked against the 9B for this task — 3.3× faster decode (~116 tok/s via
 // multi-token prediction), identical digest quality (100% buried-identifier retention), and lighter
@@ -90,6 +91,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 
 	const debug = process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true";
 	const dumpPath = process.env.CONTEXTFOLD_DUMP?.trim() || null;
+	const telemetry = new CacheTelemetry();
 
 	let spool: SpoolStore | null = null;
 	let spoolKey = "";
@@ -141,6 +143,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			if (isSwitch) {
 				registry.clear();
 				engine.resetForSession();
+				telemetry.reset();
 			}
 			const { gateEntries, unfoldedIds } = restoreFoldState(ctx.sessionManager.getEntries() as unknown as { customType?: string; data?: unknown }[]);
 			if (gateEntries.length === 0 && unfoldedIds.size === 0) return;
@@ -193,6 +196,25 @@ export default function contextFold(pi: ExtensionAPI): void {
 		return { systemPrompt: `${event.systemPrompt}\n\n${L0_TEACHING}` };
 	});
 
+	// OBSERVE-ONLY cache telemetry: every finalized assistant message carries real provider
+	// usage (cacheRead/cacheWrite). The per-turn hit ratio is the measured signal for whether
+	// folding kept the prefix warm — it collapses on the turn after a head-rewriting fold.
+	pi.on("message_end", (event) => {
+		const message = event.message as { role?: string; usage?: Record<string, number> };
+		if (message.role !== "assistant" || !message.usage) return;
+		telemetry.record(message.usage);
+		if (debug) process.stderr.write(`[context-fold] ${telemetry.statusLine()}\n`);
+		if (dumpPath) {
+			// e2e seam, sibling of the view dump: never change the CONTEXTFOLD_DUMP payload
+			// itself (e2e-gate.sh parses it as a message array).
+			try {
+				writeFileSync(`${dumpPath}.telemetry.json`, JSON.stringify(telemetry.snapshot()), "utf8");
+			} catch {
+				/* dump is best-effort */
+			}
+		}
+	});
+
 	// The make-or-break hook: rewrite the outgoing context before each model call.
 	pi.on("context", (event, ctx) => {
 		try {
@@ -232,7 +254,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 		handler: async (_args, cmdCtx) => {
 			const s = engine.status;
 			const state = s?.text ? s.text : "idle (under budget)";
-			const line = `context-fold (automatic): ${state} · L0 ${activeGate ? "on" : "off"} · model ${activeModelIdentity}`;
+			const line = `context-fold (automatic): ${state} · L0 ${activeGate ? "on" : "off"} · model ${activeModelIdentity} · ${telemetry.statusLine()}`;
 			cmdCtx.ui?.notify?.(line, "info");
 		},
 	});
