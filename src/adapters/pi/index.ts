@@ -19,6 +19,7 @@ import type { AgentMessage as CoreAgentMessage } from "../../core/block";
 import type { Conductor } from "../../core/contract";
 import { KeelConductor } from "../../core/policy/keel";
 import { ModelConductor } from "../../core/policy/model";
+import { PrefixStableKeel } from "../../core/policy/prefix-stable";
 import { ContextFoldEngine, type FoldConfig } from "./store";
 import { registerFoldTools } from "./unfold-tool";
 import { fetchDigestWriter, DEFAULT_WRITER_CONFIG, type DigestWriter } from "../../core/model/digest-writer";
@@ -26,7 +27,7 @@ import { fetchRelevanceJudge, DEFAULT_JUDGE_CONFIG, type RelevanceJudge } from "
 import { MapGateRegistry } from "../../core/gate-registry";
 import { Gate, gateConfigFromEnv, gateModelIdentity } from "./gate";
 import { SpoolStore } from "./spool";
-import { recordGateFold, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
+import { recordGateFold, recordLayer, recordLayerBreak, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
 import { spoolRetainMsFromEnv, sweepSpools } from "./retention";
 import { CacheTelemetry } from "./cache-telemetry";
 
@@ -82,12 +83,23 @@ export default function contextFold(pi: ExtensionAPI): void {
 				concurrency: Number.isFinite(concurrency) && concurrency > 0 ? concurrency : DEFAULT_WRITER_CONFIG.concurrency,
 			})
 		: null;
-	const judge: RelevanceJudge | null = wantColdness ? fetchRelevanceJudge({ ...DEFAULT_JUDGE_CONFIG, ...conn! }) : null;
-	const policy: Conductor = wantColdness ? new ModelConductor() : new KeelConductor();
+	const foldCfg = configFromEnv();
+	// Prefix-stable ranking and the coldness model conductor compete for the same rank() seam;
+	// prefix-stable wins (its ordering IS the point of the flag) and coldness degrades to digests.
+	if (foldCfg.prefixStable && wantColdness)
+		process.stderr.write("[context-fold] CONTEXTFOLD_PREFIX_STABLE overrides CONTEXTFOLD_COLDNESS ranking (digests still apply)\n");
+	const judge: RelevanceJudge | null = wantColdness && !foldCfg.prefixStable ? fetchRelevanceJudge({ ...DEFAULT_JUDGE_CONFIG, ...conn! }) : null;
+	const policy: Conductor = foldCfg.prefixStable
+		? new PrefixStableKeel()
+		: wantColdness
+			? new ModelConductor()
+			: new KeelConductor();
 
 	// ── L0 ingestion gate: registry (shared with the engine) + lazy per-session spool store ──────
 	const registry = new MapGateRegistry();
-	const engine = new ContextFoldEngine(policy, configFromEnv(), writer, judge, registry);
+	const engine = new ContextFoldEngine(policy, foldCfg, writer, judge, registry);
+	engine.onLayerCommit = (layer) => recordLayer(pi, layer);
+	engine.onLayerBreak = (seq) => recordLayerBreak(pi, seq);
 
 	const debug = process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true";
 	const dumpPath = process.env.CONTEXTFOLD_DUMP?.trim() || null;
@@ -145,12 +157,18 @@ export default function contextFold(pi: ExtensionAPI): void {
 				engine.resetForSession();
 				telemetry.reset();
 			}
-			const { gateEntries, unfoldedIds } = restoreFoldState(ctx.sessionManager.getEntries() as unknown as { customType?: string; data?: unknown }[]);
-			if (gateEntries.length === 0 && unfoldedIds.size === 0) return;
+			const { gateEntries, unfoldedIds, layers } = restoreFoldState(ctx.sessionManager.getEntries() as unknown as { customType?: string; data?: unknown }[]);
+			if (gateEntries.length === 0 && unfoldedIds.size === 0 && layers.length === 0) return;
 			const { valid, dropped } = revalidateSpools(gateEntries);
 			for (const e of valid) registry.set(e);
 			engine.restoreUnfolded(unfoldedIds);
-			if (debug) process.stderr.write(`[context-fold] resume: restored ${valid.length} L0 folds, ${unfoldedIds.size} unfolds${dropped.length ? `, dropped ${dropped.length} (missing spool)` : ""}\n`);
+			// Layers restore byte-verbatim; rendering stays gated on the prefixStable flag, so a
+			// flag-off resume renders prior layers raw without losing the record.
+			engine.restoreLayers(layers);
+			if (debug)
+				process.stderr.write(
+					`[context-fold] resume: restored ${valid.length} L0 folds, ${unfoldedIds.size} unfolds, ${layers.length} layers${dropped.length ? `, dropped ${dropped.length} (missing spool)` : ""}\n`,
+				);
 		} catch (err) {
 			// Fail-open: a restore failure just means prior folds render raw this session — but say so,
 			// or the only symptom is silent token creep.

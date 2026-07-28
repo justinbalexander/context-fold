@@ -41,6 +41,13 @@ export interface FoldConfig {
 	tailTarget: number;
 	/** Fallback context window when the host can't report one. */
 	defaultContextWindow: number;
+	/**
+	 * Prefix-stable folding (Stage 2): commit each epoch's substitutions as a frozen layer whose
+	 * bytes never change again, so the context head stays byte-identical across turns and the
+	 * provider's prompt cache keeps re-hitting it. Off by default until the e2e comparison
+	 * proves the cache retention.
+	 */
+	prefixStable: boolean;
 	/** Emit a one-line fold summary to stderr each turn. */
 	debug: boolean;
 }
@@ -50,8 +57,15 @@ export const DEFAULT_CONFIG: FoldConfig = {
 	absoluteTokenCap: 200_000,
 	tailTarget: 20_000,
 	defaultContextWindow: DEFAULT_CONTEXT_WINDOW,
+	prefixStable: false,
 	debug: false,
 };
+
+/** One committed prefix-stable layer (persisted verbatim; see persistence.ts). */
+export interface FrozenLayer {
+	seq: number;
+	entries: { id: string; digestText: string }[];
+}
 
 /** Host context accounting. `tokens` is provider-anchored when Pi has a valid prior response. */
 export interface ContextFrame {
@@ -162,6 +176,16 @@ export class ContextFoldEngine {
 	// ── L0 ingestion gate: registry of born-folded blocks (recall reads the spool by entry path) ──
 	private readonly gate: GateRegistry;
 
+	// ── Stage 2: prefix-stable frozen layers ─────────────────────────────────────────────────────
+	/** Committed layers, oldest first. Substitution bytes are fixed; unfold masks per id at render. */
+	private frozenLayers: FrozenLayer[] = [];
+	/** Derived id → frozen digestText (rebuilt on commit/break/restore). */
+	private frozenById = new Map<string, string>();
+	/** Adapter callback: persist a committed layer (event-sourced, like gate folds). */
+	onLayerCommit: ((layer: FrozenLayer) => void) | null = null;
+	/** Adapter callback: persist a consolidation break. */
+	onLayerBreak: ((seq: number) => void) | null = null;
+
 	constructor(
 		policy: Conductor,
 		cfg: Partial<FoldConfig> = {},
@@ -220,6 +244,32 @@ export class ContextFoldEngine {
 		this.keepWarm = new Set();
 		this.lastColdSig = "";
 		this.lastJudgeSig = "";
+		this.frozenLayers = [];
+		this.frozenById = new Map();
+	}
+
+	/** Restore committed layers on session resume (event-sourced; bytes verbatim). */
+	restoreLayers(layers: FrozenLayer[]): void {
+		this.frozenLayers = [...layers].sort((a, b) => a.seq - b.seq);
+		this.rebuildFrozenIndex();
+	}
+
+	private rebuildFrozenIndex(): void {
+		this.frozenById = new Map();
+		for (const layer of this.frozenLayers) for (const e of layer.entries) this.frozenById.set(e.id, e.digestText);
+	}
+
+	/** Frozen substitutions for blocks present this turn (skipping agent unfolds — an unfold is a
+	 *  deliberate single-point prefix break and the block stays held, never re-frozen). */
+	private computeFrozenOps(blocks: WireBlock[]): Map<string, string> {
+		const out = new Map<string, string>();
+		if (!this.cfg.prefixStable || this.frozenById.size === 0) return out;
+		for (const b of blocks) {
+			const digestText = this.frozenById.get(b.id);
+			if (digestText === undefined || this.unfolded.has(b.id)) continue;
+			out.set(b.id, digestText);
+		}
+		return out;
 	}
 
 	/**
@@ -238,49 +288,86 @@ export class ContextFoldEngine {
 		// unfolded them). These ops apply EVERY turn regardless of budget pressure — the whole point of
 		// the gate is that a flood never reaches full-fidelity context in the first place.
 		const gatePointers = this.computeGatePointers(blocks);
-
 		const frame = normalizeContextFrame(context);
-		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers);
-		const view = this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frame.tokens);
 
-		// Phase 2 rep 2: inject the model's cached "keep warm" judgment into a relevance-aware policy
-		// (ModelConductor). Empty when no judge / not yet answered → deterministic behavior.
-		if (this.judge && isRelevanceAware(this.policy)) {
-			this.pruneKeepWarm(blocks);
-			this.policy.setKeepWarm(this.keepWarm);
+		// Consolidation loop: normally one pass. When the plan is still over budget, layers exist,
+		// and the irreducible floor is not the cause, deliberately break the OLDEST layer — one
+		// full cache re-prefill at a chosen boundary — and replan. Bounded by the layer count.
+		for (let attempt = 0; ; attempt++) {
+			const frozenOps = this.computeFrozenOps(blocks);
+			const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers, frozenOps);
+			const view = this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens);
+
+			// Phase 2 rep 2: inject the model's cached "keep warm" judgment into a relevance-aware policy
+			// (ModelConductor). Empty when no judge / not yet answered → deterministic behavior.
+			if (this.judge && isRelevanceAware(this.policy)) {
+				this.pruneKeepWarm(blocks);
+				this.policy.setKeepWarm(this.keepWarm);
+			}
+
+			const cmds = this.policy.conduct(view);
+
+			let ops: FoldOp[] = [];
+			let groups: GroupOp[] = [];
+			if (cmds != null && cmds.length > 0) {
+				// Phase 2: the deterministic fold-command ids ARE the cold zone. Dispatch the model writer
+				// (digests) and the relevance judge (coldness) for them — async, non-blocking. Their results
+				// apply on a later turn. Keel's mechanism is untouched; the model only supplies string + order.
+				const foldIds = collectFoldIds(cmds);
+				this.maybeFireWriter(foldIds, blocks);
+				this.maybeFireJudge(foldIds, blocks, protectFrom);
+				const lowered = this.lower(cmds, blocks, protectFrom);
+				ops = lowered.ops;
+				groups = lowered.groups;
+			}
+
+			if (this.cfg.prefixStable) {
+				const overBudget = this.lastStatus?.metrics?.over_budget === true;
+				const irreducible = Number(this.lastStatus?.metrics?.irreducible_floor ?? 0);
+				const cap = Number(this.lastStatus?.metrics?.cap ?? 0);
+				if (overBudget && this.frozenLayers.length > 0 && attempt < this.frozenLayers.length + 1 && !(cap > 0 && irreducible > cap)) {
+					const broken = this.frozenLayers.shift()!;
+					this.rebuildFrozenIndex();
+					this.onLayerBreak?.(broken.seq);
+					process.stderr.write(
+						`[context-fold] consolidation: broke layer ${broken.seq} (${broken.entries.length} blocks) — one deliberate cache re-prefill\n`,
+					);
+					continue;
+				}
+				// Commit this epoch's substitutions as a new frozen layer — but never on a group turn
+				// (groups rewrite structure; freezing alongside one would fix bytes that just moved).
+				if (groups.length === 0 && ops.length > 0) {
+					const entries = ops
+						.filter((op) => !gatePointers.has(op.id) && !this.frozenById.has(op.id))
+						.map((op) => ({ id: op.id, digestText: op.digestText }));
+					if (entries.length > 0) {
+						const layer: FrozenLayer = { seq: (this.frozenLayers[this.frozenLayers.length - 1]?.seq ?? 0) + 1, entries };
+						this.frozenLayers.push(layer);
+						for (const e of entries) this.frozenById.set(e.id, e.digestText);
+						this.onLayerCommit?.(layer);
+						if (this.cfg.debug)
+							process.stderr.write(`[context-fold] layer ${layer.seq} committed (${entries.length} blocks frozen)\n`);
+					}
+				}
+			}
+
+			// Merge order = gate > frozen > policy: the gate owns its ids outright; a frozen id's bytes
+			// outrank any late policy op for it (defense in depth — candidates already exclude frozen).
+			const allOps = mergeOpsById(gatePointers, mergeOpsById(frozenOps, ops));
+			if (allOps.length === 0 && groups.length === 0) return messages; // nothing to fold → send unchanged
+
+			if (this.cfg.debug) {
+				const model = this.writer ? ` digest=${this.lastModelUsed}/${ops.length}${this.inflight ? " (writing…)" : ""}` : "";
+				const warm = this.judge ? ` keepWarm=${this.keepWarm.size}${this.judgeInflight ? " (judging…)" : ""}` : "";
+				const l0 = gatePointers.size ? ` l0=${gatePointers.size}` : "";
+				const fz = frozenOps.size ? ` frozen=${frozenOps.size}` : "";
+				process.stderr.write(
+					`[context-fold] ${ops.length} folds, ${groups.length} groups${l0}${fz}, live=${view.liveTokens} budget=${budget}${model}${warm} ${this.lastStatus?.text ?? ""}\n`,
+				);
+			}
+
+			return applyPlan(messages, allOps, groups);
 		}
-
-		const cmds = this.policy.conduct(view);
-
-		let ops: FoldOp[] = [];
-		let groups: GroupOp[] = [];
-		if (cmds != null && cmds.length > 0) {
-			// Phase 2: the deterministic fold-command ids ARE the cold zone. Dispatch the model writer
-			// (digests) and the relevance judge (coldness) for them — async, non-blocking. Their results
-			// apply on a later turn. Keel's mechanism is untouched; the model only supplies string + order.
-			const foldIds = collectFoldIds(cmds);
-			this.maybeFireWriter(foldIds, blocks);
-			this.maybeFireJudge(foldIds, blocks, protectFrom);
-			const lowered = this.lower(cmds, blocks, protectFrom);
-			ops = lowered.ops;
-			groups = lowered.groups;
-		}
-
-		// Merge the gate's born-folded ops in front (the gate owns its ids; the policy never targets a
-		// bornFolded block, but dedup by id defensively so a block can carry only one disposition).
-		const allOps = mergeOpsById(gatePointers, ops);
-		if (allOps.length === 0 && groups.length === 0) return messages; // nothing to fold → send unchanged
-
-		if (this.cfg.debug) {
-			const model = this.writer ? ` digest=${this.lastModelUsed}/${ops.length}${this.inflight ? " (writing…)" : ""}` : "";
-			const warm = this.judge ? ` keepWarm=${this.keepWarm.size}${this.judgeInflight ? " (judging…)" : ""}` : "";
-			const l0 = gatePointers.size ? ` l0=${gatePointers.size}` : "";
-			process.stderr.write(
-				`[context-fold] ${ops.length} folds, ${groups.length} groups${l0}, live=${view.liveTokens} budget=${budget}${model}${warm} ${this.lastStatus?.text ?? ""}\n`,
-			);
-		}
-
-		return applyPlan(messages, allOps, groups);
 	}
 
 	/** Born-folded pointer text per registered block id (skipping any the agent has unfolded).
@@ -301,9 +388,10 @@ export class ContextFoldEngine {
 	viewFor(messages: AgentMessage[], context: ContextFrameInput): ConductorView {
 		const blocks = linearize(messages);
 		const gatePointers = this.computeGatePointers(blocks);
+		const frozenOps = this.computeFrozenOps(blocks);
 		const frame = normalizeContextFrame(context);
-		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers);
-		return this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frame.tokens);
+		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers, frozenOps);
+		return this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens);
 	}
 
 	/**
@@ -316,13 +404,14 @@ export class ContextFoldEngine {
 		blocks: WireBlock[],
 		contextWindow: number | null,
 		gatePointers: Map<string, string>,
+		frozenOps: Map<string, string> = new Map(),
 	): { cw: number; budget: number; tailTarget: number; protectFrom: number } {
 		const cw = contextWindow ?? this.cfg.defaultContextWindow;
 		const cap = this.cfg.absoluteTokenCap > 0 ? this.cfg.absoluteTokenCap : Infinity;
 		const budget = Math.min(cap, Math.floor(cw * this.cfg.budgetFraction));
 		const tailTarget = Math.min(this.cfg.tailTarget, Math.floor(budget / 2));
 		const rendered = blocks.map((b) => {
-			const p = gatePointers.get(b.id);
+			const p = gatePointers.get(b.id) ?? frozenOps.get(b.id);
 			return { tokens: p !== undefined ? substTokens(p) : b.tokens };
 		});
 		return { cw, budget, tailTarget, protectFrom: protectedFromIndex(rendered, tailTarget) };
@@ -475,28 +564,34 @@ export class ContextFoldEngine {
 		contextWindow: number,
 		tailTarget: number,
 		gatePointers: Map<string, string>,
+		frozenOps: Map<string, string>,
 		reportedTokens: number | null,
 	): ConductorView {
 		let liveTokens = 0;
 		const viewBlocks: ViewBlock[] = blocks.map((b, i) => {
 			const pointer = gatePointers.get(b.id);
 			const born = pointer !== undefined;
+			const frozenText = born ? undefined : frozenOps.get(b.id);
+			const frozen = frozenText !== undefined;
 			const foldable = wireFoldable(b);
 			// Born-folded blocks are charged at POINTER weight (criterion 6: budget math counts the
-			// pre-folded block at digest weight); every other block starts warm at full weight.
-			// A cached MODEL digest is priced here too — it is what lowering will actually ship, so
-			// every projection (epoch band, floor, HOLD) sees the true wire cost, and the model can
-			// never push the wire past what the floor proved (the old accounting priced the shorter
-			// deterministic digest and went blind to the difference).
-			const modelBody = born ? undefined : this.modelDigests.get(b.id);
+			// pre-folded block at digest weight); frozen blocks at their committed layer bytes;
+			// every other block starts warm at full weight. A cached MODEL digest is priced here
+			// too — it is what lowering will actually ship, so every projection (epoch band, floor,
+			// HOLD) sees the true wire cost, and the model can never push the wire past what the
+			// floor proved (the old accounting priced the shorter deterministic digest and went
+			// blind to the difference).
+			const modelBody = born || frozen ? undefined : this.modelDigests.get(b.id);
 			const foldedTokens = born
 				? substTokens(pointer)
-				: foldable
-					? modelBody !== undefined
-						? substTokens(`${foldTag(b.id)} ${modelBody}`)
-						: this.detDigestTokens(b)
-					: b.tokens;
-			liveTokens += born ? foldedTokens : b.tokens;
+				: frozen
+					? substTokens(frozenText)
+					: foldable
+						? modelBody !== undefined
+							? substTokens(`${foldTag(b.id)} ${modelBody}`)
+							: this.detDigestTokens(b)
+						: b.tokens;
+			liveTokens += born || frozen ? foldedTokens : b.tokens;
 			return {
 				id: b.id,
 				messageKey: b.messageKey,
@@ -509,8 +604,9 @@ export class ContextFoldEngine {
 				callId: b.callId,
 				isError: b.isError,
 				held: this.unfolded.has(b.id),
-				folded: born, // born-folded renders folded from turn 1; others cleared to baseline
+				folded: born || frozen, // born-folded/frozen render folded from turn 1; others cleared to baseline
 				bornFolded: born,
+				frozen,
 				protected: i >= protectFrom,
 				grouped: false, // no human groups in Phase 1
 				text: b.text,
@@ -558,7 +654,7 @@ export class ContextFoldEngine {
 		};
 		const canFold = (id: string): boolean => {
 			const b = byId.get(id);
-			return !!b && isDurableId(id) && wireFoldable(b) && !protectedAt(id) && !this.unfolded.has(id);
+			return !!b && isDurableId(id) && wireFoldable(b) && !protectedAt(id) && !this.unfolded.has(id) && !this.frozenById.has(id);
 		};
 
 		const ops: FoldOp[] = [];
@@ -572,7 +668,15 @@ export class ContextFoldEngine {
 			if (cmd.kind !== "group") continue;
 			const members = cmd.ids
 				.map((id) => byId.get(id))
-				.filter((b): b is WireBlock => !!b && isDurableId(b.id) && !protectedAt(b.id) && !this.unfolded.has(b.id) && !groupedIds.has(b.id));
+				.filter(
+					(b): b is WireBlock =>
+						!!b &&
+						isDurableId(b.id) &&
+						!protectedAt(b.id) &&
+						!this.unfolded.has(b.id) &&
+						!groupedIds.has(b.id) &&
+						!this.frozenById.has(b.id),
+				);
 			if (members.length === 0) continue;
 			const groupId = `g:${members[0].id}`;
 			const group: Group = { id: groupId, memberIds: members.map((m) => m.id), folded: true };
@@ -636,10 +740,11 @@ export class ContextFoldEngine {
 	private maybeFireWriter(foldIds: string[], blocks: WireBlock[]): void {
 		if (!this.writer || foldIds.length === 0 || this.inflight) return;
 		const byId = new Map(blocks.map((b) => [b.id, b] as const));
-		// Only foldable blocks we don't already have a model digest for.
+		// Only foldable blocks we don't already have a model digest for. Frozen ids are excluded:
+		// their bytes are committed, so a late-arriving model digest could never ship for them.
 		const pending = foldIds.filter((id) => {
 			const b = byId.get(id);
-			return !!b && wireFoldable(b) && !this.modelDigests.has(id);
+			return !!b && wireFoldable(b) && !this.modelDigests.has(id) && !this.frozenById.has(id);
 		});
 		if (pending.length === 0) return;
 		const sig = [...pending].sort().join("\0");

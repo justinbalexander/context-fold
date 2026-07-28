@@ -31,6 +31,7 @@ export function rankCandidates(view: ViewBlock[], roots: Set<string>, ctx: Score
 			!b.protected &&
 			!b.grouped &&
 			!b.bornFolded && // L0 pointers are terminal — never re-digested by a deeper rung
+			!b.frozen && // committed prefix-stable layers are byte-fixed — never re-ranked
 			b.foldedTokens < b.tokens &&
 			FOLDABLE_KINDS.has(b.kind),
 	);

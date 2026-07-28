@@ -45,6 +45,14 @@ export interface ViewBlock {
 	 * full `tokens` so relevance stays honest.
 	 */
 	bornFolded?: boolean;
+	/**
+	 * Frozen by a committed prefix-stable layer: this block's substitution bytes are fixed for
+	 * the session (they extend the byte-stable head that keeps the provider's prompt cache warm).
+	 * TERMINAL like `bornFolded` — never re-ranked, re-laddered, grouped, or dropped; only an
+	 * explicit agent unfold (which deliberately breaks the prefix at one point) or an engine
+	 * consolidation epoch releases it.
+	 */
+	frozen?: boolean;
 	protected: boolean; // inside the protected working tail
 	grouped: boolean; // member of a folded group (host owns it)
 	text?: string; // full content

@@ -15,6 +15,8 @@ export function configFromEnv(): Partial<FoldConfig> {
 	}
 	const tail = Number(process.env.CONTEXTFOLD_TAIL);
 	if (Number.isFinite(tail) && tail >= 0) cfg.tailTarget = tail;
+	const stable = process.env.CONTEXTFOLD_PREFIX_STABLE?.trim().toLowerCase();
+	if (stable === "1" || stable === "true" || stable === "on") cfg.prefixStable = true;
 	if (process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true") cfg.debug = true;
 	return cfg;
 }

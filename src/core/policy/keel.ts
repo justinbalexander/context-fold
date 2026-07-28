@@ -159,13 +159,16 @@ export class KeelConductor implements Conductor {
 		}
 
 		// ── 6. Hard-cap FLOOR — guarantee projected ≤ cap ──────────────────────────
+		// `!b.frozen` in both: the hard-cap floor must never cross the frozen prefix boundary —
+		// group/drop rewriting a committed layer would silently forfeit the warm cache the layer
+		// exists to keep. Only the engine's consolidation epoch may release a layer, deliberately.
 		const isFoldableForFloor = (b: ViewBlock): boolean =>
-			!b.held && !b.protected && !b.grouped && !b.bornFolded && b.foldedTokens < b.tokens && FOLDABLE_KINDS.has(b.kind);
+			!b.held && !b.protected && !b.grouped && !b.bornFolded && !b.frozen && b.foldedTokens < b.tokens && FOLDABLE_KINDS.has(b.kind);
 		// Stage-2/3 whole-message removal: tool_call blocks ARE removable inside a group (the pair
 		// leaves together — that's what keeps it provider-safe); user blocks never are, and roots are
 		// excluded per-block by the floor itself.
 		const isRemovableForFloor = (b: ViewBlock): boolean =>
-			!b.held && !b.protected && !b.grouped && !b.bornFolded && b.kind !== "user";
+			!b.held && !b.protected && !b.grouped && !b.bornFolded && !b.frozen && b.kind !== "user";
 		const floor = hardCapFloor(blocks, cap, projected, currentTokens, laddered, roots, isFoldableForFloor, isRemovableForFloor);
 
 		for (const id of floor.foldIds) {
