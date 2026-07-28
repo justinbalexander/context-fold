@@ -32,7 +32,7 @@ CONTEXTFOLD_L0="${CONTEXTFOLD_L0:-1}" CONTEXTFOLD_DEBUG=1 \
   "$PI" -p --mode json --session-dir "$SESS" --session-id "$SID" --provider "$PROVIDER" --model "$MODEL" \
   "Use the read tool to read the entire file at $BIGFILE in one call, then reply with ONLY the total number of lines in it." \
   >"$WORK/stdout1.json" 2>"$WORK/stderr1.txt"
-FOLDLINE="$(grep -oE 'l0-fold #[0-9a-z]{6} tool=read [0-9]+→[0-9]+' "$WORK/stderr1.txt" | head -1)"
+FOLDLINE="$(grep -oE 'l0-fold #[0-9a-z]{6} tool=(read|exec_command|exec) [0-9]+→[0-9]+' "$WORK/stderr1.txt" | head -1)"
 echo "   run 1 exit=$? — ${FOLDLINE:-NO FOLD}"
 if [[ -z "$FOLDLINE" ]]; then
   echo "FAIL (pre) gate never fired in run 1 — the agent likely routed around the read (wc/grep); nothing to restore"

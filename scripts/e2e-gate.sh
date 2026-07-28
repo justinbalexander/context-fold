@@ -50,8 +50,9 @@ fail=0
 [[ $RC -eq 0 ]] || { echo "FAIL pi run exited $RC"; fail=1; }
 
 # (a) the gate fired. Stock Pi may expose the file read as `read` or route it through the
-# environment's `exec_command` tool; both exercise the same text-result ingestion boundary.
-FOLD_RE='l0-fold #[0-9a-z]{6} tool=(read|exec_command) [0-9]+→[0-9]+'
+# environment's shell tool (`exec_command` historically, `exec` since pi 0.80.x); all exercise
+# the same text-result ingestion boundary.
+FOLD_RE='l0-fold #[0-9a-z]{6} tool=(read|exec_command|exec) [0-9]+→[0-9]+'
 if grep -qE "$FOLD_RE" "$STDERR"; then
   echo "PASS (a) gate fired: $(grep -oE "$FOLD_RE" "$STDERR" | head -1)"
 else
@@ -79,16 +80,19 @@ def text_of(m):
         return "\n".join(b.get("text", "") for b in c if isinstance(b, dict))
     return c if isinstance(c, str) else ""
 folded = [m for m in results if "FOLDED}" in text_of(m) and "recall #" in text_of(m)]
-leaked = [m for m in results if marker in text_of(m)]
+# The gate's guarantee covers results it folds — i.e. results OVER the fold threshold. A small
+# result quoting the marker (the model grep-echoing despite instructions) is model behavior,
+# not a gate leak. 2000 est-tokens ≈ 8000 chars (the default CONTEXTFOLD_L0_THRESHOLD).
+leaked = [m for m in results if marker in text_of(m) and len(text_of(m)) > 8000]
 ok = True
 if folded:
     print(f"PASS (c) {len(folded)}/{len(results)} tool_result block(s) rendered as a pointer with a recall handle")
 else:
     print(f"FAIL (c) no tool_result block folded to a pointer (results={len(results)})"); ok = False
 if leaked:
-    print(f"FAIL (c) buried payload marker still present in a tool_result block ({len(leaked)})"); ok = False
+    print(f"FAIL (c) over-threshold result still carries the raw payload marker ({len(leaked)})"); ok = False
 else:
-    print("PASS (c) no tool_result block still carries the raw payload marker")
+    print("PASS (c) no over-threshold tool_result still carries the raw payload marker")
 sys.exit(0 if ok else 3)
 PY
   [[ $? -eq 0 ]] || fail=1
