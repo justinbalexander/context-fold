@@ -1,0 +1,28 @@
+{
+  "name": "context-fold",
+  "version": "0.1.0",
+  "description": "Reversible in-session context compaction for CLI coding agents (Pi/Willow adapter).",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./src/adapters/pi/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80 <1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "@types/node": "^26.0.1"
+  }
+}

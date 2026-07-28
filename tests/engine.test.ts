@@ -1,0 +1,141 @@
+/*
+ * engine.test.ts — the full per-turn pipeline through the Pi adapter's headless engine:
+ * fold-under-budget, provider-safety on the real output, and the recall/unfold roundtrip.
+ */
+import { describe, it, expect } from "vitest";
+import { ContextFoldEngine } from "../src/adapters/pi/store";
+import { KeelConductor } from "../src/core/policy/keel";
+import type { AgentMessage } from "../src/core/block";
+import { user, assistantWithCalls, toolResult, bigResult, isBalanced, liveTokensOf } from "./helpers";
+
+/** Build an over-budget session: N turns, each a user ask + assistant call + a big tool result. */
+function bigSession(n: number): AgentMessage[] {
+	const out: AgentMessage[] = [user("start the project")];
+	for (let i = 0; i < n; i++) {
+		out.push(user(`step ${i}: read a file`));
+		out.push(assistantWithCalls([{ id: `c${i}`, name: "read" }], { text: `reading file ${i}`, thinking: `I should read file ${i} now` }));
+		out.push(bigResult(`c${i}`, 80));
+	}
+	out.push(user("now summarize"));
+	return out;
+}
+
+const CW = 8_000; // small context window so the session blows the budget
+const CONFIG = { budgetFraction: 0.75, tailTarget: 800, defaultContextWindow: CW };
+const CAP = Math.floor(CW * CONFIG.budgetFraction);
+
+describe("fold under budget", () => {
+	it("folds cold blocks to digests and drives liveTokens to ≤ cap", () => {
+		const engine = new ContextFoldEngine(new KeelConductor(), CONFIG);
+		const messages = bigSession(12);
+		const before = liveTokensOf(messages);
+		expect(before).toBeGreaterThan(CAP); // precondition: genuinely over budget
+
+		const out = engine.process(messages, CW);
+		const after = liveTokensOf(out);
+
+		expect(after).toBeLessThan(before); // it actually compressed
+		expect(after).toBeLessThanOrEqual(CAP); // the budget guarantee (irreducible floor < cap here)
+		expect(JSON.stringify(out)).toContain("FOLDED"); // reversible handles emitted
+	});
+
+	it("keeps every tool pair balanced in the output (no orphans reach the provider)", () => {
+		const engine = new ContextFoldEngine(new KeelConductor(), CONFIG);
+		const out = engine.process(bigSession(12), CW);
+		expect(isBalanced(out)).toBe(true);
+	});
+
+	it("passes through unchanged when under budget", () => {
+		const engine = new ContextFoldEngine(new KeelConductor(), CONFIG);
+		const small: AgentMessage[] = [user("hi"), assistantWithCalls([{ id: "c0", name: "read" }], { text: "ok" }), toolResult("c0", "short")];
+		const out = engine.process(small, CW);
+		expect(out).toBe(small); // identity — nothing folded
+	});
+
+	it("folds when Pi reports pressure even if the local estimator says under budget", () => {
+		const engine = new ContextFoldEngine(new KeelConductor(), CONFIG);
+		const messages = bigSession(5);
+		expect(liveTokensOf(messages)).toBeLessThan(CAP);
+
+		const out = engine.process(messages, { contextWindow: CW, tokens: 7_900 });
+
+		expect(out).not.toBe(messages);
+		expect(JSON.stringify(out)).toContain("FOLDED");
+		expect(engine.status?.metrics?.reported_tokens).toBe(7_900);
+		expect(engine.status?.metrics?.reported_budget).toBe(CAP);
+		expect(engine.status?.metrics?.usage_calibrated).toBe(true);
+	});
+
+	it("retains the held fold plan once reported usage is back under the real threshold", () => {
+		const engine = new ContextFoldEngine(new KeelConductor(), CONFIG);
+		const messages = bigSession(5);
+		const pressured = engine.process(messages, { contextWindow: CW, tokens: 7_900 });
+		const settled = engine.process(messages, { contextWindow: CW, tokens: 5_000 });
+
+		expect(JSON.stringify(settled)).toBe(JSON.stringify(pressured));
+		expect(engine.status?.text).toContain("hold");
+	});
+
+	it("falls back to estimator behavior when Pi has no token value", () => {
+		const engine = new ContextFoldEngine(new KeelConductor(), CONFIG);
+		const small: AgentMessage[] = [user("hi"), assistantWithCalls([{ id: "fallback", name: "read" }], { text: "ok" }), toolResult("fallback", "short")];
+		const out = engine.process(small, { contextWindow: CW, tokens: null });
+		expect(out).toBe(small);
+	});
+
+	it("never folds the protected working tail", () => {
+		// Tail target large enough to comfortably include the newest big result (~1k tok) — so it
+		// is genuinely inside the protected tail and must survive verbatim. (A tail smaller than a
+		// single block correctly protects only the newest block — covered in core.test.ts.)
+		const engine = new ContextFoldEngine(new KeelConductor(), { ...CONFIG, tailTarget: 2500 });
+		const messages = bigSession(12);
+		const out = engine.process(messages, CW);
+		const lastResult = [...out].reverse().find((m) => m.role === "toolResult");
+		expect(lastResult).toBeDefined();
+		expect((lastResult!.content as any)[0].text).not.toContain("FOLDED");
+	});
+});
+
+describe("recall — read the original back verbatim", () => {
+	it("returns the exact original content of a folded block", () => {
+		const engine = new ContextFoldEngine(new KeelConductor(), CONFIG);
+		const messages = bigSession(12);
+		const out = engine.process(messages, CW);
+
+		// Find a folded tool result in the output and its fold code.
+		const foldedTR = out.find((m) => m.role === "toolResult" && (m.content as any)[0].text.includes("FOLDED"));
+		expect(foldedTR).toBeDefined();
+		const codeMatch = /\{#([0-9a-z]{6}) FOLDED\}/.exec((foldedTR!.content as any)[0].text)!;
+		const code = codeMatch[1];
+
+		// The original block's content (re-derived from the un-folded session).
+		const original = bigSession(12); // identical fixture (deterministic ids)
+		const origTR = original.find((m) => m.role === "toolResult" && m.toolCallId === foldedTR!.toolCallId)!;
+		const origText = (origTR.content as any)[0].text;
+
+		const { matches, missing } = engine.resolveRecall([code]);
+		expect(missing).toHaveLength(0);
+		expect(matches).toHaveLength(1);
+		expect(matches[0].text).toBe(origText); // verbatim
+	});
+});
+
+describe("unfold — sticky re-expansion next turn", () => {
+	it("a block the agent unfolds is no longer folded on the next pass", () => {
+		const engine = new ContextFoldEngine(new KeelConductor(), CONFIG);
+		const messages = bigSession(12);
+		const out1 = engine.process(messages, CW);
+
+		const foldedTR = out1.find((m) => m.role === "toolResult" && (m.content as any)[0].text.includes("FOLDED"))!;
+		const callId = foldedTR.toolCallId!;
+		const code = /\{#([0-9a-z]{6}) FOLDED\}/.exec((foldedTR.content as any)[0].text)![1];
+
+		engine.markUnfold([code]);
+
+		// Next turn: Pi passes the same real history; the unfolded block must come back full.
+		const out2 = engine.process(messages, CW);
+		const sameTR = out2.find((m) => m.role === "toolResult" && m.toolCallId === callId)!;
+		expect((sameTR.content as any)[0].text).not.toContain("FOLDED"); // expanded
+		expect(isBalanced(out2)).toBe(true);
+	});
+});

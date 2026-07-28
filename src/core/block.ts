@@ -1,0 +1,342 @@
+/*
+ * block.ts — the harness-agnostic block model + the message↔block bridge.
+ *
+ * The atomic unit is a BLOCK: a typed slice of a single message. One assistant message
+ * explodes into several blocks (its thinking, its reply text, each tool call). A tool call
+ * and the tool result that answers it are SEPARATE blocks — shown together but folded
+ * independently, because their value to the agent decays at very different rates.
+ *
+ * This file is PURE and has ZERO harness dependencies. It models only the structural shape
+ * of a provider message (`AgentMessage`) — the exact fields `linearize`/`messageInfo`/`foldOne`
+ * read. A harness adapter casts its real message array to `AgentMessage[]` at the boundary;
+ * that cast is the documented seam (see adapters/pi/hook.ts).
+ *
+ * Block ids are durable and content-anchored — identical whether derived now or after the
+ * message array shifts position:
+ *   • user          → `u:<timestamp>`
+ *   • assistant part j (thinking/text/tool_call) → `a:<responseId ?? "t"+timestamp>:p<j>`
+ *   • tool_result   → `r:<toolCallId>`
+ *   • summary/other → `s:<timestamp>`
+ * Fallback (missing anchor): positional `m<i>:…` — NOT durable, never folded.
+ *
+ * Ported from Accordion `engine/types.ts`, `live/protocol.ts`, and `live/mapping.ts`
+ * (pinned commit 0c22434), stripped of Svelte/reactive state.
+ */
+import { estTokens, BLOCK_OVERHEAD } from "./tokens";
+
+// ── Block kinds & fold-state vocabulary ──────────────────────────────────────
+
+export type BlockKind =
+	| "user" // the human's instruction/intent — highest durable value
+	| "text" // an assistant reply / conclusion
+	| "thinking" // ephemeral assistant reasoning
+	| "tool_call" // WHAT the agent did (tiny, durable record of an action)
+	| "tool_result"; // WHAT the agent saw (often huge, decays fast)
+
+/** Who last changed a block's fold state. */
+export type Actor = "you" | "agent" | "auto" | "conductor";
+
+/** A manual override the automatic folder must respect. */
+export type Override = "pinned" | "folded" | "unfolded" | null;
+
+/**
+ * A full engine Block. Immutable content fields + mutable fold state. In this headless port
+ * the policy reasons over `ViewBlock` (contract.ts); `Block` exists for the digest functions
+ * and any adapter that wants the richer shape.
+ */
+export interface Block {
+	id: string;
+	kind: BlockKind;
+	/** 1-based index of the user turn this block belongs to (0 = preamble). */
+	turn: number;
+	/** Global 0-based position in the conversation. */
+	order: number;
+	/** Full, normalized text content. Never mutated by folding. */
+	text: string;
+	/** Estimated token cost at full fidelity. */
+	tokens: number;
+	toolName?: string;
+	/** Pairing key. tool_call → its own call id; tool_result → the id of the call it answers. */
+	callId?: string;
+	model?: string;
+	isError?: boolean;
+	// --- mutable fold state ------------------------------------------------
+	override: Override;
+	autoFolded: boolean;
+	by: Actor | null;
+	subst?: string;
+}
+
+/**
+ * The minimal content surface the digest functions read. Both `Block` and `WireBlock` satisfy
+ * it, so digests can be computed on either without converting. (Keyed by object identity in
+ * the digest WeakMap caches — see digest.ts.)
+ */
+export interface DigestBlock {
+	id: string;
+	kind: BlockKind;
+	text: string;
+	tokens: number;
+	toolName?: string;
+	isError?: boolean;
+}
+
+/**
+ * A multiblock fold. A group is an ENGINE OVERLAY, never a Block: it references a CONTIGUOUS,
+ * non-overlapping run of member blocks (by id). Invariants: contiguous · non-overlapping ·
+ * flat · ≥1 member · entirely older than the protected tail. `digest`: undefined→recap,
+ * null/""→drop, string→verbatim.
+ */
+export interface Group {
+	id: string;
+	memberIds: string[];
+	folded: boolean;
+	by?: Actor;
+	digest?: string | null;
+}
+
+// ── Wire types (the lowered fold plan applyPlan consumes) ────────────────────
+
+/** A serialisable block — the wire form of a Block minus the mutable fold state. */
+export interface WireBlock {
+	id: string;
+	kind: BlockKind;
+	turn: number;
+	order: number;
+	text: string;
+	tokens: number;
+	toolName?: string;
+	callId?: string;
+	model?: string;
+	isError?: boolean;
+	/** Provider-message grouping key (per-pass positional). Blocks of one message share it — the
+	 *  budget floor uses it to build whole-message group runs applyPlan will actually accept. */
+	messageKey?: string;
+}
+
+/** One fold instruction: replace block `id`'s content with `digestText` (carries the {#code} tag). */
+export interface FoldOp {
+	id: string;
+	digestText: string;
+}
+
+/**
+ * One group-collapse instruction — the only op that changes the message count. `summaryText:
+ * null` = DROP (remove the run, insert no message); a non-null string = the summary text.
+ */
+export interface GroupOp {
+	id: string;
+	memberIds: string[];
+	summaryText: string | null;
+}
+
+// ── Structural model of a provider message (the harness seam) ────────────────
+
+export interface TextPart {
+	type: "text";
+	text: string;
+}
+export interface ThinkingPart {
+	type: "thinking";
+	thinking: string;
+}
+export interface ToolCallPart {
+	type: "toolCall";
+	id: string;
+	name: string;
+	arguments?: Record<string, unknown>;
+}
+export type MessagePart = TextPart | ThinkingPart | ToolCallPart | { type: string; [k: string]: unknown };
+
+/**
+ * The structural shape of one provider message — only the fields the bridge reads. A harness
+ * adapter casts its real message array to `AgentMessage[]`; this interface is intentionally
+ * permissive so that cast is total.
+ */
+export interface AgentMessage {
+	role: string;
+	content?: string | MessagePart[] | Array<{ type: string; text?: string }>;
+	model?: string;
+	toolCallId?: string;
+	toolName?: string;
+	isError?: boolean;
+	summary?: string;
+	/** Set once at message creation; primary anchor for user/summary/assistant-fallback ids. */
+	timestamp?: number;
+	/** Provider-assigned response id; preferred anchor for assistant-message part ids. */
+	responseId?: string;
+}
+
+// ── Durable, content-anchored ids ────────────────────────────────────────────
+
+/**
+ * Compute a durable, content-anchored block id that is IDENTICAL regardless of where the
+ * message sits in the array. Both `linearize` and `applyPlan` MUST call this — never inline
+ * the formula — so the two can never drift.
+ */
+export function blockId(m: AgentMessage, i: number, partIndex?: number): string {
+	switch (m.role) {
+		case "user":
+			return m.timestamp != null ? `u:${m.timestamp}` : `m${i}:u`;
+		case "assistant": {
+			if (partIndex == null) return `m${i}:p?`; // defensive only
+			const anchor = m.responseId != null ? m.responseId : m.timestamp != null ? `t${m.timestamp}` : null;
+			return anchor != null ? `a:${anchor}:p${partIndex}` : `m${i}:p${partIndex}`;
+		}
+		case "toolResult":
+			return m.toolCallId != null ? `r:${m.toolCallId}` : `m${i}:r`;
+		default:
+			return m.timestamp != null ? `s:${m.timestamp}` : `m${i}:s`;
+	}
+}
+
+/**
+ * Is `id` a durable, content-anchored id (vs a positional fallback)? Positional `m<i>:…` ids
+ * encode the current array index, which is NOT stable once folding makes the array
+ * non-append-only — so we must never fold a block we can't durably re-identify. Kept in
+ * lockstep with the formats `blockId` produces.
+ */
+export function isDurableId(id: string): boolean {
+	return id.startsWith("u:") || id.startsWith("a:") || id.startsWith("r:") || id.startsWith("s:");
+}
+
+function textOf(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content))
+		return content
+			.filter((b): b is { type: string; text: string } => !!b && (b as any).type === "text" && typeof (b as any).text === "string")
+			.map((b) => b.text)
+			.join("\n");
+	return "";
+}
+
+const tokensFor = (text: string): number => estTokens(text) + BLOCK_OVERHEAD;
+
+/**
+ * Linearize a provider message array into wire blocks. Pure, deterministic: same messages →
+ * same blocks/ids. One assistant message explodes into per-part blocks; user, tool_result,
+ * summary each → one block. `order` = global 0-based counter; `turn` increments on each user
+ * message. Empty non-result parts are dropped (parity with the on-disk parser).
+ */
+export function linearize(messages: AgentMessage[]): WireBlock[] {
+	const out: WireBlock[] = [];
+	let order = 0;
+	let turn = 0;
+
+	let messageKey = "";
+	const push = (
+		id: string,
+		kind: WireBlock["kind"],
+		text: string,
+		extra: Partial<Pick<WireBlock, "toolName" | "callId" | "model" | "isError">> = {},
+	) => {
+		if (!text && kind !== "tool_result") return; // drop empty non-results
+		out.push({ id, kind, turn, order: order++, text, tokens: tokensFor(text), messageKey, ...extra });
+	};
+
+	messages.forEach((m, i) => {
+		messageKey = `m${i}`;
+		switch (m.role) {
+			case "user": {
+				turn += 1;
+				push(blockId(m, i), "user", textOf(m.content));
+				break;
+			}
+			case "assistant": {
+				const parts = Array.isArray(m.content) ? (m.content as MessagePart[]) : [];
+				parts.forEach((b, j) => {
+					if (b?.type === "thinking") push(blockId(m, i, j), "thinking", (b as ThinkingPart).thinking || "", { model: m.model });
+					else if (b?.type === "text") push(blockId(m, i, j), "text", (b as TextPart).text || "", { model: m.model });
+					else if (b?.type === "toolCall") {
+						const c = b as ToolCallPart;
+						push(blockId(m, i, j), "tool_call", `${c.name} ${JSON.stringify(c.arguments ?? {})}`, {
+							toolName: c.name,
+							callId: c.id,
+							model: m.model,
+						});
+					}
+				});
+				break;
+			}
+			case "toolResult": {
+				push(blockId(m, i), "tool_result", textOf(m.content), {
+					toolName: m.toolName || "tool",
+					callId: m.toolCallId,
+					isError: !!m.isError,
+				});
+				break;
+			}
+			default: {
+				if (typeof m.summary === "string" && m.summary) push(blockId(m, i), "text", m.summary);
+			}
+		}
+	});
+
+	return out;
+}
+
+/** Convert a wire block back into a full engine Block (fresh, auto-controlled). */
+export function wireToBlock(w: WireBlock): Block {
+	return {
+		id: w.id,
+		kind: w.kind,
+		turn: w.turn,
+		order: w.order,
+		text: w.text,
+		tokens: w.tokens,
+		toolName: w.toolName,
+		callId: w.callId,
+		model: w.model,
+		isError: w.isError,
+		override: null,
+		autoFolded: false,
+		by: null,
+	};
+}
+
+/** The durable block ids a single message emits + its tool-pair callIds (mirrors `linearize`). */
+export interface MsgInfo {
+	ids: string[];
+	calls: string[]; // callIds of this message's tool_call parts
+	results: string[]; // callId of this message, if it is a tool_result
+	hasNonDurable: boolean; // any emitted id is positional → message is never group-removable
+}
+
+export function messageInfo(m: AgentMessage, i: number): MsgInfo {
+	const ids: string[] = [];
+	const calls: string[] = [];
+	const results: string[] = [];
+	let hasNonDurable = false;
+	const push = (id: string) => {
+		ids.push(id);
+		if (!isDurableId(id)) hasNonDurable = true;
+	};
+	switch (m.role) {
+		case "user":
+			push(blockId(m, i));
+			break;
+		case "assistant": {
+			const parts = Array.isArray(m.content) ? (m.content as MessagePart[]) : [];
+			parts.forEach((b, j) => {
+				// Mirror linearize: empty non-result parts are not emitted, so they are not members.
+				if (b?.type === "thinking") {
+					if ((b as ThinkingPart).thinking) push(blockId(m, i, j));
+				} else if (b?.type === "text") {
+					if ((b as TextPart).text) push(blockId(m, i, j));
+				} else if (b?.type === "toolCall") {
+					push(blockId(m, i, j));
+					const id = (b as ToolCallPart).id;
+					if (id) calls.push(id);
+				}
+			});
+			break;
+		}
+		case "toolResult":
+			push(blockId(m, i));
+			if (m.toolCallId) results.push(m.toolCallId);
+			break;
+		default:
+			if (typeof m.summary === "string" && m.summary) push(blockId(m, i));
+	}
+	return { ids, calls, results, hasNonDurable };
+}
