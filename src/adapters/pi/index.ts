@@ -22,7 +22,10 @@ import { ModelConductor } from "../../core/policy/model";
 import { PrefixStableKeel } from "../../core/policy/prefix-stable";
 import { FoldLadderConductor } from "../../core/policy/fold-ladder";
 import { ContextFoldEngine, type FoldConfig } from "./store";
-import { SeedIndexStore, emitFoldIndex } from "./index-store";
+import { SeedIndexStore, emitFoldIndex, emitCompactIndex } from "./index-store";
+import { renderDetCompactionSummary } from "./compact";
+import { registerHandoffCommand } from "./handoff";
+import { linearize, type WireBlock } from "../../core/block";
 import { registerFoldTools } from "./unfold-tool";
 import { fetchDigestWriter, DEFAULT_WRITER_CONFIG, type DigestWriter } from "../../core/model/digest-writer";
 import { fetchRelevanceJudge, DEFAULT_JUDGE_CONFIG, type RelevanceJudge } from "../../core/model/relevance-judge";
@@ -32,6 +35,7 @@ import { SpoolStore } from "./spool";
 import { recordGateFold, recordLayer, recordLayerBreak, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
 import { spoolRetainMsFromEnv, sweepSpools } from "./retention";
 import { CacheTelemetry } from "./cache-telemetry";
+import { advise } from "./advisor";
 
 // Qwen3.5-4B-MTP: benchmarked against the 9B for this task — 3.3× faster decode (~116 tok/s via
 // multi-token prediction), identical digest quality (100% buried-identifier retention), and lighter
@@ -40,8 +44,9 @@ const DEFAULT_MODEL = "Qwen3.5-4B-MTP-GGUF";
 
 // ≤6 lines. Teaches the L0 pointer contract; positive framing (says when to reach for recall).
 const L0_TEACHING = [
-	"Context note: large tool results in your context may appear folded to a short `{#<code> FOLDED}` pointer that keeps the head, tail, and any error/risk lines. The full result is preserved on disk.",
-	"When you need detail a pointer does not show, call `recall {code}` for the whole result, or `recall {code} grep=<term>` / `recall {code} lines=<a-b>` to pull just the slice you need.",
+	"Context note: large or stale tool results in your context may appear folded to a short `{#<code> FOLDED}` pointer that keeps the head, tail, and any error/risk lines. The full result is preserved on disk.",
+	"Looking for a detail but unsure which folded block holds it? `recall search=<term>` sweeps EVERY folded block in one call — prefer it over recalling pointers one by one.",
+	"When you need detail from a specific pointer, call `recall {code}` for the whole result, or `recall {code} grep=<term>` / `recall {code} lines=<a-b>` for just the slice you need.",
 	"Reach for `unfold {code}` when you want a folded result kept expanded across your next turns.",
 ].join("\n");
 
@@ -120,6 +125,33 @@ export default function contextFold(pi: ExtensionAPI): void {
 	const debug = process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true";
 	const dumpPath = process.env.CONTEXTFOLD_DUMP?.trim() || null;
 	const telemetry = new CacheTelemetry();
+
+	// ── advisory state (display-only; nothing here gates a turn) ─────────────────────────────────
+	let compactions = 0;
+	let lastContextWindow: number | null = null;
+	let wasCold = false;
+	const buildAdvisory = () => {
+		const t = telemetry.snapshot();
+		const m = engine.status?.metrics ?? {};
+		const carried = t.last
+			? t.last.cacheRead + t.last.input
+			: typeof m.live_tokens === "number"
+				? m.live_tokens
+				: null;
+		return advise({
+			turns: t.turns,
+			everWarm: t.everWarm,
+			lastCacheRead: t.last?.cacheRead ?? 0,
+			lastInput: t.last?.input ?? 0,
+			carriedTokens: carried,
+			contextWindow: lastContextWindow,
+			irreducibleFloor: typeof m.irreducible_floor === "number" ? m.irreducible_floor : null,
+			reconTokens: acfg.reconTokens,
+			recallCalls: engine.recallStats.calls,
+			maxRecallsPerCode: engine.recallStats.maxPerCode,
+			compactions,
+		});
+	};
 
 	let spool: SpoolStore | null = null;
 	let spoolKey = "";
@@ -248,6 +280,17 @@ export default function contextFold(pi: ExtensionAPI): void {
 		if (message.role !== "assistant" || !message.usage) return;
 		telemetry.record(message.usage);
 		if (debug) process.stderr.write(`[context-fold] ${telemetry.statusLine()}\n`);
+		// Cold-session notification: one line at the START of a cold streak, never per-turn nagging.
+		const adv = buildAdvisory();
+		if (adv.coldNow && !wasCold) {
+			const t = telemetry.snapshot();
+			const carried = t.last ? t.last.cacheRead + t.last.input : 0;
+			if (carried >= 20_000)
+				process.stderr.write(
+					`[context-fold] session cold — this turn re-billed ~${Math.round(carried / 1000)}k tok as fresh input; consider /new (reconstruction ≈ ${Math.round(acfg.reconTokens / 1000)}k tok via the seed index)\n`,
+				);
+		}
+		wasCold = adv.coldNow;
 		if (dumpPath) {
 			// e2e seam, sibling of the view dump: never change the CONTEXTFOLD_DUMP payload
 			// itself (e2e-gate.sh parses it as a message array).
@@ -266,6 +309,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			// a mid-session model switch takes effect immediately, and a resumed session with the gate
 			// off renders prior folds raw instead of substituting pointers (D20).
 			engine.setGateActive(resolveGate(ctx.model).enabled);
+			lastContextWindow = ctx.getContextUsage()?.contextWindow ?? lastContextWindow;
 			// Ladder cold branch: no live cache read observed after a few turns ⇒ there is no warm
 			// prefix to protect, so the ladder folds earlier and more freely (measured, not assumed).
 			if (ladderPolicy) {
@@ -275,12 +319,15 @@ export default function contextFold(pi: ExtensionAPI): void {
 			// Fold-event → seed-index emission. Bound per turn so the emitter sees this ctx's stores.
 			engine.onFoldEvent = (foldEvent) => {
 				try {
-					const rec = emitFoldIndex(foldEvent, {
+					const { record: rec, newEntries } = emitFoldIndex(foldEvent, {
 						spool: spoolFor(ctx),
 						registry,
 						index: indexFor(ctx),
 						sessionId: ctx.sessionManager.getSessionId(),
 					});
+					// Event-source the ladder's spool registrations like L0 folds, so recall-by-code
+					// survives resume AND hard compaction (which removes the raw message from history).
+					for (const entry of newEntries) recordGateFold(pi, entry);
 					if (debug)
 						process.stderr.write(
 							`[context-fold] seed-index seq=${rec.seq} (${rec.trigger}): ${rec.spans.length} spans, ${rec.identifiers.length} ids, ${rec.errors.length} errors\n`,
@@ -314,16 +361,66 @@ export default function contextFold(pi: ExtensionAPI): void {
 		}
 	});
 
+	// HARD COMPACTION (the hard floor): the automatic path NEVER summarizes with a model. With
+	// CONTEXTFOLD_COMPACT=det (default) we hand Pi a deterministic summary rendered verbatim from
+	// the seed index — no hallucination surface, every listed token a lexical hook for recall —
+	// after emitting one final "compact" index record for the span leaving live history.
+	// CONTEXTFOLD_COMPACT=native leaves Pi's own compaction untouched. Fail-open: any error here
+	// falls through to Pi's default behavior.
+	pi.on("session_before_compact", (event, ctx) => {
+		compactions++;
+		if (acfg.compact !== "det") return;
+		try {
+			const prep = (event as { preparation: { messagesToSummarize: unknown[]; turnPrefixMessages: unknown[]; tokensBefore: number; firstKeptEntryId: string; previousSummary?: string } }).preparation;
+			const index = indexFor(ctx);
+			const blocks = linearize(prep.messagesToSummarize as unknown as CoreAgentMessage[]) as unknown as WireBlock[];
+			emitCompactIndex(blocks, {
+				registry,
+				index,
+				sessionId: ctx.sessionManager.getSessionId(),
+				tokensBefore: prep.tokensBefore,
+				contextWindow: lastContextWindow,
+			});
+			const summary = renderDetCompactionSummary({
+				records: index.readAll(),
+				spoolDir: join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId()),
+				previousSummary: prep.previousSummary,
+			});
+			if (debug)
+				process.stderr.write(`[context-fold] det compaction: ${prep.tokensBefore} tok summarized deterministically (no model)\n`);
+			return { compaction: { summary, firstKeptEntryId: prep.firstKeptEntryId, tokensBefore: prep.tokensBefore } };
+		} catch (err) {
+			process.stderr.write(
+				`[context-fold] det compaction failed (falling back to Pi default): ${err instanceof Error ? err.message : String(err)}\n`,
+			);
+			return;
+		}
+	});
+
 	registerFoldTools(pi, engine, (ids) => recordUnfold(pi, ids));
+	registerHandoffCommand(pi, {
+		indexFor: (hctx) => indexFor(hctx as Parameters<typeof indexFor>[0]),
+		spoolDirFor: (hctx) => join(hctx.sessionManager.getSessionDir(), "spool", hctx.sessionManager.getSessionId()),
+	});
 
 	// A display-only status command (no-op safe in headless mode — pure text).
 	pi.registerCommand("context-fold", {
-		description: "Report automatic context-fold status (this does not manually trigger a pass).",
+		description: "Report context-fold status: fold position, cache health, and the reset yellow flag.",
 		handler: async (_args, cmdCtx) => {
 			const s = engine.status;
+			const m = s?.metrics ?? {};
 			const state = s?.text ? s.text : "idle (under budget)";
-			const line = `context-fold (automatic): ${state} · L0 ${activeGate ? "on" : "off"} · model ${activeModelIdentity} · ${telemetry.statusLine()}`;
-			cmdCtx.ui?.notify?.(line, "info");
+			const pos =
+				ladderMode && typeof m.usage_fraction === "number"
+					? ` · usage ${Math.round((m.usage_fraction as number) * 100)}%${typeof m.fold_at === "number" ? ` (next fold ≥ ${Math.round((m.fold_at as number) * 100)}%)` : ""}`
+					: "";
+			const adv = buildAdvisory();
+			const lines = [
+				`context-fold [${acfg.mode}]: ${state}${pos} · L0 ${activeGate ? "on" : "off"} · model ${activeModelIdentity}`,
+				`${telemetry.statusLine()}${adv.coldNow ? " · COLD" : ""}${adv.paybackTurns !== null ? ` · reset pays back in ~${adv.paybackTurns} warm turns` : ""}`,
+				...adv.flags.map((f) => `⚑ ${f}`),
+			];
+			cmdCtx.ui?.notify?.(lines.join("\n"), adv.flags.length ? "warning" : "info");
 		},
 	});
 }

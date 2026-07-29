@@ -144,6 +144,17 @@ export interface RecallOptions {
 
 /** Cap a recall slice to roughly the pointer budget before nudging the agent to narrow the query. */
 const RECALL_SLICE_TOKEN_CAP = 500;
+/** Cap a cross-fold search sweep (span recall) — generous enough to cover many pointers at once,
+ *  small enough that one sweep can't re-flood what folding saved. */
+const SEARCH_TOKEN_CAP = 1000;
+
+/** One folded block's hits from a cross-fold search sweep. */
+export interface SearchHit {
+	code: string;
+	label: string;
+	/** Matching lines, `<lineNo>: <text>` numbered against the block's full content. */
+	lines: string[];
+}
 /**
  * Cap on a WHOLE-result recall (no grep/lines). Matches the gate's default fold threshold: recall
  * never hands back more warm tokens than the gate would have let through unfolded, so one recall
@@ -195,6 +206,12 @@ export class ContextFoldEngine {
 
 	// ── L0 ingestion gate: registry of born-folded blocks (recall reads the spool by entry path) ──
 	private readonly gate: GateRegistry;
+
+	// ── recall-churn accounting (display-only; feeds the reset yellow flag) ──────────────────────
+	/** Total recall/search tool invocations this session. */
+	private recallCallCount = 0;
+	/** Per-code recall counts — a code recalled again and again is the measured churn signature. */
+	private readonly recallByCode = new Map<string, number>();
 
 	// ── Stage 2: prefix-stable frozen layers ─────────────────────────────────────────────────────
 	/** Committed layers, oldest first. Substitution bytes are fixed; unfold masks per id at render. */
@@ -258,6 +275,8 @@ export class ContextFoldEngine {
 
 	/** Reset per-session state (session switch in one process): unfolds, caches, group registry. */
 	resetForSession(): void {
+		this.recallCallCount = 0;
+		this.recallByCode.clear();
 		this.unfolded.clear();
 		this.snapshot = new Map();
 		this.groupCodes.clear();
@@ -430,6 +449,10 @@ export class ContextFoldEngine {
 		for (const b of blocks) {
 			const e = this.gate.get(b.id);
 			if (!e || this.unfolded.has(b.id)) continue;
+			// A FROZEN id renders its committed layer bytes, not a pointer: ladder-masked blocks are
+			// registered (spool-backed recall must survive hard compaction), but their in-view form is
+			// owned by the frozen layer — swapping in a pointer here would silently move frozen bytes.
+			if (this.frozenById.has(b.id)) continue;
 			out.set(b.id, pointerDigest(b.text, pointerMetaOf(e)));
 		}
 		return out;
@@ -476,6 +499,11 @@ export class ContextFoldEngine {
 	 * resolve from the in-memory snapshot; grep/lines are ignored for them.
 	 */
 	resolveRecall(codes: string[], opts: RecallOptions = {}): { matches: CodeMatch[]; missing: string[]; errors: CodeError[] } {
+		this.recallCallCount++;
+		for (const raw of codes) {
+			const c = normalizeCode(raw);
+			this.recallByCode.set(c, (this.recallByCode.get(c) ?? 0) + 1);
+		}
 		const snapByCode = this.snapshotByCode();
 		const gateByCode = new Map<string, GateEntry>();
 		for (const e of this.gate.entries()) gateByCode.set(e.code, e);
@@ -550,6 +578,57 @@ export class ContextFoldEngine {
 			return grepContent(haystack, opts.grep as string, source);
 		}
 		return capWholeRecall(spooled);
+	}
+
+	/**
+	 * SPAN RECALL: one sweep over EVERY currently-folded block's full content (born-folded L0
+	 * pointers and frozen ladder masks alike), returning matching lines grouped by fold code.
+	 * This is the anti-churn primitive — recovering identifiers scattered across N pointers costs
+	 * one call, not N probing recalls. Line numbers agree with `recall {code} lines=<a-b>` so a
+	 * follow-up slice is always valid. Token-capped like every recall surface.
+	 */
+	searchFolded(term: string): { hits: SearchHit[]; scanned: number; note: string } {
+		this.recallCallCount++;
+		const needle = term.toLowerCase();
+		const hits: SearchHit[] = [];
+		let scanned = 0;
+		let tokens = 0;
+		let truncated = false;
+
+		const blocks = [...this.snapshot.values()].sort((a, b) => a.order - b.order);
+		for (const b of blocks) {
+			const gateEntry = this.gate.get(b.id);
+			const folded = (gateEntry !== undefined && this.gateActive) || this.frozenById.has(b.id);
+			if (!folded || this.unfolded.has(b.id)) continue;
+			scanned++;
+			const code = gateEntry?.code ?? foldCode(b.id);
+			const lines: string[] = [];
+			const all = b.text.split("\n");
+			for (let i = 0; i < all.length; i++) {
+				if (!all[i].toLowerCase().includes(needle)) continue;
+				const numbered = `${i + 1}: ${all[i]}`;
+				tokens += estTokens(numbered) + 1;
+				if (tokens > SEARCH_TOKEN_CAP && (hits.length > 0 || lines.length > 0)) {
+					truncated = true;
+					break;
+				}
+				lines.push(numbered);
+			}
+			if (lines.length) hits.push({ code, label: labelFor([b]), lines });
+			if (truncated) break;
+		}
+		const total = hits.reduce((n, h) => n + h.lines.length, 0);
+		const note = truncated
+			? `capped at ~${SEARCH_TOKEN_CAP} tok — narrow the term, or follow up with recall {code} lines=<a-b>`
+			: `${total} matching line${total === 1 ? "" : "s"} across ${hits.length} of ${scanned} folded blocks`;
+		return { hits, scanned, note };
+	}
+
+	/** Recall-churn accounting for the reset yellow flag (display-only). */
+	get recallStats(): { calls: number; maxPerCode: number } {
+		let max = 0;
+		for (const n of this.recallByCode.values()) if (n > max) max = n;
+		return { calls: this.recallCallCount, maxPerCode: max };
 	}
 
 	private snapshotByCode(): Map<string, WireBlock[]> {

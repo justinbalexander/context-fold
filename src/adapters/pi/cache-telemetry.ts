@@ -27,6 +27,8 @@ export interface CacheTelemetrySnapshot {
 	totals: TurnUsage;
 	/** Session aggregate hit ratio, null until any input-side tokens exist. */
 	hitRatio: number | null;
+	/** Any non-zero cache read observed this session — the measured "there IS a live cache" bit. */
+	everWarm: boolean;
 	/** The retained ring, oldest first (bounded). */
 	ring: TurnUsage[];
 }
@@ -77,6 +79,7 @@ export class CacheTelemetry {
 			lastHitRatio: last ? ratio(last.cacheRead, last.input) : null,
 			totals: { ...this.totals },
 			hitRatio: ratio(this.totals.cacheRead, this.totals.input),
+			everWarm: this.totals.cacheRead > 0,
 			ring: [...this.ring],
 		};
 	}

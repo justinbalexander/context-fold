@@ -21,9 +21,12 @@ const CODES_PARAMS = Type.Object({
 
 /** recall also takes optional partial-retrieval params — query a large folded result, don't dump it. */
 const RECALL_PARAMS = Type.Object({
-	codes: Type.Array(Type.String(), {
-		description: "One or more fold codes from {#<code> FOLDED} tags in your context (bare code or the full tag).",
-	}),
+	codes: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"Fold codes from {#<code> FOLDED} tags in your context (bare code or the full tag). Omit when using `search` to sweep every folded block at once.",
+		}),
+	),
 	grep: Type.Optional(
 		Type.String({
 			description: "Return only lines containing this text (case-insensitive). Ideal for pulling one detail out of a large folded result.",
@@ -32,6 +35,12 @@ const RECALL_PARAMS = Type.Object({
 	lines: Type.Optional(
 		Type.String({
 			description: 'Return only a line range, 1-based inclusive, e.g. "40-80".',
+		}),
+	),
+	search: Type.Optional(
+		Type.String({
+			description:
+				"Span search: grep EVERY folded block in one call (no codes needed) and get matching lines grouped by code. Use this instead of recalling pointers one by one.",
 		}),
 	),
 });
@@ -49,26 +58,45 @@ export function registerFoldTools(pi: ExtensionAPI, engine: ContextFoldEngine, o
 		name: "recall",
 		label: "Recall folded context",
 		description:
-			"Return the ORIGINAL content of one or more folded context blocks, identified by the short " +
-			"code in their {#<code> FOLDED} tag. Read-only: the blocks stay folded in your standing " +
-			"context. For a large folded result (an L0 pointer), pass grep=<term> or lines=<a-b> to pull " +
-			"just the slice you need instead of the whole thing — the full text is on disk in the spool.",
-		promptSnippet: "recall({codes, grep?, lines?}) — read folded content whole, or by grep/line-range, without un-folding it.",
+			"Return the ORIGINAL content of folded context blocks. Two forms: (1) codes from " +
+			"{#<code> FOLDED} tags — whole content, or sliced with grep=<term> / lines=<a-b>; " +
+			"(2) search=<term> with no codes — ONE sweep over every folded block, returning matching " +
+			"lines grouped by code. Read-only: blocks stay folded. Full text is on disk in the spool.",
+		promptSnippet:
+			"recall({codes?, grep?, lines?, search?}) — read folded content by code, or span-search ALL folded blocks in one call.",
 		promptGuidelines: [
-			"When you see a {#<code> FOLDED} marker and need original detail, call recall with that code.",
-			"For a big folded result, prefer recall {code} grep=<term> or lines=<a-b> to fetch only the part you need.",
-			"recall is a one-shot read; the block stays folded. Use unfold to keep the whole block expanded.",
+			"Looking for a detail but unsure which folded block holds it? Use recall search=<term> — one call sweeps everything folded.",
+			"When you see a {#<code> FOLDED} marker and need that block, call recall with the code; add grep=<term> or lines=<a-b> to fetch only the part you need.",
+			"recall is a one-shot read; the block stays folded. Use unfold to keep a block expanded.",
 		],
 		parameters: RECALL_PARAMS,
 		async execute(_toolCallId, params) {
-			const { matches, missing, errors } = engine.resolveRecall(params.codes, { grep: params.grep, lines: params.lines });
+			type RecallDetails = { recalled?: string[]; missing?: string[]; errors?: string[]; searched?: string; hits?: string[] };
+			const codes = params.codes ?? [];
+			if (params.search && codes.length === 0) {
+				const { hits, note } = engine.searchFolded(params.search);
+				const body = hits.map((h) => `=== ${h.code} (${h.label}) ===\n${h.lines.join("\n")}`).join("\n\n");
+				const text = hits.length
+					? `search "${params.search}" — ${note}\n\n${body}`
+					: `search "${params.search}" — no matching lines in any folded block (${note})`;
+				const details: RecallDetails = { searched: params.search, hits: hits.map((h) => h.code) };
+				return { content: [{ type: "text" as const, text }], details };
+			}
+			if (codes.length === 0) {
+				const details: RecallDetails = {};
+				return {
+					content: [{ type: "text" as const, text: "No codes provided (pass codes, or search=<term> to sweep all folded blocks)." }],
+					details,
+				};
+			}
+			// codes + search but no grep: treat search as the slice term for those codes.
+			const grep = params.grep ?? params.search;
+			const { matches, missing, errors } = engine.resolveRecall(codes, { grep, lines: params.lines });
 			const body = matches.map((m) => `=== ${m.code} (${m.label})${m.note ? ` — ${m.note}` : ""} ===\n${m.text}`).join("\n\n");
 			const header = summarize(matches, missing, errors);
 			const text = matches.length ? `${header}\n\n${body}` : header || "No codes provided.";
-			return {
-				content: [{ type: "text", text }],
-				details: { recalled: matches.map((m) => m.code), missing, errors: errors.map((e) => e.code) },
-			};
+			const details: RecallDetails = { recalled: matches.map((m) => m.code), missing, errors: errors.map((e) => e.code) };
+			return { content: [{ type: "text" as const, text }], details };
 		},
 	});
 

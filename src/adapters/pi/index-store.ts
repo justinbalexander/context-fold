@@ -13,10 +13,11 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { extractIndex, buildIndexRecord, type IndexBlock, type IndexSpan, type SeedIndexRecord } from "../../core/index/seed-index";
 import { foldCode } from "../../core/digest";
+import { BLOCK_OVERHEAD } from "../../core/tokens";
 import type { WireBlock } from "../../core/block";
 import type { FoldEventReport } from "./store";
 import type { SpoolStore } from "./spool";
-import type { GateRegistry } from "../../core/gate-registry";
+import type { GateEntry, GateRegistry } from "../../core/gate-registry";
 
 export const INDEX_FILENAME = "seed-index.jsonl";
 export const INDEX_HARNESS = "pi-context-fold";
@@ -68,7 +69,7 @@ export function emitFoldIndex(
 		sessionId: string;
 		now?: number;
 	},
-): SeedIndexRecord {
+): { record: SeedIndexRecord; newEntries: GateEntry[] } {
 	const byId = new Map(event.blocks.map((b) => [b.id, b] as const));
 	const masked: WireBlock[] = [];
 	for (const id of event.maskedIds) {
@@ -77,6 +78,7 @@ export function emitFoldIndex(
 	}
 
 	const spans: IndexSpan[] = [];
+	const newEntries: GateEntry[] = [];
 	for (const b of masked) {
 		const gateEntry = deps.registry.get(b.id);
 		if (gateEntry) {
@@ -114,6 +116,24 @@ export function emitFoldIndex(
 					lines: countLines(b.text),
 				},
 			});
+			// Register the spooled mask so recall-by-code survives HARD compaction (once Pi removes
+			// the raw message from history, the snapshot path is gone; the registry + spool is the
+			// durable route). In the live view the frozen layer's bytes still win — the engine skips
+			// frozen ids when substituting pointers.
+			const entry: GateEntry = {
+				blockId: b.id,
+				code,
+				fullTokens: b.tokens + BLOCK_OVERHEAD,
+				tool: b.toolName ?? b.kind,
+				input: undefined,
+				isError: b.isError ?? false,
+				bytes: res.envelope.bytes,
+				fullEstTokens: res.envelope.estTokens,
+				spoolPath: deps.spool.pathFor(code),
+				dedupOf: res.dedupOf,
+			};
+			deps.registry.set(entry);
+			newEntries.push(entry);
 		} catch {
 			// Fold-code collision or disk trouble: the span is lost but the record still carries the
 			// lexical fields, and recall-from-snapshot still works — degrade, don't abort.
@@ -134,6 +154,58 @@ export function emitFoldIndex(
 			},
 		},
 		extractIndex({ masked: masked as unknown as IndexBlock[], all: event.blocks as unknown as IndexBlock[] }),
+		spans,
+	);
+	deps.index.append(record);
+	return { record, newEntries };
+}
+
+/**
+ * Emit the FINAL index record at hard compaction: the whole span being summarized is about to
+ * leave live history, so index it all (Pi's session JSONL keeps the raw entries; spooled blocks
+ * additionally carry spans here). Returns the record for the det-summary renderer.
+ */
+export function emitCompactIndex(
+	blocks: WireBlock[],
+	deps: {
+		registry: GateRegistry;
+		index: SeedIndexStore;
+		sessionId: string;
+		tokensBefore: number;
+		contextWindow: number | null;
+		now?: number;
+	},
+): SeedIndexRecord {
+	const masked = blocks.filter((b) => b.kind !== "user");
+	const spans: IndexSpan[] = [];
+	for (const b of masked) {
+		const e = deps.registry.get(b.id);
+		if (!e) continue;
+		spans.push({
+			blockId: b.id,
+			code: e.code,
+			tool: e.tool,
+			turn: b.turn,
+			log: { path: e.spoolPath, byteStart: 0, byteEnd: e.bytes, lines: countLines(b.text) },
+			fullOutputPath: e.fullOutputPath,
+		});
+	}
+	const seq = deps.index.readAll().reduce((m, r) => Math.max(m, r.seq), 0) + 1;
+	const cw = deps.contextWindow ?? 0;
+	const record = buildIndexRecord(
+		{
+			harness: INDEX_HARNESS,
+			session: deps.sessionId,
+			seq,
+			at: new Date(deps.now ?? Date.now()).toISOString(),
+			trigger: "compact",
+			usage: {
+				tokens: deps.tokensBefore,
+				contextWindow: cw,
+				fraction: cw > 0 ? Math.round((deps.tokensBefore / cw) * 1000) / 1000 : 0,
+			},
+		},
+		extractIndex({ masked: masked as unknown as IndexBlock[], all: blocks as unknown as IndexBlock[] }),
 		spans,
 	);
 	deps.index.append(record);
