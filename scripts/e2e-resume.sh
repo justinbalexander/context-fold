@@ -13,7 +13,7 @@ set -uo pipefail
 
 PROVIDER="${E2E_PROVIDER:-openai-codex}"
 MODEL="${E2E_MODEL:-gpt-5.6-sol}"
-PI="${PI_BIN:-${WILLOW_BIN:-$(command -v pi || echo "$HOME/.local/bin/pi")}}"
+PI="${PI_BIN:-$(command -v pi || echo "$HOME/.local/bin/pi")}"
 [[ -x "$PI" ]] || { echo "FAIL: pi binary not found ($PI)"; exit 2; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cf-resume-XXXXXX")"

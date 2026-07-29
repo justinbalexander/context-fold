@@ -15,7 +15,7 @@ import type { AgentMessage, FoldOp, GroupOp, Group, WireBlock } from "../../core
 import { linearize, isDurableId, wireToBlock } from "../../core/block";
 import { applyPlan } from "../../core/apply";
 import { digest, wireFoldable, foldCode, foldTag, groupDigest, pointerDigest, substTokens, type PointerMeta } from "../../core/digest";
-import { estTokens, firstLine, BLOCK_OVERHEAD } from "../../core/tokens";
+import { estTokens, firstLine, safeSlice, BLOCK_OVERHEAD } from "../../core/tokens";
 import { MapGateRegistry, type GateRegistry, type GateEntry } from "../../core/gate-registry";
 import { readEnvelopeAt, SpoolError } from "./spool";
 import { readFileSync } from "node:fs";
@@ -605,8 +605,10 @@ export class ContextFoldEngine {
 			const lines: string[] = [];
 			const all = b.text.split("\n");
 			for (let i = 0; i < all.length; i++) {
-				if (!all[i].toLowerCase().includes(needle)) continue;
-				const numbered = `${i + 1}: ${all[i]}`;
+				const idx = all[i].toLowerCase().indexOf(needle);
+				if (idx === -1) continue;
+				// Match-centered window — the single-huge-line guard applies to the sweep too.
+				const numbered = `${i + 1}: ${clipLineTo(all[i], GREP_LINE_CHAR_CAP, idx)}`;
 				tokens += estTokens(numbered) + 1;
 				if (tokens > SEARCH_TOKEN_CAP && (hits.length > 0 || lines.length > 0)) {
 					truncated = true;
@@ -961,6 +963,28 @@ export class ContextFoldEngine {
 	}
 }
 
+/**
+ * Clip one line to a character budget. THE single-huge-line guard: a payload that is one
+ * enormous line (minified JS, JSONL, base64, a shell wrapper echoing a file as one string)
+ * must not ride through any recall cap on an "always keep at least one line" rule — that is
+ * exactly the re-flood hole (a live `recall lines=2-2` once returned a 40KB line and undid
+ * everything the gate saved). When `around` is given the window CENTERS on it, so a grep
+ * match deep inside the line stays visible.
+ */
+function clipLineTo(line: string, maxChars: number, around?: number): string {
+	if (line.length <= maxChars) return line;
+	if (around === undefined || around <= maxChars / 2) {
+		return `${safeSlice(line, maxChars)}…[line clipped: ${line.length} chars — grep=<term> targets content inside it]`;
+	}
+	const start = Math.min(Math.max(0, around - Math.floor(maxChars / 2)), line.length - maxChars);
+	return `[…chars ${start + 1}-${start + maxChars} of ${line.length}…] ${safeSlice(line.slice(start), maxChars)}…`;
+}
+
+/** Max chars a single kept line may occupy inside a capped recall (leaves cap headroom). */
+const RECALL_LINE_CHAR_CAP = (RECALL_WHOLE_TOKEN_CAP - 200) * 4;
+/** Grep/search hit lines are windows, not reads — keep them short and match-centered. */
+const GREP_LINE_CHAR_CAP = 320;
+
 /** Return the 1-based inclusive line range `a-b` of `content` (partial recall), token-capped. */
 function sliceByLines(content: string, spec: string, source: string): { text: string; note?: string } {
 	const m = /^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(spec);
@@ -970,19 +994,23 @@ function sliceByLines(content: string, spec: string, source: string): { text: st
 	const b = Math.min(lines.length, parseInt(m[2], 10));
 	if (a > b) return { text: "", note: `empty range ${a}-${b} (${source} has ${lines.length} lines)` };
 	// Token-cap the slice: lines= must stay PARTIAL retrieval (an unbounded range would hand the
-	// whole flood back and undo the gate's savings in one call).
+	// whole flood back and undo the gate's savings in one call). Every line is char-clipped too —
+	// the cap must hold even when the "range" is one enormous line.
 	const kept: string[] = [];
 	let tokens = 0;
+	let clipped = false;
 	for (let i = a - 1; i < b; i++) {
-		const numbered = `${i + 1}: ${lines[i]}`;
+		const body = clipLineTo(lines[i], RECALL_LINE_CHAR_CAP);
+		if (body !== lines[i]) clipped = true;
+		const numbered = `${i + 1}: ${body}`;
 		tokens += estTokens(numbered) + 1;
 		if (kept.length > 0 && tokens > RECALL_WHOLE_TOKEN_CAP) break;
 		kept.push(numbered);
 	}
 	const last = a + kept.length - 1;
 	const note =
-		last < b
-			? `lines ${a}-${last} of ${a}-${b} requested (${source}, ~${RECALL_WHOLE_TOKEN_CAP} tok cap) — narrow the range or grep`
+		last < b || clipped
+			? `lines ${a}-${last} of ${a}-${b} requested (${source}, ~${RECALL_WHOLE_TOKEN_CAP} tok cap${clipped ? ", long line clipped" : ""}) — narrow the range or grep`
 			: `lines ${a}-${b} of ${lines.length} (${source})`;
 	return { text: kept.join("\n"), note };
 }
@@ -993,14 +1021,22 @@ function capWholeRecall(content: string): { text: string; note?: string } {
 	const lines = content.split("\n");
 	const kept: string[] = [];
 	let tokens = 0;
+	let clipped = false;
 	for (const l of lines) {
-		tokens += estTokens(l) + 1;
+		const body = clipLineTo(l, RECALL_LINE_CHAR_CAP);
+		if (body !== l) clipped = true;
+		tokens += estTokens(body) + 1;
 		if (kept.length > 0 && tokens > RECALL_WHOLE_TOKEN_CAP) break;
-		kept.push(l);
+		kept.push(body);
 	}
+	// When a long line was clipped, say exactly what to do next — an agent that only sees
+	// "…clipped" tends to stop; the unseen content is reachable ONLY through grep.
+	const clipNote = clipped
+		? " · LONG LINE CLIPPED: unseen content inside it is reachable only via recall {code} grep=<term> — grep for the exact token you need"
+		: " — use lines=<a-b> or grep=<term> for the rest";
 	return {
 		text: kept.join("\n"),
-		note: `result is ~${estTokens(content)} tok; showing lines 1-${kept.length} of ${lines.length} (~${RECALL_WHOLE_TOKEN_CAP} tok cap) — use lines=<a-b> or grep=<term> for the rest`,
+		note: `result is ~${estTokens(content)} tok; showing lines 1-${kept.length} of ${lines.length} (~${RECALL_WHOLE_TOKEN_CAP} tok cap)${clipNote}`,
 	};
 }
 
@@ -1015,7 +1051,11 @@ function grepContent(haystack: string, term: string, source: string): { text: st
 	const hits: string[] = [];
 	const linesArr = haystack.split("\n");
 	for (let i = 0; i < linesArr.length; i++) {
-		if (linesArr[i].toLowerCase().includes(needle)) hits.push(`${i + 1}: ${linesArr[i]}`);
+		const idx = linesArr[i].toLowerCase().indexOf(needle);
+		if (idx === -1) continue;
+		// Window huge lines AROUND the match — grep is for finding, and the found term must stay
+		// visible even at char 30,000 of a one-line flood.
+		hits.push(`${i + 1}: ${clipLineTo(linesArr[i], GREP_LINE_CHAR_CAP, idx)}`);
 	}
 	if (hits.length === 0) return { text: "", note: `no lines match "${term}" (searched ${source}, ${linesArr.length} lines)` };
 	const kept: string[] = [];

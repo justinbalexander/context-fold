@@ -1,15 +1,17 @@
 /*
- * index.ts — the context-fold Pi/Willow extension entry point.
+ * index.ts — the context-fold Pi extension entry point.
  *
- * Wires the deterministic Keel policy into Pi's per-turn `context` hook: before every model call
- * Pi hands us a deep copy of the outgoing message array; we replace the content of cold blocks
- * with short reversible digests and return it. The real session history is never touched — folding
- * lives only in the outgoing copy. The agent pulls any folded block back with the `unfold`/`recall`
- * tools by its `{#<code> FOLDED}` handle.
+ * Wires the folding policy into Pi's per-turn `context` hook: before every model call Pi hands
+ * us a deep copy of the outgoing message array; we replace the content of stale blocks with
+ * short reversible digests and return it. The real session history is never touched — folding
+ * lives only in the outgoing copy. The agent pulls any folded block back with the
+ * `unfold`/`recall` tools by its `{#<code> FOLDED}` handle.
  *
- * Phases (all opt-in via env; default install is the deterministic Phase-1 path):
- *   • CONTEXTFOLD_MODEL=<id|1>   — Phase 2 rep 1: a local model writes the cold-zone digests.
- *   • CONTEXTFOLD_COLDNESS=1     — Phase 2 rep 2: the model also decides which cold blocks stay warm.
+ * Modes (CONTEXTFOLD_MODE):
+ *   • ladder (default) — discrete fold events masking stale observations into prefix-stable
+ *     frozen layers, with a deterministic seed index emitted at every event. Model-free.
+ *   • keel — the legacy continuous conductor; CONTEXTFOLD_MODEL / CONTEXTFOLD_COLDNESS
+ *     (opt-in local-model digests / coldness) apply only here.
  * Fully autonomous (no UI prompts) — runs identically headless.
  */
 import { writeFileSync } from "node:fs";

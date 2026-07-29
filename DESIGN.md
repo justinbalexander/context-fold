@@ -1,7 +1,14 @@
 # context-fold — Design Note
 
+> **2026-07-28 rebuild:** this note describes the ORIGINAL architecture (continuous Keel
+> folding, now the legacy `CONTEXTFOLD_MODE=keel` path). The shipped default is the discrete
+> fold ladder — B/C/A layered compaction with a deterministic seed index — designed in
+> `plans/2026-07-28-rebuild.plan.md` and specced in `docs/SEED_INDEX_SPEC.md`. The mechanism
+> layer below (blocks, digests, applyPlan, the L0 gate, the spool) is shared by both modes and
+> still accurate.
+
 Reversible in-session context compaction for CLI coding agents. Harness-agnostic core,
-thin per-harness adapters. First target: the Pi/Willow agent (`@earendil-works/pi-*`).
+thin per-harness adapters. First target: the Pi agent (`@earendil-works/pi-*`).
 
 > Companion docs in this repo:
 > - `docs/accordion-port-spec.md` — implementation-ready extraction of Accordion's fold

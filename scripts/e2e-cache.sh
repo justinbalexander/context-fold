@@ -22,7 +22,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PI="${PI_BIN:-${WILLOW_BIN:-$(command -v pi || echo "$HOME/.local/bin/pi")}}"
+PI="${PI_BIN:-$(command -v pi || echo "$HOME/.local/bin/pi")}"
 PROVIDER="${E2E_PROVIDER:-lemonade-current}"
 MODEL="${E2E_MODEL:-current}"
 LEMONADE_EXT="${LEMONADE_EXT:-$REPO/../lemonade-current/index.ts}"
@@ -30,7 +30,7 @@ CAP="${E2E_CAP:-1200}"
 
 if [[ ! -x "$PI" ]]; then echo "FAIL: pi binary not found ($PI)"; exit 2; fi
 if [[ ! -f "$LEMONADE_EXT" ]]; then echo "FAIL: lemonade extension not found ($LEMONADE_EXT)"; exit 2; fi
-if ! curl -sf -m 3 "${WILLOW_LEMONADE_CONTROL_URL:-http://127.0.0.1:13305}/api/v1/models" >/dev/null; then
+if ! curl -sf -m 3 "${LEMONADE_CONTROL_URL:-http://127.0.0.1:13305}/api/v1/models" >/dev/null; then
   echo "SKIP: lemonade server not reachable"; exit 0
 fi
 
@@ -47,6 +47,10 @@ run_session() { # $1=tag $2=prefix_stable
   mkdir -p "$sess"
   local -a turns=("$FLOOD_PROMPT" "Reply with only the word OK." "Reply with only the word OK again.")
   for n in 1 2 3; do
+    # Pinned to keel mode: this script proves the ORIGINAL Stage-2 prefix-stable mechanism
+    # (assistant-echo floods; the default ladder masks only observations, so it would
+    # correctly refuse to fold this flood). The ladder's live proof is e2e-ladder.sh.
+    CONTEXTFOLD_MODE=keel \
     CONTEXTFOLD_L0=0 CONTEXTFOLD_DEBUG=1 CONTEXTFOLD_BUDGET_CAP="$CAP" \
     CONTEXTFOLD_PREFIX_STABLE="$stable" CONTEXTFOLD_DUMP="$dump" \
       "$PI" -p --mode json --session-dir "$sess" --session-id "$sid" \

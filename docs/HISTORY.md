@@ -1,5 +1,34 @@
 # context-fold — build history & evidence log
 
+## Phase 7 — the rebuild ✅ (2026-07-28)
+
+Redesign per `docs/HANDOFF_REBUILD_2026-07-28.md` (evidence: the compaction literature review +
+the Sol campaign verdict that demoted the full Keel ladder): B/C/A layered compaction with the
+**discrete fold ladder** as the new default (`CONTEXTFOLD_MODE=ladder`), continuous Keel demoted
+to `CONTEXTFOLD_MODE=keel`.
+
+- **B** — threshold-triggered fold events (45 % / 12 % step / cold branch 25 % / cap emergency)
+  masking stale observations into prefix-stable frozen layers; consolidation merges layer
+  records past `CONTEXTFOLD_MAX_LAYERS` byte-neutrally.
+- **C** — deterministic seed index (`docs/SEED_INDEX_SPEC.md`, shared spec with Evoker) emitted
+  at every fold; masked blocks spooled + registered so recall survives resume AND hard
+  compaction; `recall search=<term>` span-sweeps every folded block in one call (churn guard).
+- **A** — opt-in only: `/fold-handoff` (deterministic seed + untrusted narrative + degradation
+  warning); `session_before_compact` answers Pi's hard compaction with a deterministic
+  index-rendered summary (`CONTEXTFOLD_COMPACT=det`) — the automatic path never calls a model.
+- Advisor: measured-cacheRead cold detection + the price-agnostic reset yellow flag
+  (input-token equivalents) in `/context-fold` status.
+- **e2e-gate (c) flake ROOT-CAUSED and fixed** — it was never the dedup path (verified sound,
+  `tests/gate-dedup.test.ts`): a one-enormous-line payload rode through every recall cap on the
+  "always keep at least one line" rule; a live `recall lines=2-2` returned a 40KB line. All
+  recall surfaces now clip/window huge lines (`tests/recall-reflood.test.ts`).
+- Verification: 236 unit/integration tests + typecheck green; all four live gates ALL PASS
+  (`e2e-gate`, `e2e-resume`, `e2e-cache` at 99.4 % measured hit on the local backend, and the
+  new `e2e-ladder` — fold event, index emission, byte-stable head, buried-value recall).
+- Release readiness: LICENSE (MIT), external-audience README with the honest post-review
+  framing, estate-specific references scrubbed from code/scripts, package .gitignore.
+  Extraction to a standalone repo + naming remain owner decisions.
+
 The phase-by-phase build record: what shipped when, the eval results that drove each decision,
 and the adversarial-review findings. The README describes the CURRENT end-to-end behavior;
 this file is where the evidence and the story live. Roadmap ("Next") is in the README.

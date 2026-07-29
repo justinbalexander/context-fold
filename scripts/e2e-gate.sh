@@ -17,7 +17,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROVIDER="${E2E_PROVIDER:-openai-codex}"
 MODEL="${E2E_MODEL:-gpt-5.6-sol}"
-PI="${PI_BIN:-${WILLOW_BIN:-$(command -v pi || echo "$HOME/.local/bin/pi")}}"
+PI="${PI_BIN:-$(command -v pi || echo "$HOME/.local/bin/pi")}"
 
 if [[ ! -x "$PI" ]]; then echo "FAIL: pi binary not found ($PI)"; exit 2; fi
 
