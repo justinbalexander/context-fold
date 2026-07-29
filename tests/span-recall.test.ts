@@ -1,5 +1,5 @@
 /*
- * span-recall.test.ts — the churn guard (HANDOFF_REBUILD §6): recovering identifiers scattered
+ * span-recall.test.ts — the churn guard: recovering identifiers scattered
  * across N folded pointers must cost fewer calls than N. One `search` sweep covers every folded
  * block — L0 born-folded pointers and ladder-frozen masks alike — with line numbers that agree
  * with the per-code `lines=` slice path.

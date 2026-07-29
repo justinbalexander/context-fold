@@ -1,8 +1,8 @@
 /*
- * seed-index.test.ts — index-fidelity tests (HANDOFF_REBUILD §6): identifiers planted MID
- * tool-output (the summary-boundary probe class every compaction arm dropped in the Sol
- * campaign) must appear verbatim in the emitted index, error lines must survive in every
- * lexicon spelling, and extraction must be deterministic.
+ * seed-index.test.ts — index-fidelity tests: identifiers planted MID tool-output (the
+ * summary-boundary class that measurably gets dropped by LLM summarizers) must appear
+ * verbatim in the emitted index, error lines must survive in every lexicon spelling, and
+ * extraction must be deterministic.
  */
 import { describe, expect, it } from "vitest";
 import { linearize } from "../src/core/block";
