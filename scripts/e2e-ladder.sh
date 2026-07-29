@@ -5,7 +5,7 @@
 #   (a) a fold event fires under pressure (layer commit logged) and masks the tool flood;
 #   (b) the seed index is emitted: seed-index.jsonl exists in the session spool dir, parses,
 #       and carries the planted mid-output identifier + a span whose spool file is readable;
-#   (c) the folded head is byte-identical on the next turn (prefix-stable layers);
+#   (c) the folded head is byte-identical after another turn (prefix-stable layers);
 #   (d) recall works from the masked pointer (agent answers a buried-line question).
 #
 # The pressure comes from CONTEXTFOLD_BUDGET_CAP (the cap trigger) so the check is independent
@@ -13,15 +13,21 @@
 #
 # Model: defaults to gpt-5.6-sol via openai-codex (reliable tool use). Override with
 # E2E_PROVIDER / E2E_MODEL. Requires auth for the chosen provider in the active agent dir.
+# No `set -e`: every check below accumulates into $fail so one failure still reports
+# the rest. Errors are surfaced explicitly, never swallowed silently.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Load THIS working copy explicitly and disable extension discovery, so the run tests the source
+# in this repo rather than whatever happens to be deployed in the caller's agent dir.
+EXT="$REPO/src/adapters/pi/index.ts"
 PROVIDER="${E2E_PROVIDER:-openai-codex}"
 MODEL="${E2E_MODEL:-gpt-5.6-sol}"
 PI="${PI_BIN:-$(command -v pi || echo "$HOME/.local/bin/pi")}"
 CAP="${E2E_CAP:-3000}"
 
 if [[ ! -x "$PI" ]]; then echo "FAIL: pi binary not found ($PI)"; exit 2; fi
+command -v python3 >/dev/null || { echo "FAIL: python3 is required by this script but was not found"; exit 2; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cf-e2e-ladder-XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -42,7 +48,7 @@ ENV_COMMON=(CONTEXTFOLD_L0=0 CONTEXTFOLD_DEBUG=1 CONTEXTFOLD_BUDGET_CAP="$CAP" C
 
 echo "== turn 1: flood ($PROVIDER/$MODEL, cap=$CAP) =="
 env "${ENV_COMMON[@]}" \
-  "$PI" -p --mode json --session-dir "$SESSIONS" --session-id "$SID" --provider "$PROVIDER" --model "$MODEL" \
+  "$PI" -p --mode json -ne -e "$EXT" --session-dir "$SESSIONS" --session-id "$SID" --provider "$PROVIDER" --model "$MODEL" \
   "Call exec_command exactly once with command cat -- '$BIGFILE' so the complete raw file is returned as one tool result. Do not use wc, grep, sed, head, tail, Python, or any filtering command. Then reply with ONLY the total number of lines in it." \
   >"$WORK/stdout1.json" 2>"$WORK/stderr1.txt"
 echo "   exit=$?  $(grep -oE 'layer [0-9]+ committed \([0-9]+ blocks frozen\)' "$WORK/stderr1.txt" | head -1)"
@@ -51,11 +57,19 @@ cp -f "$DUMP" "$WORK/view1.json" 2>/dev/null || true
 echo "== turn 2: follow-up (same session) =="
 rm -f "$BIGFILE" # the spool is now the only copy — recall is the only recovery path
 env "${ENV_COMMON[@]}" \
-  "$PI" -p --mode json --session-dir "$SESSIONS" --session-id "$SID" --provider "$PROVIDER" --model "$MODEL" \
+  "$PI" -p --mode json -ne -e "$EXT" --session-dir "$SESSIONS" --session-id "$SID" --provider "$PROVIDER" --model "$MODEL" \
   "Earlier you read a file that has since been deleted. What exact value is assigned to LADDER_CAP_LIMIT in it? Reply with ONLY that number." \
   >"$WORK/stdout2.json" 2>"$WORK/stderr2.txt"
 echo "   exit=$?"
 cp -f "$DUMP" "$WORK/view2.json" 2>/dev/null || true
+
+echo "== turn 3: prefix-stability probe (same session) =="
+env "${ENV_COMMON[@]}" \
+  "$PI" -p --mode json -ne -e "$EXT" --session-dir "$SESSIONS" --session-id "$SID" --provider "$PROVIDER" --model "$MODEL" \
+  "Reply with ONLY the word OK." \
+  >"$WORK/stdout3.json" 2>"$WORK/stderr3.txt"
+echo "   exit=$?"
+cp -f "$DUMP" "$WORK/view3.json" 2>/dev/null || true
 
 fail=0
 
@@ -69,7 +83,7 @@ fi
 # (b) seed index emitted with the planted identifier and a readable span
 INDEX="$SESSIONS/spool/$SID/seed-index.jsonl"
 if [[ -f "$INDEX" ]]; then
-  python3 - "$INDEX" <<'PY'
+  if ! python3 - "$INDEX" <<'PY'
 import json, sys
 recs = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 ok = bool(recs)
@@ -86,13 +100,16 @@ else:
     print(f"FAIL (b) spans missing/unreadable ({len(readable)}/{len(spans)})"); ok = False
 sys.exit(0 if ok else 3)
 PY
-  [[ $? -eq 0 ]] || fail=1
+  then
+    fail=1
+  fi
 else
   echo "FAIL (b) seed-index.jsonl not written ($INDEX)"; fail=1
 fi
 
-# (c) folded head byte-identical across turns
-python3 - "$WORK/view1.json" "$WORK/view2.json" <<'PY'
+# (c) folded head byte-identical after the recall turn. Turn 1 is intentionally raw: the fold
+# event fires when turn 2 first submits the accumulated history, so turn 2 is the stable baseline.
+if ! python3 - "$WORK/view2.json" "$WORK/view3.json" <<'PY'
 import json, sys
 def folded(path):
     out = {}
@@ -113,7 +130,9 @@ if shared and not changed:
     sys.exit(0)
 print(f"FAIL (c) folded head unstable (shared={len(shared)} changed={len(changed)})"); sys.exit(3)
 PY
-[[ $? -eq 0 ]] || fail=1
+then
+  fail=1
+fi
 
 # (d) the buried value came back through recall
 if grep -q "73114" "$WORK/stdout2.json"; then

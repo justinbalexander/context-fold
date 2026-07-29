@@ -12,14 +12,20 @@
 #
 # Model: defaults to gpt-5.6-sol via the openai-codex provider (reliable tool use). Override with
 # E2E_PROVIDER / E2E_MODEL. Requires auth for the chosen provider in the active agent dir.
+# No `set -e`: every check below accumulates into $fail so one failure still reports
+# the rest. Errors are surfaced explicitly, never swallowed silently.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Load THIS working copy explicitly and disable extension discovery, so the run tests the source
+# in this repo rather than whatever happens to be deployed in the caller's agent dir.
+EXT="$REPO/src/adapters/pi/index.ts"
 PROVIDER="${E2E_PROVIDER:-openai-codex}"
 MODEL="${E2E_MODEL:-gpt-5.6-sol}"
 PI="${PI_BIN:-$(command -v pi || echo "$HOME/.local/bin/pi")}"
 
 if [[ ! -x "$PI" ]]; then echo "FAIL: pi binary not found ($PI)"; exit 2; fi
+command -v python3 >/dev/null || { echo "FAIL: python3 is required by this script but was not found"; exit 2; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cf-e2e-XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -41,7 +47,7 @@ PROMPT="Call exec_command exactly once with command cat -- '$BIGFILE' so the com
 
 echo "== driving pi ($PROVIDER/$MODEL) — reading a ~$(du -k "$BIGFILE" | cut -f1)KB file =="
 CONTEXTFOLD_L0="${CONTEXTFOLD_L0:-1}" CONTEXTFOLD_DEBUG=1 CONTEXTFOLD_DUMP="$DUMP" \
-  "$PI" -p --mode json --session-dir "$SESSIONS" --provider "$PROVIDER" --model "$MODEL" "$PROMPT" \
+  "$PI" -p --mode json -ne -e "$EXT" --session-dir "$SESSIONS" --provider "$PROVIDER" --model "$MODEL" "$PROMPT" \
   >"$WORK/stdout.json" 2>"$STDERR"
 RC=$?
 echo "   pi exit=$RC"
@@ -52,7 +58,7 @@ fail=0
 # (a) the gate fired. Stock Pi may expose the file read as `read` or route it through the
 # environment's shell tool (`exec_command` historically, `exec` since pi 0.80.x); all exercise
 # the same text-result ingestion boundary.
-FOLD_RE='l0-fold #[0-9a-z]{6} tool=(read|exec_command|exec) [0-9]+→[0-9]+'
+FOLD_RE='l0-fold #[0-9a-z]{6} tool=(read|exec_command|exec|bash) [0-9]+→[0-9]+'
 if grep -qE "$FOLD_RE" "$STDERR"; then
   echo "PASS (a) gate fired: $(grep -oE "$FOLD_RE" "$STDERR" | head -1)"
 else
@@ -70,7 +76,7 @@ fi
 # block specifically — the model is free to quote a line in its own reasoning/text; that is not the
 # gate's concern. The gate's guarantee is that the big RESULT was replaced by a pointer in the view.)
 if [[ -f "$DUMP" ]]; then
-  python3 - "$DUMP" "$MARKER" <<'PY'
+  if ! python3 - "$DUMP" "$MARKER" <<'PY'
 import json, sys
 msgs = json.load(open(sys.argv[1])); marker = sys.argv[2]
 results = [m for m in msgs if m.get("role") == "toolResult"]
@@ -95,7 +101,9 @@ else:
     print("PASS (c) no over-threshold tool_result still carries the raw payload marker")
 sys.exit(0 if ok else 3)
 PY
-  [[ $? -eq 0 ]] || fail=1
+  then
+    fail=1
+  fi
 else
   echo "FAIL (c) no dump file written"; fail=1
 fi
@@ -115,7 +123,7 @@ if [[ "${E2E_PHASE2:-1}" == "1" ]]; then
     for i in $(seq 401 800); do echo "line $i: more routine filler continuing along unremarkably"; done
   } > "$P2FILE"
   CONTEXTFOLD_L0="${CONTEXTFOLD_L0:-1}" CONTEXTFOLD_DEBUG=1 \
-    "$PI" -p --mode json --session-dir "$P2SESS" --session-id "$P2SID" --provider "$PROVIDER" --model "$MODEL" \
+    "$PI" -p --mode json -ne -e "$EXT" --session-dir "$P2SESS" --session-id "$P2SID" --provider "$PROVIDER" --model "$MODEL" \
     "Call exec_command exactly once with command cat -- '$P2FILE' so the complete raw file is returned as one tool result. Do not use wc, grep, sed, head, tail, Python, or any filtering command. Then reply with ONLY the total number of lines in it." \
     >"$WORK/stdout2a.json" 2>"$WORK/stderr2a.txt"
   P2_READ_RC=$?
@@ -128,7 +136,7 @@ if [[ "${E2E_PHASE2:-1}" == "1" ]]; then
   fi
   rm -f "$P2FILE" # the spool is now the only copy — recall is the only recovery path
   CONTEXTFOLD_L0="${CONTEXTFOLD_L0:-1}" CONTEXTFOLD_DEBUG=1 \
-    "$PI" -p --mode json --session-dir "$P2SESS" --session-id "$P2SID" --provider "$PROVIDER" --model "$MODEL" \
+    "$PI" -p --mode json -ne -e "$EXT" --session-dir "$P2SESS" --session-id "$P2SID" --provider "$PROVIDER" --model "$MODEL" \
     "Earlier you read a file that has since been deleted from disk. Tell me the single word/phrase that appears immediately after the token $TOKEN on its line. Reply with ONLY that phrase." \
     >"$WORK/stdout2.json" 2>"$WORK/stderr2.txt"
   echo "   pi recall-call exit=$?"
