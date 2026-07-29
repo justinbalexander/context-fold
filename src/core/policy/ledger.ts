@@ -31,6 +31,29 @@ interface CategorizedMarkers {
 	decisions: string[];
 }
 
+/**
+ * The one error-marker lexicon, shared by the fact ledger and the seed index. Compound names
+ * (ImportError, ModuleNotFoundError, ValueError, RuntimeException, …) have no word boundary
+ * before "Error", so `\bError` misses them — match the whole PascalCase name instead. The
+ * plain-word list is deliberately broad and any-case: test runners say "3 failed", tools print
+ * "fatal:", CI says "Aborted" — a failure signal in any of those spellings must count as
+ * error-shaped (this detector feeds the gate's never-fold-a-short-error threshold, the pointer's
+ * kept-verbatim risk lines, AND the index's error field; a missed spelling is the rtk failure
+ * mode). Kept as a SOURCE string so each consumer builds its own regex (no shared lastIndex).
+ */
+export const ERROR_MARKER_SOURCE =
+	"(?:\\b(?:[A-Z][A-Za-z]*(?:Error|Exception|Warning)|[Ee]rror|ERROR|FAIL(?:ED|URE)?|[Ff]ail(?:ed|ure)s?|FATAL|[Ff]atal|PANIC|[Pp]anic|[Aa]borted|exception|Traceback|ENOENT|ECONNREFUSED)\\b|npm ERR!|Segmentation fault|core dumped|Permission denied|✗|✘)";
+
+/** A fresh error-marker test regex (no flags — safe for `.test()` reuse). */
+export function errorMarkerRe(): RegExp {
+	return new RegExp(ERROR_MARKER_SOURCE);
+}
+
+/** The ledger's snippet-capturing form: marker plus up to 60 trailing chars. */
+function errorSnippetRe(): RegExp {
+	return new RegExp(`${ERROR_MARKER_SOURCE}[: ]*[^\\n]{0,60}`, "g");
+}
+
 /** Categorize a block's text into salience buckets. Pure regex work, bounded O(n). */
 export function categorize(text: string): CategorizedMarkers {
 	const result: CategorizedMarkers = { paths: [], commands: [], errors: [], exact_values: [], decisions: [] };
@@ -59,15 +82,7 @@ export function categorize(text: string): CategorizedMarkers {
 		add(result.commands, m[0].trim());
 	}
 
-	// Compound names (ImportError, ModuleNotFoundError, ValueError, RuntimeException, …) have no word
-	// boundary before "Error", so `\bError` misses them — match the whole PascalCase name instead.
-	// The plain-word list is deliberately broad and any-case: test runners say "3 failed", tools
-	// print "fatal:", CI says "Aborted" — a failure signal in any of those spellings must count as
-	// error-shaped (this detector feeds the gate's never-fold-a-short-error threshold AND the
-	// pointer's kept-verbatim risk lines; a missed spelling is the rtk failure mode).
-	for (const m of text.matchAll(
-		/(?:\b(?:[A-Z][A-Za-z]*(?:Error|Exception|Warning)|[Ee]rror|ERROR|FAIL(?:ED|URE)?|[Ff]ail(?:ed|ure)s?|FATAL|[Ff]atal|PANIC|[Pp]anic|[Aa]borted|exception|Traceback|ENOENT|ECONNREFUSED)\b|npm ERR!|Segmentation fault|core dumped|Permission denied|✗|✘)[: ]*[^\n]{0,60}/g,
-	)) {
+	for (const m of text.matchAll(errorSnippetRe())) {
 		add(result.errors, m[0].slice(0, 60));
 	}
 	if (/\s+at\s+\S+\s*\(/.test(text)) add(result.errors, "stack trace");

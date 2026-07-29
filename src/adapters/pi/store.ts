@@ -44,10 +44,16 @@ export interface FoldConfig {
 	/**
 	 * Prefix-stable folding (Stage 2): commit each epoch's substitutions as a frozen layer whose
 	 * bytes never change again, so the context head stays byte-identical across turns and the
-	 * provider's prompt cache keeps re-hitting it. Off by default until the e2e comparison
-	 * proves the cache retention.
+	 * provider's prompt cache keeps re-hitting it. Always on in ladder mode (the adapter forces
+	 * it); opt-in for keel mode.
 	 */
 	prefixStable: boolean;
+	/**
+	 * Consolidation bound on committed layers: a commit that would exceed this merges all layer
+	 * RECORDS into one (bookkeeping only — digest bytes are unchanged, so the warm prefix is
+	 * preserved for free). 0 disables the bound.
+	 */
+	maxLayers: number;
 	/** Emit a one-line fold summary to stderr each turn. */
 	debug: boolean;
 }
@@ -58,8 +64,22 @@ export const DEFAULT_CONFIG: FoldConfig = {
 	tailTarget: 20_000,
 	defaultContextWindow: DEFAULT_CONTEXT_WINDOW,
 	prefixStable: false,
+	maxLayers: 2,
 	debug: false,
 };
+
+/** What the engine reports after committing a fold event's frozen layer (index emission seam). */
+export interface FoldEventReport {
+	/** The committed layer's seq (post-consolidation when a merge fired). */
+	seq: number;
+	/** Why the policy folded (ladder: "threshold" | "cap"; consolidation merges report separately). */
+	trigger: "threshold" | "cap" | "consolidation";
+	/** Ids masked by THIS event (empty for a pure consolidation merge). */
+	maskedIds: string[];
+	/** Every block in this turn's view, full content — the extractor's span input. */
+	blocks: WireBlock[];
+	usage: { tokens: number; contextWindow: number; fraction: number };
+}
 
 /** One committed prefix-stable layer (persisted verbatim; see persistence.ts). */
 export interface FrozenLayer {
@@ -185,6 +205,8 @@ export class ContextFoldEngine {
 	onLayerCommit: ((layer: FrozenLayer) => void) | null = null;
 	/** Adapter callback: persist a consolidation break. */
 	onLayerBreak: ((seq: number) => void) | null = null;
+	/** Adapter callback: a fold event committed — emit the seed index (spool + JSONL). */
+	onFoldEvent: ((event: FoldEventReport) => void) | null = null;
 
 	constructor(
 		policy: Conductor,
@@ -347,6 +369,35 @@ export class ContextFoldEngine {
 						this.onLayerCommit?.(layer);
 						if (this.cfg.debug)
 							process.stderr.write(`[context-fold] layer ${layer.seq} committed (${entries.length} blocks frozen)\n`);
+
+						// Fold-event report → the adapter emits the seed index for what just left the view.
+						const usage = {
+							tokens: frame.tokens ?? view.liveTokens,
+							contextWindow: cw,
+							fraction: cw > 0 ? (frame.tokens ?? view.liveTokens) / cw : 0,
+						};
+						const rawTrigger = this.lastStatus?.metrics?.trigger;
+						const trigger = rawTrigger === "cap" ? "cap" : "threshold";
+						this.onFoldEvent?.({ seq: layer.seq, trigger, maskedIds: entries.map((e) => e.id), blocks, usage });
+
+						// Consolidation bound: too many layer records → merge them into ONE record under the
+						// newest seq. Digest bytes are untouched (the warm prefix survives); only the
+						// bookkeeping collapses. Event-sourced as breaks + a re-commit (latest seq wins).
+						if (this.cfg.maxLayers > 0 && this.frozenLayers.length > this.cfg.maxLayers) {
+							const merged: FrozenLayer = {
+								seq: layer.seq,
+								entries: this.frozenLayers.flatMap((l) => l.entries),
+							};
+							for (const l of this.frozenLayers) if (l.seq !== merged.seq) this.onLayerBreak?.(l.seq);
+							this.frozenLayers = [merged];
+							this.rebuildFrozenIndex();
+							this.onLayerCommit?.(merged);
+							this.onFoldEvent?.({ seq: merged.seq, trigger: "consolidation", maskedIds: [], blocks, usage });
+							if (this.cfg.debug)
+								process.stderr.write(
+									`[context-fold] consolidation merge: ${merged.entries.length} frozen blocks now one layer (seq ${merged.seq})\n`,
+								);
+						}
 					}
 				}
 			}

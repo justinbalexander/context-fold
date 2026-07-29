@@ -1,0 +1,170 @@
+/*
+ * fold-ladder.ts — the discrete fold ladder (the rebuild's default policy, CONTEXTFOLD_MODE=ladder).
+ *
+ * Deterministic observation masking at DISCRETE fold events, replacing the continuous per-turn
+ * Keel ladder as the default path (the Sol campaign demoted full Keel; JetBrains/SWE-agent-class
+ * evidence says deterministic masking matches LLM summarization at lower cost). Between fold
+ * events the context is append-only: any mutation of history moves bytes and invalidates the
+ * provider's prompt-cache suffix, so masking is batched at chosen boundaries where that
+ * invalidation is paid once, and each event's substitutions are committed by the engine as a
+ * prefix-stable frozen layer whose bytes never change again.
+ *
+ * A fold event fires when BOTH hold:
+ *   • usage ≥ the first-fold threshold (~45 % of the window; the cold branch lowers it — with no
+ *     live cache read there is no prefix to protect, so fold earlier and more freely), and
+ *   • the maskable mass is worth a fold (≥ step × window) — this is what spaces events: each
+ *     fold must buy at least one ladder step, so a fresh fold can't re-fire on the next turn.
+ * Crossing the budget cap (min(200k, fraction × window)) is an emergency event with no minimum.
+ *
+ * What masks: stale tool_result and thinking blocks outside the protected tail — never user
+ * intent, assistant conclusions, or tool_call records (the actions carry the implicit decisions).
+ * Each masked block folds to its deterministic per-kind digest — a `{#code FOLDED}` pointer that
+ * keeps risk/error lines verbatim and stays reversible via recall/unfold. Stateless across turns
+ * (a pure function of the view), so resume needs no ladder state.
+ */
+import type { Command, Conductor, ConductorHost, ConductorView, ViewBlock } from "../contract";
+import { isDurableId } from "../block";
+
+export interface LadderConfig {
+	/** First fold when usage ≥ this fraction of the context window. */
+	foldAt: number;
+	/** A fold event must save at least this fraction of the window (spaces the events). */
+	foldStep: number;
+	/** First-fold threshold when the session has never observed a live cache read. */
+	coldFoldAt: number;
+}
+
+export const LADDER_DEFAULTS: LadderConfig = { foldAt: 0.45, foldStep: 0.12, coldFoldAt: 0.25 };
+
+/** The kinds a fold event masks: observations and ephemeral reasoning. */
+const MASKABLE_KINDS = new Set<ViewBlock["kind"]>(["tool_result", "thinking"]);
+
+export class FoldLadderConductor implements Conductor {
+	readonly id: string = "fold-ladder";
+	readonly label: string = "Discrete fold ladder";
+
+	private host: ConductorHost | null = null;
+	/** No live cache read observed yet (adapter feeds this from measured telemetry each turn). */
+	private cold = false;
+
+	constructor(private readonly cfg: LadderConfig = LADDER_DEFAULTS) {}
+
+	attach(host: ConductorHost): void {
+		this.host = host;
+	}
+
+	detach(): void {
+		this.host?.setStatus(null);
+		this.host = null;
+	}
+
+	setCold(cold: boolean): void {
+		this.cold = cold;
+	}
+
+	conduct(view: ConductorView): Command[] {
+		const cw = view.contextWindow ?? 0;
+		// Provider-anchored usage when Pi has it; the chars÷4 estimator otherwise.
+		const used = view.reportedTokens ?? view.liveTokens;
+		const fraction = cw > 0 ? used / cw : 0;
+		const foldAt = this.cold ? Math.min(this.cfg.coldFoldAt, this.cfg.foldAt) : this.cfg.foldAt;
+
+		const eligible = view.blocks.filter(maskable);
+		let savings = 0;
+		for (const b of eligible) savings += b.tokens - b.foldedTokens;
+
+		const stepTokens = cw > 0 ? Math.floor(this.cfg.foldStep * cw) : Math.floor(this.cfg.foldStep * view.budget);
+		const overCap =
+			view.liveTokens > view.budget ||
+			(view.reportedTokens !== undefined && view.reportedBudget !== undefined && view.reportedTokens > view.reportedBudget);
+		const thresholdHit = cw > 0 && fraction >= foldAt && savings >= stepTokens;
+
+		if (!overCap && !thresholdHit) {
+			this.publishIdle(view, fraction, foldAt, savings, stepTokens);
+			return [];
+		}
+		if (eligible.length === 0 || savings <= 0) {
+			// Over cap with nothing left to mask: announce honestly (the tail/roots are the floor).
+			this.publishIrreducible(view, overCap);
+			return [];
+		}
+
+		const trigger = overCap && !thresholdHit ? "cap" : "threshold";
+		const projected = view.liveTokens - savings;
+		this.host?.setStatus(
+			`fold event (${trigger}): masking ${eligible.length} block${eligible.length === 1 ? "" : "s"}, ~${k(savings)} tok`,
+			{
+				fold_event: true,
+				trigger,
+				folds: eligible.length,
+				tokens_saved: savings,
+				live_tokens: projected,
+				budget: view.budget,
+				cap: view.budget,
+				usage_fraction: round3(fraction),
+				irreducible_floor: irreducibleFloor(view.blocks),
+				over_budget: projected > view.budget,
+			},
+		);
+		return [{ kind: "fold", ids: eligible.map((b) => b.id) }];
+	}
+
+	private publishIdle(view: ConductorView, fraction: number, foldAt: number, savings: number, stepTokens: number): void {
+		// Between events the ladder is quiet; publish the position so the status command can show
+		// "next fold at N %" without the engine re-deriving policy internals.
+		this.host?.setStatus(null, {
+			fold_event: false,
+			usage_fraction: round3(fraction),
+			fold_at: round3(foldAt),
+			maskable_tokens: savings,
+			step_tokens: stepTokens,
+			live_tokens: view.liveTokens,
+			budget: view.budget,
+			cap: view.budget,
+			over_budget: false,
+			irreducible_floor: irreducibleFloor(view.blocks),
+		});
+	}
+
+	private publishIrreducible(view: ConductorView, overCap: boolean): void {
+		this.host?.setStatus(
+			overCap ? "OVER BUDGET: nothing left to mask (tail/roots are the floor)" : null,
+			{
+				fold_event: false,
+				live_tokens: view.liveTokens,
+				budget: view.budget,
+				cap: view.budget,
+				over_budget: overCap,
+				irreducible_floor: irreducibleFloor(view.blocks),
+			},
+		);
+	}
+}
+
+function maskable(b: ViewBlock): boolean {
+	return (
+		MASKABLE_KINDS.has(b.kind) &&
+		isDurableId(b.id) &&
+		!b.protected &&
+		!b.held &&
+		!b.grouped &&
+		!b.bornFolded &&
+		!b.frozen &&
+		b.foldedTokens < b.tokens
+	);
+}
+
+/** Full-token sum of everything the ladder never masks (user + protected tail + held). */
+function irreducibleFloor(blocks: ViewBlock[]): number {
+	let n = 0;
+	for (const b of blocks) if (b.kind === "user" || b.protected || b.held) n += b.tokens;
+	return n;
+}
+
+function k(n: number): string {
+	return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+function round3(x: number): number {
+	return Math.round(x * 1000) / 1000;
+}

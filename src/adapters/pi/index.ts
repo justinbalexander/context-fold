@@ -20,7 +20,9 @@ import type { Conductor } from "../../core/contract";
 import { KeelConductor } from "../../core/policy/keel";
 import { ModelConductor } from "../../core/policy/model";
 import { PrefixStableKeel } from "../../core/policy/prefix-stable";
+import { FoldLadderConductor } from "../../core/policy/fold-ladder";
 import { ContextFoldEngine, type FoldConfig } from "./store";
+import { SeedIndexStore, emitFoldIndex } from "./index-store";
 import { registerFoldTools } from "./unfold-tool";
 import { fetchDigestWriter, DEFAULT_WRITER_CONFIG, type DigestWriter } from "../../core/model/digest-writer";
 import { fetchRelevanceJudge, DEFAULT_JUDGE_CONFIG, type RelevanceJudge } from "../../core/model/relevance-judge";
@@ -43,8 +45,8 @@ const L0_TEACHING = [
 	"Reach for `unfold {code}` when you want a folded result kept expanded across your next turns.",
 ].join("\n");
 
-import { configFromEnv } from "./config";
-export { configFromEnv };
+import { adapterConfigFromEnv, configFromEnv } from "./config";
+export { adapterConfigFromEnv, configFromEnv };
 
 /** Shared model connection from env, or null when no model is configured (pure Phase 1). */
 function modelConnFromEnv(): { baseUrl: string; model: string; apiKey: string; disableThinking: boolean } | null {
@@ -69,9 +71,18 @@ export default function contextFold(pi: ExtensionAPI): void {
 		process.stderr.write("[context-fold] disabled by CONTEXTFOLD=0 — no folding this session\n");
 		return;
 	}
+	const acfg = adapterConfigFromEnv();
+	const ladderMode = acfg.mode === "ladder";
 	const conn = modelConnFromEnv();
-	const wantDigests = !!process.env.CONTEXTFOLD_MODEL?.trim() && !!conn;
-	const wantColdness = (process.env.CONTEXTFOLD_COLDNESS === "1" || process.env.CONTEXTFOLD_COLDNESS === "true") && !!conn;
+	// Model digests/coldness are keel-mode-only: in ladder mode a fold's bytes freeze at commit,
+	// so a late async model digest could never ship. Say so instead of silently ignoring.
+	let wantDigests = !!process.env.CONTEXTFOLD_MODEL?.trim() && !!conn;
+	let wantColdness = (process.env.CONTEXTFOLD_COLDNESS === "1" || process.env.CONTEXTFOLD_COLDNESS === "true") && !!conn;
+	if (ladderMode && (wantDigests || wantColdness)) {
+		process.stderr.write("[context-fold] CONTEXTFOLD_MODEL/COLDNESS apply only to CONTEXTFOLD_MODE=keel — ignored in ladder mode\n");
+		wantDigests = false;
+		wantColdness = false;
+	}
 
 	const maxBlocks = Number(process.env.CONTEXTFOLD_MODEL_MAXBLOCKS);
 	const concurrency = Number(process.env.CONTEXTFOLD_MODEL_CONCURRENCY);
@@ -84,16 +95,21 @@ export default function contextFold(pi: ExtensionAPI): void {
 			})
 		: null;
 	const foldCfg = configFromEnv();
+	// Ladder mode IS the prefix-stable design: discrete fold events committed as frozen layers.
+	if (ladderMode) foldCfg.prefixStable = true;
 	// Prefix-stable ranking and the coldness model conductor compete for the same rank() seam;
 	// prefix-stable wins (its ordering IS the point of the flag) and coldness degrades to digests.
-	if (foldCfg.prefixStable && wantColdness)
+	if (!ladderMode && foldCfg.prefixStable && wantColdness)
 		process.stderr.write("[context-fold] CONTEXTFOLD_PREFIX_STABLE overrides CONTEXTFOLD_COLDNESS ranking (digests still apply)\n");
 	const judge: RelevanceJudge | null = wantColdness && !foldCfg.prefixStable ? fetchRelevanceJudge({ ...DEFAULT_JUDGE_CONFIG, ...conn! }) : null;
-	const policy: Conductor = foldCfg.prefixStable
-		? new PrefixStableKeel()
-		: wantColdness
-			? new ModelConductor()
-			: new KeelConductor();
+	const ladderPolicy: FoldLadderConductor | null = ladderMode ? new FoldLadderConductor(acfg.ladder) : null;
+	const policy: Conductor = ladderPolicy
+		? ladderPolicy
+		: foldCfg.prefixStable
+			? new PrefixStableKeel()
+			: wantColdness
+				? new ModelConductor()
+				: new KeelConductor();
 
 	// ── L0 ingestion gate: registry (shared with the engine) + lazy per-session spool store ──────
 	const registry = new MapGateRegistry();
@@ -107,6 +123,8 @@ export default function contextFold(pi: ExtensionAPI): void {
 
 	let spool: SpoolStore | null = null;
 	let spoolKey = "";
+	let indexStore: SeedIndexStore | null = null;
+	let indexKey = "";
 	let activeModelIdentity = "unknown";
 	let activeGate = false;
 	const resolveGate = (model: { id?: string; name?: string; provider?: string } | undefined) => {
@@ -122,6 +140,14 @@ export default function contextFold(pi: ExtensionAPI): void {
 			spoolKey = dir;
 		}
 		return spool;
+	};
+	const indexFor = (ctx: { sessionManager: { getSessionDir(): string; getSessionId(): string } }): SeedIndexStore => {
+		const dir = join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId());
+		if (!indexStore || indexKey !== dir) {
+			indexStore = new SeedIndexStore(dir);
+			indexKey = dir;
+		}
+		return indexStore;
 	};
 
 	// On resume, rebuild the gate registry + unfold set from the session's event-sourced fold ledger
@@ -240,6 +266,30 @@ export default function contextFold(pi: ExtensionAPI): void {
 			// a mid-session model switch takes effect immediately, and a resumed session with the gate
 			// off renders prior folds raw instead of substituting pointers (D20).
 			engine.setGateActive(resolveGate(ctx.model).enabled);
+			// Ladder cold branch: no live cache read observed after a few turns ⇒ there is no warm
+			// prefix to protect, so the ladder folds earlier and more freely (measured, not assumed).
+			if (ladderPolicy) {
+				const t = telemetry.snapshot();
+				ladderPolicy.setCold(t.turns >= 3 && t.totals.cacheRead === 0);
+			}
+			// Fold-event → seed-index emission. Bound per turn so the emitter sees this ctx's stores.
+			engine.onFoldEvent = (foldEvent) => {
+				try {
+					const rec = emitFoldIndex(foldEvent, {
+						spool: spoolFor(ctx),
+						registry,
+						index: indexFor(ctx),
+						sessionId: ctx.sessionManager.getSessionId(),
+					});
+					if (debug)
+						process.stderr.write(
+							`[context-fold] seed-index seq=${rec.seq} (${rec.trigger}): ${rec.spans.length} spans, ${rec.identifiers.length} ids, ${rec.errors.length} errors\n`,
+						);
+				} catch (err) {
+					// Fail-open: a lost index record never costs the fold or the turn.
+					process.stderr.write(`[context-fold] seed-index emission failed: ${err instanceof Error ? err.message : String(err)}\n`);
+				}
+			};
 			const usage = ctx.getContextUsage();
 			const messages = engine.process(event.messages as unknown as CoreAgentMessage[], {
 				contextWindow: usage?.contextWindow ?? null,
