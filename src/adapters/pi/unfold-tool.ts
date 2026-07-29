@@ -115,7 +115,7 @@ export function registerFoldTools(pi: ExtensionAPI, engine: ContextFoldEngine, o
 		parameters: CODES_PARAMS,
 		async execute(_toolCallId, params) {
 			const { matches, missing } = engine.markUnfold(params.codes);
-			onUnfold?.(matches.flatMap((m) => m.ids)); // persist the unfold so it survives resume (P3.1)
+			onUnfold?.(matches.flatMap((m) => m.ids)); // persist the unfold so it survives resume
 			const text = matches.length
 				? `${summarize(matches, missing)}\n\nExpanded ${matches.length} block(s); full content returns on your next turn.`
 				: summarize(matches, missing) || "No codes provided.";

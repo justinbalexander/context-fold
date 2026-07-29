@@ -1,5 +1,5 @@
 /*
- * retention.test.ts — spool GC (Phase 6): age-based reaping of per-session spool dirs.
+ * retention.test.ts — spool GC: age-based reaping of per-session spool dirs.
  * The safety properties under test: only dirs past the window die, never the current session's,
  * freshness is judged by the newest FILE inside (not the dir), and everything fails open.
  */

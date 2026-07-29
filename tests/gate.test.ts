@@ -1,8 +1,8 @@
 /*
- * gate.test.ts — the L0 gate decision + wiring (P1.3).
+ * gate.test.ts — the L0 gate decision + wiring.
  *
- * Covers the fold-decision matrix, the D20 kill-switch resolution, the end-to-end
- * observe→spool→register→substitute path, and criterion 11's inertness guarantee.
+ * Covers the fold-decision matrix, the kill-switch resolution, the end-to-end
+ * observe→spool→register→substitute path, and the kill switch's inertness guarantee.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -37,7 +37,7 @@ function newGate(cfg: GateConfig, reg = new MapGateRegistry(), store = new Spool
 	return { gate: new Gate(cfg, reg, () => store), reg, store };
 }
 
-describe("resolveGateEnabled (D20 kill switch)", () => {
+describe("resolveGateEnabled (kill switch)", () => {
 	it("is off when unset or 0", () => {
 		expect(resolveGateEnabled(undefined, "gpt-5.5")).toBe(false);
 		expect(resolveGateEnabled("0", "gpt-5.5")).toBe(false);
@@ -59,11 +59,11 @@ describe("resolveGateEnabled (D20 kill switch)", () => {
 	});
 	it("matches the backend name carried by an opaque dynamic-provider alias", () => {
 		const identity = gateModelIdentity({
-			provider: "lemonade-current",
+			provider: "local-backend",
 			id: "current",
-			name: "Currently loaded on Lemonade: Qwen3.6-35B-A3B-Q8",
+			name: "Currently loaded: Qwen3.6-35B-A3B-Q8",
 		});
-		expect(identity).toContain("lemonade-current current");
+		expect(identity).toContain("local-backend current");
 		expect(resolveGateEnabled("Qwen3.6", identity)).toBe(true);
 	});
 });
@@ -97,7 +97,7 @@ describe("gate fold decision matrix", () => {
 		expect(reg.size).toBe(0);
 	});
 
-	it("exempts an error-shaped result below errCap× threshold (D7)", () => {
+	it("exempts an error-shaped result below errCap× threshold", () => {
 		const { gate } = newGate(ENABLED);
 		// ~2500 tokens: over the base threshold but under errCap×threshold (8000).
 		const text = "ImportError: No module named 'frobnicate'\n" + bigText(160);
@@ -114,32 +114,32 @@ describe("gate fold decision matrix", () => {
 		expect(store.read(d.code!).content).toContain("ImportError: No module named 'frobnicate'");
 	});
 
-	it("never gates recall/unfold output (D12)", () => {
+	it("never gates recall/unfold output ", () => {
 		const { gate } = newGate(ENABLED);
 		expect(gate.observe(obs(bigText(400), { toolName: "recall" })).reason).toBe("exempt-tool");
 		expect(gate.observe(obs(bigText(400), { toolName: "unfold" })).reason).toBe("exempt-tool");
 	});
 
-	it("passes through a result carrying a non-text block (D12)", () => {
+	it("passes through a result carrying a non-text block ", () => {
 		const { gate } = newGate(ENABLED);
 		const d = gate.observe(obs(bigText(400), { content: [{ type: "text", text: bigText(400) }, { type: "image" } as any] }));
 		expect(d.folded).toBe(false);
 		expect(d.reason).toBe("non-text");
 	});
 
-	it("carries fullOutputPath into the registry (D30)", () => {
+	it("carries fullOutputPath into the registry", () => {
 		const { gate, reg } = newGate(ENABLED);
 		gate.observe(obs(bigText(400), { toolName: "bash", input: { command: "git log" }, fullOutputPath: "/tmp/full.txt" }));
 		expect(reg.get("r:c1")?.fullOutputPath).toBe("/tmp/full.txt");
 	});
 });
 
-// ── criterion 11: kill switch inertness ────────────────────────────────────────
+// ── kill switch inertness ────────────────────────────────────────
 function floodSession(text: string): AgentMessage[] {
 	return [user("read the log"), assistantWithCalls([{ id: "c1", name: "read" }], { text: "reading" }), toolResult("c1", text)];
 }
 
-describe("criterion 11 — kill-switch inertness", () => {
+describe("kill-switch inertness", () => {
 	it("writes nothing, registers nothing, and leaves the view byte-identical to baseline when disabled", () => {
 		const text = bigText(600);
 		const reg = new MapGateRegistry();

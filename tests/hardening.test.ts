@@ -1,6 +1,6 @@
 /*
  * hardening.test.ts — adapter-level regressions from the 2026-07-04 review:
- * error-lexicon coverage (the rtk failure mode), the spool collision guard, kill-switch pointer
+ * error-lexicon coverage the spool collision guard, kill-switch pointer
  * suppression, and the lines= re-flood cap.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -25,7 +25,7 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-describe("error lexicon covers real failure spellings (the rtk failure mode)", () => {
+describe("error lexicon covers real failure spellings", () => {
 	const spellings = [
 		"3 failed | 12 passed (15)",
 		"fatal: not a git repository",
@@ -86,7 +86,7 @@ describe("spool collision guard", () => {
 	});
 });
 
-describe("kill switch controls pointer substitution, not recallability (D20)", () => {
+describe("kill switch controls pointer substitution, not recallability", () => {
 	function foldOne(content: string): { reg: MapGateRegistry; code: string } {
 		const reg = new MapGateRegistry();
 		const gate = new Gate(ENABLED, reg, () => new SpoolStore(dir));
@@ -111,7 +111,7 @@ describe("kill switch controls pointer substitution, not recallability (D20)", (
 		let tr = (out.find((m) => m.role === "toolResult")!.content as any)[0].text as string;
 		expect(tr).toContain(`{#${code} FOLDED}`);
 
-		engine.setGateActive(false); // resumed session, kill switch off (REVIEW §4)
+		engine.setGateActive(false); // resumed session, kill switch off 
 		out = engine.process(msgs, 400_000);
 		tr = (out.find((m) => m.role === "toolResult")!.content as any)[0].text as string;
 		expect(tr).toContain("row 200:"); // raw content back

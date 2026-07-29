@@ -9,7 +9,7 @@
  * envelopes in the SAME directory, so removing a whole dir can never dangle an alias. And the
  * missing-spool path already fails the right way — resume revalidation drops folds whose spool
  * vanished (they render raw), and a recall on a reaped code throws the typed SpoolError
- * (fail-explicit, D16). GC introduces no new failure mode; it just makes that path reachable
+ * (fail-explicit). GC introduces no new failure mode; it just makes that path reachable
  * by age.
  *
  * The CURRENT session's dir is never touched, whatever its age. Everything here is fail-open:

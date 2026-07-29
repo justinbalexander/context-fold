@@ -95,7 +95,7 @@ function digestBody(b: DigestBlock): string {
 			const peek = firstLine(b.text, 60);
 			const head = `${name} → ${tag}, ~${b.tokens} tok${peek ? " · " + peek : ""}`;
 			// L3 risk-line retention: a folded result never reduces a load-bearing error/risk line to a
-			// one-line summary (the rtk failure mode). Keep the detected risk lines verbatim, tightly
+			// one-line summary. Keep the detected risk lines verbatim, tightly
 			// capped and errors-first, so a buried ImportError survives the aging fold.
 			const risk = collectRiskLines(b.text, { maxLines: L3_RISK_LINES, maxChars: L3_RISK_CHARS });
 			return risk.length ? `${head}\n${risk.join("\n")}` : head;
@@ -131,7 +131,7 @@ const RISK_LINE_CLIP = 200;
 
 /**
  * Is a single line risk-bearing, and does it carry an ERROR/traceback? Uses the ledger's
- * `categorize` harvester — the single detector for D7/D31/digest risk lines (Contracts §Risk-flag
+ * `categorize` harvester — the single detector for gate, pointer and digest risk lines (see the risk-flag
  * source), which INCLUDES the `errors` category that `riskFlags` (a stickiness signal) drops.
  */
 function lineRisk(line: string): { risk: boolean; error: boolean } {
@@ -199,11 +199,11 @@ export interface PointerMeta {
 	spoolPath: string;
 	/** Bash results: the tool's own full-output file, also searched by recall-grep. */
 	fullOutputPath?: string;
-	/** D18: when set, this payload was identical to an earlier fold. */
+	/** When set, this payload was identical to an earlier fold. */
 	dedupOf?: string;
 }
 
-/** Pointer digest budget: ≤400 est-tokens total (Contracts §Pointer digest budget). */
+/** Pointer digest budget: ≤400 est-tokens total . */
 export const POINTER_TOKEN_BUDGET = 400;
 const POINTER_HEAD_LINES = 8;
 const POINTER_TAIL_LINES = 8;

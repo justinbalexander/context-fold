@@ -1,81 +1,65 @@
-# Pi Extension API Surface (verified)
+# Pi extension API surface
 
-Originally verified against the Willow fork of Pi 0.80.2 (fork retired 2026-07-10; the fork's
-extension API was byte-identical to upstream). The live harness is stock upstream Pi from npm —
-build against upstream Pi 0.80.x extension docs with confidence.
+The exact Pi APIs this extension depends on, verified against the engine source rather than taken
+from the docs. Written for contributors: if one of these moves, this is the list to re-check.
+Verified against Pi 0.80.x; the authoritative reference is `docs/extensions.md`,
+`docs/compaction.md` and `examples/extensions/*` inside an installed
+`@earendil-works/pi-coding-agent`.
 
-## Locations (stock npm install)
-- CLI: `/home/willow/.local/bin/pi` → `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js`
-- Package root: `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/` (version `0.80.6`)
-- Runtime engine packages: `<package root>/node_modules/@earendil-works/{pi-agent-core,
-  pi-ai, pi-tui}`. `@earendil-works/pi-coding-agent` itself
-  exports `ExtensionAPI` from `dist/core/extensions/`.
-- Authoritative docs: `<package root>/docs/extensions.md` (large), `docs/compaction.md`,
-  and `examples/extensions/*` — especially `custom-compaction.ts`, `summarize.ts`,
-  `trigger-compact.ts`, `handoff.ts`.
+## The make-or-break: per-turn context mutation
 
-## The make-or-break: per-turn context mutation — CONFIRMED
 Hook named **`context`**. Fires before each LLM call, on a deep copy; the returned `messages`
-array genuinely replaces what is sent. Verified in the engine, not just docs:
-- `pi-agent-core/dist/harness/agent-harness.js:339-341` wires it as `transformContext`:
+array genuinely replaces what is sent. Confirmed in the engine, not just the docs:
+
+- `pi-agent-core/dist/harness/agent-harness.js` wires it as `transformContext`:
   `const result = await emitHook({type:"context", messages:[...messages]}); return result?.messages ?? messages;`
-- `pi-agent-core/dist/agent-loop.js:175-186` calls `transformContext` immediately before
-  `convertToLlm` + stream. Runs every assistant turn, on a copy, never mutates persisted entries.
-- Multiple `context` handlers chain (each sees the prior's output): `runner.js:685-705`.
+- `pi-agent-core/dist/agent-loop.js` calls `transformContext` immediately before `convertToLlm`
+  and the stream. It runs every assistant turn, on a copy, and never mutates persisted entries.
+- Multiple `context` handlers chain, each seeing the previous handler's output.
 
 ```ts
-// types: dist/core/extensions/types.d.ts:483, :743, :827
 interface ContextEvent       { type: "context"; messages: AgentMessage[]; }
 interface ContextEventResult { messages?: AgentMessage[]; }
-pi.on("context", async (e, ctx) => ({ messages: rewritten }));   // docs/extensions.md:620
+pi.on("context", async (e, ctx) => ({ messages: rewritten }));
 ```
 
-## Other capabilities (all fire headless)
-| Need | API | Ref |
-|---|---|---|
-| Detect pressure | `ctx.getContextUsage()` | extensions.md:989 |
-| Hard-compaction summary / cancel | `pi.on("session_before_compact", …) → {compaction:{summary, firstKeptEntryId, tokensBefore}} \| {cancel:true}` | extensions.md:434; examples/custom-compaction.ts |
-| Trigger compaction | `ctx.compact({customInstructions,onComplete,onError})` | extensions.md:1000 |
-| Agent-facing tool | `pi.registerTool({ name, label, description, promptSnippet, promptGuidelines, parameters: Type.Object({...}), execute(id,params,signal,onUpdate,ctx) })` | extensions.md:1288 |
-| Slash command | `pi.registerCommand(name, { description, handler })` | extensions.md:1443 |
-| Persist custom entry | `pi.appendEntry(type, data)` (NOT in LLM context) | extensions.md:1390 |
-| Read entries back | `ctx.sessionManager.getEntries()` → filter `entry.type==="custom" && entry.customType===…` | extensions.md:932 |
-| Bookmark entry | `pi.setLabel(entryId, label)` (survives restart) | extensions.md:1426 |
-| Find a specific model | `ctx.modelRegistry.find(provider, modelId)` | model-registry.d.ts:61 |
-| Auth for a model | `ctx.modelRegistry.getApiKeyAndHeaders(model)` | model-registry.d.ts:72 |
-| Out-of-band completion | `import { complete } from "@earendil-works/pi-ai/compat"` | compat.d.ts:62 |
-| Register local endpoint (Lemonade) | `pi.registerProvider(name, { baseUrl, api, models })` | extensions.md:1613 |
+## Everything else this extension uses
 
-`StringEnum` for tool param enums is imported from `@earendil-works/pi-ai`.
+All of these fire headless.
 
-## Targeting the local Lemonade model (Phase 2)
-`~/.pi/agent/settings.json` uses `defaultProvider: ollama`. Either `find("ollama", "<id>")`, or
-register a dedicated Lemonade provider via `pi.registerProvider("lemonade", {baseUrl, api,
-models})` and target that. Run the folding policy out-of-band, independent of the session's
-active model. Pass `ctx.signal` so the policy call aborts with the turn.
+| Need | API |
+|---|---|
+| Detect pressure | `ctx.getContextUsage()` → `{ contextWindow, tokens }` |
+| Measured prompt-cache usage | `message.usage.{cacheRead,cacheWrite,input}` on `message_end` |
+| Observe a tool result as it lands | `pi.on("tool_result", …)` — observe-only; never mutate |
+| Hard-compaction summary / cancel | `pi.on("session_before_compact", …) → {compaction:{summary, firstKeptEntryId, tokensBefore}} \| {cancel:true}` |
+| Inject teaching text | `pi.on("before_agent_start", …) → { systemPrompt }` |
+| Agent-facing tool | `pi.registerTool({ name, label, description, promptSnippet, promptGuidelines, parameters: Type.Object({…}), execute })` |
+| Slash command | `pi.registerCommand(name, { description, handler })` |
+| Persist custom entry (NOT in LLM context) | `pi.appendEntry(type, data)` |
+| Read entries back | `ctx.sessionManager.getEntries()`, filtered on `entry.type === "custom" && entry.customType === …` |
+| Session paths | `ctx.sessionManager.getSessionDir()` / `.getSessionId()` |
+| Out-of-band completion | `import { complete } from "@earendil-works/pi-ai/compat"` |
+
+`StringEnum` for tool-parameter enums is imported from `@earendil-works/pi-ai`.
 
 ## Two hard constraints
-1. **Import LLM/types helpers only from `@earendil-works/pi-ai/compat`** (the loader injects
-   bundled virtual modules; the willow loader aliases the pi-ai root → compat). A separately
-   installed `pi-ai` won't see the engine's model registry / auth.
-2. **jiti isolation (Phase 2 only):** Pi loads extensions via jiti with `moduleCache:false`. If
-   the folding-policy model call runs in a *separate isolated sub-worker* (the way pi-blackhole's
-   consolidation agents do), that worker gets its own empty pi-ai provider registry and won't see
-   custom providers. Avoid by calling the model **synchronously inside the hook** (main module →
-   sees the registry), or talk to Lemonade with a plain `fetch` to its OpenAI-compatible URL
-   (KISS, no registry dependency). pi-blackhole's `Symbol.for("pi-blackhole:provider-streams")`
-   bridge (`src/om/provider-stream.ts`, 17 lines) is the workaround if isolated workers are ever
-   needed.
 
-## Headless (`pi -p --mode json`) notes
-All the above hooks/tools/completions fire in headless print/json mode (same AgentSession +
-harness + agent-loop). But `ctx.hasUI === false` and `ctx.mode ∈ {"print","json"}` — guard every
-`ctx.ui.*` call (no-op or throws). `ctx.shutdown()` is a no-op in print mode. Compaction still
-auto-fires on `threshold`/`overflow` headless, so `session_before_compact` is reachable without
-an interactive `/compact`. **The folding design must be fully autonomous — no `ui.confirm`.**
+1. **Import LLM and type helpers only from `@earendil-works/pi-ai/compat`.** Pi's loader injects
+   bundled virtual modules; a separately installed `pi-ai` will not see the engine's model registry
+   or auth. The same applies to `typebox` and the other `@earendil-works/*` packages — declare them
+   as peer dependencies and never bundle a copy.
+2. **Avoid isolated sub-workers for any model call.** Pi loads extensions through jiti with
+   `moduleCache: false`. A call made from a separate isolated worker gets its own empty provider
+   registry and will not see custom providers. Call synchronously inside the hook (the main module
+   sees the registry), or use a plain `fetch` to an OpenAI-compatible URL.
 
-## Fork divergence (historical — fork retired 2026-07-10)
-`WILLOW_FORK.md` (in the archived fork): only package metadata (name, `willow` bin, `piConfig.name=willow`,
-`configDir=.willow`) + a cosmetic TUI patch + the pi-ai-root→compat loader alias + the upstream
-0.80.1→0.80.2 sync. **No willow-specific changes to `ContextEvent`/`transformContext`,
-`session_before_compact`, `registerTool/Command`, `appendEntry`, or the model registry.**
+## Headless notes
+
+Every hook, tool and command above fires in `pi -p --mode json`. But `ctx.hasUI === false` and
+`ctx.mode ∈ {"print","json"}`, so **guard every `ctx.ui.*` call** — this extension only ever
+touches `ctx.ui` through optional chaining, in the display-only status command. `ctx.shutdown()`
+is a no-op in print mode. Compaction still auto-fires on threshold and overflow headless, so
+`session_before_compact` is reachable without an interactive `/compact`.
+
+**The folding design must be fully autonomous — no `ui.confirm` anywhere on the automatic path.**

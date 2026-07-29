@@ -1,287 +1,213 @@
-# context-fold — Design Note
+# context-fold — architecture
 
-> **2026-07-28 rebuild:** this note describes the ORIGINAL architecture (continuous Keel
-> folding, now the legacy `CONTEXTFOLD_MODE=keel` path). The shipped default is the discrete
-> fold ladder — B/C/A layered compaction with a deterministic seed index — designed in
-> `plans/2026-07-28-rebuild.plan.md` and specced in `docs/SEED_INDEX_SPEC.md`. The mechanism
-> layer below (blocks, digests, applyPlan, the L0 gate, the spool) is shared by both modes and
-> still accurate.
-
-Reversible in-session context compaction for CLI coding agents. Harness-agnostic core,
-thin per-harness adapters. First target: the Pi agent (`@earendil-works/pi-*`).
-
-> Companion docs in this repo:
-> - `docs/accordion-port-spec.md` — implementation-ready extraction of Accordion's fold
->   mechanism (the code to port, function-by-function, with source line refs).
-> - `docs/pi-api-surface.md` — the exact Pi extension API this depends on, verified against
->   the Willow fork.
-> - Deeper rationale + the original code-lift kernel: `~/memory/borrow/borrow-manifest.md`,
->   section "Context Folding — Code Lifts".
+How the extension is built and why, at the level a contributor needs before changing it. The
+README describes the behaviour; this describes the machine. `docs/SEED_INDEX_SPEC.md` specifies
+the on-disk index format, and `docs/pi-api-surface.md` records the Pi extension API this depends
+on.
 
 ---
 
-## 1. Problem & scope
+## 1. The core principle
 
-Long sessions — especially research — blow the context budget, and the default `/compact`
-permanently rewrites old turns into lossy prose. We want to run sessions longer without that
-loss.
+**Context is a view, not a store.** Three rules, enforced by the mechanism rather than by
+convention:
 
-**What this is:** an in-session context-window compactor. On each model call it replaces the
-*content* of cold blocks with short digests **in the outgoing message array only**, leaving
-the real session history untouched. Folding is instant and fully reversible — the agent can
-pull any folded block back verbatim by its handle.
+1. **Content substitution, never structural removal.** A folded block stays in the outgoing
+   message array and keeps its `callId`; only its rendered content is swapped, and the message
+   count never moves. A `tool_call`/`tool_result` pair therefore *cannot* orphan — the guarantee
+   is structural, not policed.
+2. **Reversible by default.** Every folded block carries a deterministic `{#<code> FOLDED}` tag.
+   The agent reads the code and calls `recall`/`unfold` to get the original back. No vector store,
+   no search index: the handle *is* the address, and the original is in the session file and the
+   spool.
+3. **Protected working tail.** The newest ~N tokens never fold, so recent reasoning stays at full
+   fidelity. The tail is never empty — the newest block is always protected.
 
-**What this is NOT:** durable cross-session memory. It never writes to `~/memory`. The
-`autojournal` stack owns cross-session recall; context-fold owns the live
-window. They are orthogonal layers and must coexist (both touch compaction — see §7).
-
-**Why portable:** if it works, Jake wants it on CLI tools outside the Willow ecosystem. So
-the fold engine has zero harness dependencies; each harness gets a small adapter.
-
----
-
-## 2. Core principle (do not violate)
-
-**"Context is a view, not a store."** Three rules inherited from Accordion, all enforced by
-the mechanism, not by convention:
-
-1. **Content substitution, never structural removal.** A folded block stays in the array and
-   keeps its `callId`; only its rendered content is swapped. A `tool_call`/`tool_result` pair
-   can therefore never orphan. (The only exceptions are whole-message group-collapse and
-   group-drop, which are pair-balanced by a fixpoint — see port spec §1d.)
-2. **Reversible by default.** Every folded block carries a deterministic `{#<code> FOLDED}`
-   tag; the agent reads the code and calls `unfold`/`recall` to get the original back. No
-   vector DB, no search index — the handle *is* the address and the original *is* in the
-   session.
-3. **Protected working tail.** The newest ~N tokens are never folded, so recent reasoning
-   stays full-fidelity. The tail is never empty (the newest block is always protected).
+The session file is never modified. Folding exists only in the per-call outgoing copy that Pi's
+`context` hook hands over.
 
 ---
 
-## 3. Architecture — pure core + harness adapter
+## 2. Layout — pure core, thin adapter
 
 ```
-context-fold/
-  src/
-    core/                 # ZERO harness deps. Pure, portable, unit-testable in isolation.
-      tokens.ts           # estTokens = ceil(len/4), BLOCK_OVERHEAD, clip, firstLine
-      digest.ts           # {#code FOLDED} tag, foldCode (FNV-1a), per-kind digestBody  [port ~verbatim]
-      contract.ts         # ConductorView, Command union, ViewBlock, ClampReason  [types only, pure]
-      block.ts            # Block/Group model, linearize(), blockId(), isDurableId()
-      apply.ts            # applyPlan(messages, ops, groups) — the orphan-safe rewrite  [load-bearing]
-      policy/
-        keel.ts           # deterministic Phase-1 policy: roots, relevance, score, ladder, budget
-        model.ts          # (Phase 2) model-driven policy — calls a local model at epoch boundaries
-    adapters/
-      pi/
-        index.ts          # default (pi) => {...} factory: mounts the context hook, unfold tool, storage
-        hook.ts           # context-hook glue: AgentMessage[] <-> core Block[], call policy, applyPlan
-        unfold-tool.ts    # registerTool({ name:"unfold", ... }) — recall by fold-code
-        storage.ts        # ledger-as-storage: append fold/unfold entries, fold them back on read
-  docs/                   # this design note + port spec + api surface
-  tests/
+src/
+  core/                    # ZERO harness dependencies. Pure, portable, unit-testable in isolation.
+    tokens.ts              # estTokens = ceil(len/4) + BLOCK_OVERHEAD, clip, firstLine, safeSlice
+    digest.ts              # the {#code FOLDED} tag, foldCode (FNV-1a), per-kind and pointer digests
+    contract.ts            # ConductorView / Command / ViewBlock — types only, pure
+    block.ts               # the Block model, linearize(), blockId(), isDurableId()
+    apply.ts               # applyPlan(messages, ops) — the wire rewrite
+    gate-registry.ts       # id → born-folded pointer entry (the L0 gate's registry)
+    index/seed-index.ts    # deterministic extraction of the seed index record
+    policy/
+      fold-ladder.ts       # the shipped policy: when a fold event fires and what it masks
+      ledger.ts            # the error/risk lexicon — what must survive at every fidelity level
+  adapters/pi/             # every Pi API call and all disk I/O lives here
+    index.ts               # the extension entry point: hooks, tools, commands
+    store.ts               # the engine — view construction, frozen layers, recall, lowering
+    gate.ts                # the L0 ingestion gate decision
+    spool.ts               # sha256-verified fold envelopes on disk
+    index-store.ts         # seed-index.jsonl emission
+    persistence.ts         # event-sourced fold state (survives resume)
+    compact.ts             # the deterministic hard-compaction summary
+    handoff.ts             # /fold-handoff — the one opt-in LLM path
+    advisor.ts             # cold detection and the reset yellow flag
+    cache-telemetry.ts     # measured cacheRead/cacheWrite accounting
+    retention.ts           # spool GC
+    unfold-tool.ts         # the recall / unfold tools
+    config.ts              # CONTEXTFOLD_* env parsing
 ```
 
 **The seam:** the core speaks only its own `AgentMessage`-shaped block model and a
 `conduct(view) → Command[]` policy interface. The Pi adapter converts Pi's `AgentMessage[]`
-to/from core blocks and owns every Pi API call. A future adapter for another CLI implements
-the same conversion against that tool's hook system; the core is untouched.
+to and from core blocks and owns every Pi API call. An adapter for another harness implements the
+same conversion against that tool's hooks; the core is untouched.
 
-**Policy/mechanism split (keep even though it's one process):** the *mechanism* (`apply.ts` —
-rewrite messages, heal orphans, enforce tail) is deterministic plumbing. The *policy*
-(`policy/*` — which blocks are cold, how hard to compress) is the *decision*, and is the slot
-where a model plugs in. This split is what lets us A/B a deterministic vs a model-driven
-policy without touching the mechanism.
+**Policy/mechanism split:** the *mechanism* (`apply.ts` — rewrite messages, enforce the tail) is
+deterministic plumbing. The *policy* (`policy/fold-ladder.ts` — when to fold and what) is the
+decision. Keeping them apart is what lets the fold timing change without touching the rewrite.
 
 ---
 
-## 4. The per-turn fold pipeline (the `context` hook)
+## 3. The per-turn pipeline (the `context` hook)
 
-The Pi `context` hook fires before every model call, hands us a deep copy of the outgoing
-`AgentMessage[]`, and the array we return is what actually gets sent (verified — see
-`docs/pi-api-surface.md`). Per turn:
+Pi's `context` hook fires before every model call, hands over a deep copy of the outgoing
+`AgentMessage[]`, and the array returned is what actually gets sent. Per turn:
 
 ```
 on "context" (messages, ctx):
-  blocks   = linearize(messages)               # provider msgs -> typed Block[]
-  protect  = protectedFromIndex(blocks, tailTarget)
-  view     = buildView(blocks, protect, budget, contextWindow, liveTokens)
-  cmds     = policy.conduct(view)              # Keel (det) or model policy; null = hold last plan
-  {ops, groups} = lower(cmds)                  # Command[] -> FoldOp[] / GroupOp[]
-  out      = applyPlan(messages, ops, groups)  # orphan-safe in-place rewrite
-  return { messages: out }
+  blocks   = linearize(messages)                  # provider messages → typed Block[]
+  gate     = computeGatePointers(blocks)          # L0 born-folded pointers (every turn)
+  frozen   = computeFrozenOps(blocks)             # committed layer bytes (every turn)
+  view     = buildView(blocks, protect, budget, …)
+  cmds     = policy.conduct(view)                 # the fold ladder; [] = nothing to do
+  ops      = lower(cmds, blocks, protect)         # Command[] → FoldOp[]
+  commit(ops)                                     # freeze as a layer, emit the seed index
+  return applyPlan(messages, merge(gate, frozen, ops))
 ```
 
-**Epoch band (cost control, do not skip):** the policy does NOT re-fold every turn. It holds
-while context ≤ ~0.9·cap, and only when it crosses that line folds down to ~0.7·cap in one
-shot (≈20% hysteresis → at most one KV-cache miss per epoch, keeps the prefix warm). This is
-what makes a *model* policy affordable: the model call happens a handful of times in a long
-session, at epoch boundaries, never per-turn.
+The merge order is **gate > frozen > policy**: the gate owns its ids outright, and a frozen id's
+bytes outrank any late policy op for it.
 
 ---
 
-## 5. The policy slot — deterministic first, model as the experiment
+## 4. Why discrete fold events
 
-- **Phase 1 — Keel deterministic (baseline).** Pure function of the view: entity-reachability
-  (fold semantically-dead blocks first) → risk stickiness (keep paths/commands/decisions) →
-  ACT-R cold score (kind-major: tool_result folds before thinking before text; user never
-  folds) → fidelity ladder (Full → skeleton → trim → digest → group → drop). Zero model calls,
-  zero GPU. Degrades byte-identically with no model link. Full algorithm in port spec §4.
-- **Phase 2 — model-driven policy (the leverage).** A local Lemonade model perceives the cold
-  zone at each epoch boundary and decides coldness / writes better digests. This is the
-  shared-world version: *the model is in the deciding loop*, which a deterministic compactor
-  structurally can't be. Whether it earns its inference cost is the experiment's hypothesis,
-  not an assumption.
+Between fold events the context is **append-only**. Any mutation of history moves bytes and
+invalidates the provider's prompt-cache suffix, so masking is batched at chosen boundaries where
+that invalidation is paid once, and each event's substitutions are committed as a **frozen layer**
+whose bytes never change again. The head of the context therefore stays byte-identical turn over
+turn, which is what keeps prefix caches warm.
 
----
+A fold event fires when both hold: usage is past the first-fold threshold (~45 % of the window,
+or 25 % when telemetry shows the session has never had a live cache read — with no warm prefix
+there is nothing to protect), and the maskable mass is worth at least one ladder step (~12 % of
+the window). Crossing the absolute budget cap is an emergency event with no minimum.
 
-## 6. Reversibility & recall
+A committed layer is only ever released by an explicit agent `unfold` (a deliberate single-point
+prefix break) — never by the engine deciding to re-plan, which would re-prefill the cache to
+reproduce byte-identical digests. When everything maskable is already frozen and the context is
+still over budget, the engine says so rather than churning.
 
-- **Fold-tag:** `{#<code> FOLDED}`, `<code>` = 6-char base36 FNV-1a hash of the block's durable
-  id (stateless, reproducible). Port `digest.ts` ~verbatim.
-- **`unfold` tool:** registered via `pi.registerTool`, modeled on pi-blackhole's `recall.ts`
-  dispatch pattern (`promptSnippet` + `promptGuidelines` teach the grammar). Agent passes a
-  fold-code; we return the original block content. `recall` = return content as a tool result
-  without changing standing context; `unfold` = re-expand it in the view next turn.
-- **Cross-restart persistence (can defer past MVP):** store fold/unfold events as custom
-  ledger entries (`pi.appendEntry("contextfold.fold.*", ...)`) and reconstruct by left-folding
-  them — the exact event-sourced pattern from pi-blackhole's `foldLedger` (fold = "recorded",
-  unfold = "tombstone"). Reversibility maps onto it naturally. **Shipped** — see §6b.
+`CONTEXTFOLD_MAX_LAYERS` bounds the layer *records*: past the bound they merge into one. Digest
+bytes are untouched, so the warm prefix survives the merge for free.
 
 ---
 
-## 6a. L0 ingestion gate (shipped)
+## 5. The L0 ingestion gate
 
-The per-turn pipeline (§4) folds blocks once they age past the budget. The **L0 gate** folds one
-class of block *at ingestion*, before it is ever sent warm: a tool result larger than
-`CONTEXTFOLD_L0_THRESHOLD` est-tokens. Rationale — a verbose flood (a 12k-token file read, a
-pytest wall) has near-zero marginal value warm, yet costs its full weight on every subsequent turn
-until Keel gets around to it. The gate collapses it to a pointer the moment it lands.
+The ladder folds blocks once they age past a threshold. The **L0 gate** folds one class of block
+*at ingestion*, before it is ever sent warm: a tool result larger than `CONTEXTFOLD_L0_THRESHOLD`
+est-tokens. A verbose flood (a 12k-token file read, a test-runner wall) has near-zero marginal
+value warm, yet costs its full weight on every subsequent turn.
 
-- **Seam (D10):** the `tool_result` hook OBSERVES only — it spools the raw payload and registers a
-  born-fold, but never mutates the result. The session jsonl therefore keeps raw ground truth
-  (trace-mining, `--export`, and post-hoc debugging are untouched). Substitution is view-only, in
-  the existing `context` hook.
-- **Spool:** `<sessionDir>/spool/<sessionId>/<code>.json` — a versioned, sha256-verified envelope
-  per fold (atomic write, dedup aliases for identical payloads). Retention (Phase 6): at session
-  start, SIBLING session spools with no file newer than `CONTEXTFOLD_SPOOL_RETAIN_DAYS` (default
-  14; `0`/`off` = never delete) are removed whole-dir — aliases only point at siblings, so no
-  dangling — and the current session's spool is never touched. A reaped spool degrades exactly
-  like a missing one: resume drops the fold, recall throws the typed SpoolError.
-- **Born-folded blocks (the deep cut):** the "every block starts warm" invariant Keel assumed is
-  now "…unless the gate registry marks it born-folded." A born-folded block enters the view already
-  a pointer: budget math charges its *pointer* weight, ranking still sees its *full* weight, and the
-  fidelity ladder / hard-cap floor treat it as terminal (never re-digested). Isolated behind the
-  gate registry; fail-open means a bug degrades to no-gating, not corruption.
-- **Pointer:** a tool-aware digest (path/pattern/command + sizes), head + tail, every detected
-  error/risk line verbatim (the rtk failure mode — a buried `ImportError` never reduces to a
-  summary line), a spool locator, and one recall usage line. ≤400 est-tokens.
-- **Recall:** the existing `recall` tool serves L0 codes from the spool — whole, or sliced by
-  `grep=<term>` / `lines=<a-b>` (partial retrieval, so recall can't itself re-flood the context).
-  A missing/corrupt spool returns an explicit error naming the path (D16).
-- **Error policy (D7/D31):** error-shaped results (the `isError` flag or a lexical error hit) get a
+- **Observe-only seam.** The `tool_result` hook spools the raw payload and registers a born-fold,
+  but never mutates the result. The session file keeps raw ground truth. Substitution is view-only,
+  in the `context` hook.
+- **Spool.** `<sessionDir>/spool/<sessionId>/<code>.json` — a versioned, sha256-verified envelope
+  per fold, written atomically, with dedup aliases for identical payloads.
+- **Born-folded blocks are terminal.** Such a block enters the view already a pointer: budget math
+  charges its *pointer* weight, and the ladder never re-folds it.
+- **The pointer** carries a tool-aware digest (path/pattern/command plus sizes), head and tail, and
+  **every detected error/risk line verbatim** — a buried `ImportError` never reduces to a summary
+  line. Capped at ~400 est-tokens.
+- **Error policy.** Error-shaped results (the `isError` flag or a lexical error hit) get a
   `CONTEXTFOLD_L0_ERRCAP`× higher threshold, so a short error is never folded away; a large one
   folds but keeps every error line.
-- **Kill switch (D20):** `CONTEXTFOLD_L0` — unset/`0` inert, `1` all models, or a comma-separated
-  model-id substring allowlist for per-model rollout.
 
-## 6b. Fold-state persistence (shipped)
+## 6. Fold-state persistence
 
-Keel's L2/L3 folds are re-derived from the view every turn, so they need no persistence. The gate
-registry and the agent's unfold decisions are the only cross-turn state, and the `tool_result` hook
-does not re-fire on resume — so they are event-sourced as custom entries
-(`contextfold.fold`, `{kind:"gate"|"unfold"}`) and left-folded back on `session_start`. Each
-restored pointer is revalidated against its spool file; a vanished spool drops the fold (the block
-renders raw) rather than leaving a dead pointer.
+The `tool_result` hook does not re-fire for results already in history, so the gate registry, the
+agent's unfold decisions and the committed layers are event-sourced as custom entries
+(`contextfold.fold`) and left-folded back on `session_start`. Each restored pointer is revalidated
+against its spool file; a vanished spool drops the fold (the block renders raw) rather than leaving
+a dead pointer.
 
----
-
-## 7. Coexistence constraint (must verify in Phase 1)
-
-context-fold drives the per-turn `context` hook. `autojournal` and any native
-`/compact` also operate on context. The `context` hook is non-destructive and chains (multiple
-handlers each see the prior's output), so per-turn folding should compose cleanly. But we must
-confirm: (a) folding doesn't corrupt what autojournal reads, and (b) if native
-`session_before_compact` still fires under pressure, our folded view and its destructive
-summary don't fight. Decision for Phase 1: prefer keeping context-fold purely on the `context`
-hook and letting it relieve pressure *before* `session_before_compact` ever triggers.
+Retention: at session start, sibling session spools whose newest file is older than
+`CONTEXTFOLD_SPOOL_RETAIN_DAYS` are removed whole-directory. Dedup aliases only ever point at
+siblings in the same directory, so nothing dangles, and the current session's spool is never
+touched.
 
 ---
 
-## 8. Critical invariants & gotchas (from the source extraction — full list in port spec)
+## 7. Failure posture
 
-1. **Orphan-prevention is a fixpoint, not one pass.** Removing one message can strand a
-   tool-pair partner in another; iterate until stable (port spec §1d). This is the heart of
-   provider-safety.
-2. **Only durable ids may be folded.** Ids prefixed `u:`/`a:`/`r:`/`s:` are content-anchored
-   and stable; positional `m<i>:…` ids re-point once folding makes the array non-append-only.
-   `isDurableId` gate is separate from the kind-based `wireFoldable` gate — don't conflate.
-3. **One summary message per contiguous RUN, not per group.** An interior straggler splits a
-   group; charge one summary per surviving sub-run or budget accounting breaks.
-4. **The engine is the sole author of the `{#code}` tag.** Strip any tag a policy supplies and
+Every hook is fail-open with a bounded blast radius, and every degradation is announced on stderr
+rather than swallowed — the failure mode to avoid is silent token creep.
+
+| failure | cost |
+|---|---|
+| gate throws | that one result flows raw |
+| fold pass throws | that one turn's context goes out raw |
+| seed-index emission throws | that one index record is lost |
+| deterministic compaction throws | Pi's own compaction runs instead |
+| resume restore throws | prior folds render raw this session |
+| spool missing or corrupt | that fold drops; recall returns a typed error naming the path |
+
+`CONTEXTFOLD=0` disables the extension entirely for a session — the escape hatch for a live
+incident, with no need to touch the install.
+
+---
+
+## 8. Invariants — do not break these
+
+1. **Only durable ids may be folded.** Ids prefixed `u:`/`a:`/`r:`/`s:` are content-anchored and
+   stable; positional `m<i>:…` ids re-point once folding makes the array non-append-only. The
+   `isDurableId` gate is separate from the kind-based `wireFoldable` gate — do not conflate them.
+2. **The engine is the sole author of the `{#code}` tag.** Strip any tag a policy supplies and
    prepend the authoritative one.
-5. **Single disposition:** no block id in two commands (e.g. both `fold` and `group`).
-6. **Token estimator is uniform `ceil(chars/4)+4`.** One swappable oracle in `tokens.ts`; Keel
-   deliberately over-estimates group head cost — keep that conservatism.
-7. **Pi import constraint:** import LLM/types helpers from `@earendil-works/pi-ai/compat`, not
-   a separately-installed `pi-ai` (the loader injects bundled virtual modules; a foreign copy
-   won't see the engine's model registry).
+3. **Single disposition.** No block id in two ops.
+4. **The token estimator is uniform `ceil(chars/4) + 4`,** one swappable oracle in `tokens.ts`.
+5. **Frozen bytes are immutable** for the life of the layer. Only an explicit unfold or a recorded
+   layer break releases one.
+6. **Risk lines survive every fidelity level.** The error lexicon is deliberately broad and
+   any-case; a failure signal that vanishes into an elision marker is the bug this project exists
+   to prevent.
+7. **No model call on the automatic path**, ever. `/fold-handoff` is the only LLM path and it is
+   explicitly invoked.
+8. **Import Pi helpers only from `@earendil-works/pi-ai/compat`.** Pi injects bundled virtual
+   modules; a separately installed copy will not see the engine's model registry. Never vendor
+   `typebox` or the `@earendil-works/*` packages — declare them as peers.
 
 ---
 
-## 9. Build phases
+## 9. Scope
 
-### Phase 1 — deterministic MVP (next session)
-Scaffold + port the pure core + wire the Pi adapter + deterministic Keel policy. No model calls.
-Concrete steps:
-1. `npm init`, TS config, jiti no-build setup, `package.json` `pi.extensions: ["./src/adapters/pi/index.ts"]`. Pin `@earendil-works/pi-*` peer dep to the fork's band (`>=0.80 <1.0`).
-2. Port pure core: `tokens.ts`, `digest.ts` (verbatim), `contract.ts` (types), `block.ts`
-   (`linearize`/`blockId`/`isDurableId`/`messageInfo`), `apply.ts` (`applyPlan` + the fixpoint).
-3. Port `policy/keel.ts` Phase-1 only (roots/relevance/score/ladder/budget; no `complete`/`compress` paths).
-4. Adapter: `hook.ts` (context hook ↔ core), `unfold-tool.ts`, minimal in-memory fold-state
-   (ledger persistence optional this phase).
-5. Unit tests on the core (orphan fixpoint, protected tail, digest determinism, single-disposition).
+**What this is:** an in-session context-window compactor. On each model call it replaces the
+*content* of stale blocks with short digests **in the outgoing message array only**.
 
-**Phase 1 success criteria (verifiable):**
-- On a session driven past budget, cold blocks fold to digests and `liveTokens ≤ cap`.
-- The agent can call `unfold <code>` and get the original block back verbatim.
-- No orphaned tool pairs ever reach the provider (assert in a test with parallel tool calls).
-- Runs clean in `pi -p --mode json` (headless) with no UI dependency.
-
-### Phase 2 — model-driven policy
-`policy/model.ts` calls the loaded Lemonade model at epoch boundaries. Call it **synchronously
-inside the hook** (shares the main module's pi-ai instance → sees the provider registry, avoids
-pi-blackhole's jiti-isolation trap), or plain `fetch` to Lemonade's OpenAI endpoint (KISS).
-
-### Phase 3 — the experiment
-Matrix: {native `/compact` · deterministic fold · model fold} × {GPT-5.5 driver · local Lemonade
-driver}. The small local model is the canary for fold-tag confusion / token bloat.
-- **Quality:** recall accuracy on a labeled question set probing early/mid/recent facts, after
-  compaction. Win = fold beats native `/compact` at the same token budget.
-- **Cost:** final context tokens, per-turn folding latency, model calls.
-- Reuse the `/experiments` harness and the labeled-recall-set machinery from the autojournal A/B.
+**What this is not:** durable cross-session memory. It owns the live window; a journalling or
+memory layer owns cross-session recall. They are orthogonal and must coexist — both touch
+compaction, so context-fold stays on the `context` hook and relieves pressure *before*
+`session_before_compact` would otherwise fire.
 
 ---
 
-## 10. Open decisions (resolve as they come up; not blocking Phase 1)
-- Ledger persistence of fold state in MVP, or defer to Phase 2? (Lean: defer; in-memory is fine
-  for a single session.)
-- Model-call transport in Phase 2: in-hook `complete()` vs plain `fetch`. (Lean: try `fetch`
-  first for portability beyond Pi.)
-- Tail target N and epoch band thresholds: start with Accordion's defaults (~20k tail, 0.9/0.7
-  band), tune in Phase 3.
+## 10. Provenance
 
----
-
-## Phase 1 kickoff prompt (paste into the fresh session)
-
-> Build Phase 1 of context-fold (`~/library/jake/context-fold`) — a reversible in-session context compactor
-> as a Pi/Willow agent extension. Read `~/library/jake/context-fold/DESIGN.md`,
-> `~/library/jake/context-fold/docs/accordion-port-spec.md`, and `~/library/jake/context-fold/docs/pi-api-surface.md`
-> first; the deterministic algorithm and exact Pi APIs are fully specified there. Re-clone
-> Accordion at pinned commit `0c22434` (`git clone https://github.com/a-Fig/Accordion`) to copy
-> `digest.ts`/`tokens.ts` and check the `applyPlan`/Keel source against the spec. Goal: the pure
-> core (`src/core/*`) + a deterministic Keel policy + the Pi adapter (`context` hook + `unfold`
-> tool), no model calls. Verify against the Phase 1 success criteria in DESIGN.md §9, including a
-> unit test proving parallel tool-call pairs never orphan and a live `pi -p --mode json` run
-> that folds under budget and unfolds on demand.
+The pure core is ported from [Accordion](https://github.com/a-Fig/Accordion) (pinned commit
+`0c22434`) — `digest.ts` and `tokens.ts` close to verbatim, `applyPlan` and the block model
+adapted — stripped of all Svelte/Tauri/browser coupling and hardened since. The discrete fold
+ladder, the L0 ingestion gate, the seed index, the spool, and the advisor layers are original to
+this project. MIT throughout.

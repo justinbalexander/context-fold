@@ -132,7 +132,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 		const isSwitch = restoredFor !== "";
 		restoredFor = sid;
 
-		// Spool GC (Phase 6): reap sibling session spools past the retention window. Independent
+		// Spool GC: reap sibling session spools past the retention window. Independent
 		// of the restore below — the sweep never touches this session's dir, and the restore only
 		// judges this session's own entries.
 		const retainMs = spoolRetainMsFromEnv();
@@ -172,7 +172,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 		}
 	});
 
-	// OBSERVE-ONLY (D10): spool + register large tool results as they land; never mutate the result
+	// OBSERVE-ONLY: spool + register large tool results as they land; never mutate the result
 	// (the session jsonl keeps the raw payload — the view-only `context` hook does the substitution).
 	pi.on("tool_result", (event, ctx) => {
 		const cfg = resolveGate(ctx.model);
@@ -189,7 +189,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			});
 			if (decision.folded) {
 				const entry = registry.get(`r:${event.toolCallId}`);
-				if (entry) recordGateFold(pi, entry); // event-source the fold for resume (P3.1)
+				if (entry) recordGateFold(pi, entry); // event-source the fold for resume
 				if (debug) {
 					const dup = decision.dedupOf ? ` dedup=#${decision.dedupOf}` : "";
 					process.stderr.write(`[context-fold] l0-fold #${decision.code} tool=${event.toolName} ${decision.inTokens}→${decision.outTokens}${dup}\n`);
@@ -202,7 +202,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 		}
 	});
 
-	// Teaching text (D40): ≤6 lines telling the agent what the {#code FOLDED} pointers are and how to
+	// Teaching text: ≤6 lines telling the agent what the {#code FOLDED} pointers are and how to
 	// recall from them. Injected only when the gate is active for the current model, so it is charged
 	// to the gated arms and never taxes a baseline run. Positive framing (states when to recall).
 	pi.on("before_agent_start", (event, ctx) => {
@@ -245,7 +245,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 		try {
 			// Re-resolve the L0 kill switch per turn against the ACTIVE model: an allowlist change or
 			// a mid-session model switch takes effect immediately, and a resumed session with the gate
-			// off renders prior folds raw instead of substituting pointers (D20).
+			// off renders prior folds raw instead of substituting pointers.
 			engine.setGateActive(resolveGate(ctx.model).enabled);
 			lastContextWindow = ctx.getContextUsage()?.contextWindow ?? lastContextWindow;
 			// Ladder cold branch: no live cache read observed after a few turns ⇒ there is no warm

@@ -5,7 +5,7 @@
  * §"Minimal headless core to reimplement"): hold blocks, compute `protectedFromIndex`, build the
  * `ConductorView`, call `conduct`, lower `Command[]` → `FoldOp[]`/`GroupOp[]`, call `applyPlan`.
  *
- * It owns the only mutable session state in Phase 1: the set of agent-unfolded block ids (sticky
+ * It owns the only mutable session state: the set of agent-unfolded block ids (sticky
  * "held" — protected from re-folding) and a per-turn snapshot of the linearized blocks (so the
  * unfold/recall tool can resolve a fold-code back to its block). No durable ledger this phase.
  */
@@ -117,7 +117,7 @@ export interface CodeMatch {
 	note?: string;
 }
 
-/** A recall failure that names the offending spool path (D16), surfaced to the agent, never thrown. */
+/** A recall failure that names the offending spool path, surfaced to the agent, never thrown. */
 export interface CodeError {
 	code: string;
 	message: string;
@@ -165,7 +165,7 @@ export class ContextFoldEngine {
 	private readonly detCache = new Map<string, { len: number; digest: string; tokens: number }>();
 	/** L0 pointer substitution on/off for the ACTIVE model (the adapter re-resolves the CONTEXTFOLD_L0
 	 *  allowlist each turn). Restored gate entries stay recallable regardless — this only gates the
-	 *  view substitution, so turning the kill switch off renders prior folds raw again (D20). */
+	 *  view substitution, so turning the kill switch off renders prior folds raw again. */
 	private gateActive = true;
 	/** Last status the policy published (display-only). */
 	private lastStatus: { text: string | null; metrics?: Record<string, number | string | boolean>; details?: JSONValue } | null = null;
@@ -208,7 +208,7 @@ export class ContextFoldEngine {
 				this.lastStatus = { text, metrics, details };
 			},
 			requestRerun: () => {
-				/* Phase 1 is fully synchronous — no async rerun. */
+				/* The fold pass is fully synchronous — no async rerun. */
 			},
 		};
 		this.policy.attach?.(this.host);
@@ -350,7 +350,7 @@ export class ContextFoldEngine {
 	}
 
 	/** Born-folded pointer text per registered block id (skipping any the agent has unfolded).
-	 *  Empty when the kill switch is off for the active model (D20) — restored entries then render
+	 *  Empty when the kill switch is off for the active model — restored entries then render
 	 *  raw from history while staying recallable through the registry. */
 	private computeGatePointers(blocks: WireBlock[]): Map<string, string> {
 		const out = new Map<string, string>();
@@ -404,7 +404,7 @@ export class ContextFoldEngine {
 	 * Resolve fold-codes → ORIGINAL content (recall: read-only, no fold-state change). L0 (gate)
 	 * codes are served from the SPOOL — whole, or sliced by `grep`/`lines` (partial retrieval, so
 	 * recall never has to dump a whole flood back into context). A missing/corrupt spool becomes a
-	 * D16 error naming the path, surfaced to the agent rather than thrown. Non-gate folds (Keel L2/L3)
+	 * a typed error naming the path, surfaced to the agent rather than thrown. Non-gate folds (ladder masks)
 	 * resolve from the in-memory snapshot; grep/lines are ignored for them.
 	 */
 	resolveRecall(codes: string[], opts: RecallOptions = {}): { matches: CodeMatch[]; missing: string[]; errors: CodeError[] } {
@@ -453,7 +453,7 @@ export class ContextFoldEngine {
 
 	/**
 	 * Read an L0 fold's content from the spool and slice it. grep and lines= read the SAME haystack
-	 * (the tool's full-output file when readable, else the spool — D30), so a grep hit's line number
+	 * (the tool's full-output file when readable, else the spool), so a grep hit's line number
 	 * is always a valid input for a lines= follow-up. Whole recall is token-capped: recall must never
 	 * re-flood the context the gate saved (DESIGN §6a partial-retrieval promise).
 	 */
@@ -547,7 +547,7 @@ export class ContextFoldEngine {
 		return res;
 	}
 
-	/** Restore the agent's unfold decisions on session resume (event-sourced, P3.1). */
+	/** Restore the agent's unfold decisions on session resume (event-sourced). */
 	restoreUnfolded(ids: Iterable<string>): void {
 		for (const id of ids) this.unfolded.add(id);
 	}
@@ -598,7 +598,7 @@ export class ContextFoldEngine {
 			const frozenText = born ? undefined : frozenOps.get(b.id);
 			const frozen = frozenText !== undefined;
 			const foldable = wireFoldable(b);
-			// Born-folded blocks are charged at POINTER weight (criterion 6: budget math counts the
+			// Born-folded blocks are charged at POINTER weight (budget math counts the
 			// pre-folded block at digest weight); frozen blocks at their committed layer bytes;
 			// every other block starts warm at full weight.
 			const foldedTokens = born
@@ -791,7 +791,7 @@ function capWholeRecall(content: string): { text: string; note?: string } {
  * Grep `content` for a case-insensitive substring, returning matching lines with 1-based numbers,
  * capped at ~the pointer budget with a "narrow your query" nudge past the cap (so recall-grep
  * can't itself defeat the gate). The caller resolves WHICH haystack (full output vs spool) so
- * grep and lines= always share one numbering space (D30).
+ * grep and lines= always share one numbering space.
  */
 function grepContent(haystack: string, term: string, source: string): { text: string; note?: string } {
 	const needle = term.toLowerCase();

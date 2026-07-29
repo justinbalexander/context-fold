@@ -1,5 +1,5 @@
 /*
- * persistence.test.ts — event-sourced fold state across restarts (P3.1, criterion 9).
+ * persistence.test.ts — event-sourced fold state across restarts.
  *
  * Simulates a resume: session 1 folds + unfolds and appends ledger entries; a FRESH engine +
  * registry in "session 2" rebuilds state from those entries and reproduces the folded view, with
@@ -81,7 +81,7 @@ describe("fold ledger round-trip", () => {
 	});
 });
 
-describe("criterion 9 — resume restores fold state and all pointers resolve", () => {
+describe("resume restores fold state and all pointers resolve", () => {
 	it("a fresh engine rebuilds the folded view from the ledger; recall still works", () => {
 		const a = flood("ALPHA");
 		const b = flood("BETA");
@@ -126,7 +126,7 @@ describe("criterion 9 — resume restores fold state and all pointers resolve", 
 		expect(rec.matches[0].text.length).toBeGreaterThan(0);
 	});
 
-	it("revalidation drops a fold whose spool file has vanished (D16 safe degrade)", () => {
+	it("revalidation drops a fold whose spool file has vanished (safe degrade)", () => {
 		const a = flood("GAMMA");
 		const reg = new MapGateRegistry();
 		const store = new SpoolStore(dir);

@@ -8,12 +8,12 @@
  * verbatim (the gate is observe-only there); the spool is the recall-optimized copy the extension
  * owns and can slice.
  *
- * Layout (Contracts §Spool): `<sessionDir>/spool/<sessionId>/<foldCode>.json`. Writes are atomic
+ * Layout: `<sessionDir>/spool/<sessionId>/<foldCode>.json`. Writes are atomic
  * (tmp + rename). Reads verify sha256 and throw a typed SpoolError naming the path on any
  * missing/corrupt file, so the failure surfaces to the agent instead of silently returning wrong
- * bytes (D16 fail-explicit-on-recall).
+ * bytes (fail-explicit on recall).
  *
- * Dedup (D18): identical payloads (by sha256) are stored once. The duplicate block keeps its own
+ * Dedup: identical payloads (by sha256) are stored once. The duplicate block keeps its own
  * fold code, but its file is a tiny alias envelope pointing at the first code's file; reads follow
  * the alias. Content is written exactly once.
  *
@@ -46,7 +46,7 @@ export interface SpoolEnvelope {
 	aliasOf?: string;
 }
 
-/** What the caller learns after a write — enough to build the pointer digest (incl. the D18 note). */
+/** What the caller learns after a write — enough to build the pointer digest (including the dedup note). */
 export interface SpoolWriteResult {
 	code: string;
 	/** The effective envelope carrying the content (the ORIGINAL when this was a dedup hit). */
@@ -55,7 +55,7 @@ export interface SpoolWriteResult {
 	dedupOf?: string;
 }
 
-/** A typed spool failure that always names the offending path (D16). Never thrown across the wire. */
+/** A typed spool failure that always names the offending path. Never thrown across the wire. */
 export class SpoolError extends Error {
 	constructor(
 		message: string,
@@ -179,7 +179,7 @@ export class SpoolStore {
 
 	/**
 	 * Read a code's envelope, following one alias hop. Verifies sha256; a missing file or a mismatch
-	 * throws a SpoolError carrying the path (D16). Returns the CONTENT-BEARING envelope.
+	 * throws a SpoolError carrying the path. Returns the CONTENT-BEARING envelope.
 	 */
 	read(code: string): SpoolEnvelope {
 		return readEnvelopeAt(this.pathFor(code));

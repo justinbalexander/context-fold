@@ -1,8 +1,8 @@
 /*
- * recall-l0.test.ts — spool-backed recall for L0 (gate) folds (P2.1 + P2.2).
+ * recall-l0.test.ts — spool-backed recall for L0 (gate) folds.
  *
- * Covers byte integrity (criterion 4), partial retrieval via grep/lines (criterion 5), the D16
- * missing/corrupt error surface, and criterion 11's second half (a prior spool stays recallable
+ * Covers byte integrity, partial retrieval via grep/lines, the
+ * missing/corrupt error surface, and the kill switch's second half (a prior spool stays recallable
  * with the gate off).
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -52,7 +52,7 @@ function foldOne(content: string, callId = "c1", tool = "read", input: unknown =
 	return { reg, code: d.code! };
 }
 
-describe("L0 recall — byte integrity within the re-flood cap (criterion 4 + DESIGN §6a)", () => {
+describe("L0 recall — byte integrity within the re-flood cap ", () => {
 	it("a big flood recall is CAPPED: byte-exact prefix + a nudge to slice (recall can't re-flood)", () => {
 		const content = floodWith("BURIED: the load-bearing value is 7788");
 		const { reg, code } = foldOne(content);
@@ -108,7 +108,7 @@ describe("L0 recall — byte integrity within the re-flood cap (criterion 4 + DE
 	});
 });
 
-describe("L0 recall — partial retrieval (criterion 5)", () => {
+describe("L0 recall — partial retrieval", () => {
 	it("grep returns only matching lines with 1-based numbers", () => {
 		const content = floodWith("BURIED: the load-bearing value is 7788");
 		const { reg, code } = foldOne(content);
@@ -142,7 +142,7 @@ describe("L0 recall — partial retrieval (criterion 5)", () => {
 	});
 });
 
-describe("L0 recall — D16 failure surface", () => {
+describe("L0 recall — the missing-spool failure surface", () => {
 	it("names the path when the spool file is gone", () => {
 		const content = floodWith("BURIED here");
 		const { reg, code } = foldOne(content);
@@ -157,7 +157,7 @@ describe("L0 recall — D16 failure surface", () => {
 	});
 });
 
-describe("criterion 11 (second half) — prior spool recallable with the gate off", () => {
+describe("prior spool stays recallable with the gate off", () => {
 	it("recall works from registry+spool regardless of the kill switch", () => {
 		const content = floodWith("BURIED prior-session value 9001");
 		// Fold happened earlier (gate was on); the spool + registry entry persist.

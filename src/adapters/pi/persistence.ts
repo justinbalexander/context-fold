@@ -93,7 +93,7 @@ export function restoreFoldState(entries: EntryLike[]): {
 }
 
 /**
- * Revalidate restored gate entries against their spool files (D16): a fold whose spool is missing or
+ * Revalidate restored gate entries against their spool files: a fold whose spool is missing or
  * corrupt is DROPPED from the registry — the block then renders raw (safe degradation) rather than
  * showing a pointer that can't resolve. Returns the survivors and a report of what was dropped.
  */

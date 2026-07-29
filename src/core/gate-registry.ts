@@ -4,7 +4,7 @@
  * When the gate decides a tool result is too big, it spools the raw payload (adapter side) and
  * records one entry here, keyed by the result's durable block id (`r:<toolCallId>`). From then on
  * the block enters the model-facing view ALREADY folded to a pointer digest — "born folded" — with
- * two distinct weights the policy must keep straight (success criterion 6):
+ * two distinct weights the policy must keep straight:
  *   • its POINTER weight (what actually costs tokens in the wire), charged to the budget;
  *   • its FULL weight (what it would cost warm), which ranking still sees so relevance stays honest.
  *
@@ -12,7 +12,7 @@
  * locate the spool file, and rebuild on resume). The adapter owns the disk I/O and populates it.
  */
 
-/** One born-folded block. All fields are serializable so the registry can be event-sourced (P3.1). */
+/** One born-folded block. All fields are serializable so the registry can be event-sourced. */
 export interface GateEntry {
 	/** Durable block id of the folded tool result (`r:<toolCallId>`). */
 	blockId: string;
@@ -32,7 +32,7 @@ export interface GateEntry {
 	spoolPath: string;
 	/** Bash results: the tool's own full-output file, also searched by recall-grep. */
 	fullOutputPath?: string;
-	/** D18: set when this payload was identical to an earlier fold. */
+	/** Set when this payload was identical to an earlier fold. */
 	dedupOf?: string;
 }
 

@@ -59,7 +59,7 @@ describe("SpoolStore write/read", () => {
 	});
 });
 
-describe("SpoolStore dedup (D18)", () => {
+describe("SpoolStore dedup", () => {
 	it("stores identical payloads once and aliases the duplicate code", () => {
 		const store = new SpoolStore(dir);
 		const content = "identical payload " + "z".repeat(3000);
@@ -85,7 +85,7 @@ describe("SpoolStore dedup (D18)", () => {
 	});
 });
 
-describe("SpoolStore failure paths (D16)", () => {
+describe("SpoolStore failure paths", () => {
 	it("throws a SpoolError naming the path when the file is missing", () => {
 		const store = new SpoolStore(dir);
 		try {

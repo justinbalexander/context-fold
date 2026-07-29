@@ -1,13 +1,13 @@
 /*
  * gate.ts — the L0 ingestion gate decision, run from Pi's `tool_result` hook.
  *
- * OBSERVE-ONLY (D10): this never mutates the tool result. It looks at a result as it lands, decides
+ * OBSERVE-ONLY: this never mutates the tool result. It looks at a result as it lands, decides
  * whether it is large enough to spool, and — if so — writes the raw payload to the spool and records
  * a born-folded entry in the gate registry. The session jsonl keeps the raw result verbatim (we
  * return nothing to the hook), so trace-mining and post-hoc debugging are unaffected. The actual
  * substitution (raw → pointer) happens later, view-only, in the `context` hook (store.ts).
  *
- * Fail-open (D16): any error here degrades to "not folded" and the raw result flows through.
+ * Fail-open: any error here degrades to "not folded" and the raw result flows through.
  */
 import { estTokens, BLOCK_OVERHEAD } from "../../core/tokens";
 import { foldCode, pointerDigestTokens, type PointerMeta } from "../../core/digest";
@@ -37,8 +37,8 @@ export interface GateModelDescriptor {
 /**
  * Build the searchable identity used by a per-model allowlist. Dynamic provider aliases often
  * have an opaque id such as `current`; their human-readable name carries the actual backend model.
- * Include all three stable fields so `CONTEXTFOLD_L0=Qwen3.6` still matches a
- * `lemonade-current/current` alias whose name identifies the loaded Qwen3.6 checkpoint.
+ * Include all three stable fields, so an allowlist entry still matches a provider whose id is an
+ * opaque alias (`some-backend/current`) but whose name identifies the real checkpoint.
  */
 export function gateModelIdentity(model: GateModelDescriptor | undefined): string | undefined {
 	if (!model) return undefined;
@@ -50,7 +50,7 @@ export function gateModelIdentity(model: GateModelDescriptor | undefined): strin
 }
 
 /**
- * Resolve the D20 kill switch: unset/"0" → off; "1" → on for all models; a comma-separated list of
+ * Resolve the ingestion-gate kill switch: unset/"0" → off; "1" → on for all models; a comma-separated list of
  * model-identity substrings → on iff the active provider/id/name identity matches one. Prior spools stay recallable
  * regardless (that path never consults this).
  */
@@ -96,7 +96,7 @@ export interface ToolResultObservation {
 	input: unknown;
 	isError: boolean;
 	content: ReadonlyArray<{ type: string; text?: string }>;
-	/** Bash results: the tool's own full-output file (D30). */
+	/** Bash results: the tool's own full-output file. */
 	fullOutputPath?: string;
 }
 
@@ -119,7 +119,7 @@ export interface GateDecision {
 	dedupOf?: string;
 }
 
-/** Tools whose output must never be gated (D12) — folding a recall/unfold would recurse. */
+/** Tools whose output must never be gated — folding a recall/unfold would recurse. */
 const EXEMPT_TOOLS = new Set(["recall", "unfold"]);
 
 /**
@@ -142,7 +142,7 @@ export class Gate {
 	observe(o: ToolResultObservation): GateDecision {
 		if (!this.cfg.enabled) return { folded: false, reason: "disabled" };
 		if (EXEMPT_TOOLS.has(o.toolName)) return { folded: false, reason: "exempt-tool" };
-		// D12: a result carrying any non-text (image/binary) block passes through untouched — folding
+		// A result carrying any non-text (image/binary) block passes through untouched — folding
 		// a tool_result collapses ALL its content to one text block, which would drop the image.
 		if (o.content.some((b) => b.type !== "text")) return { folded: false, reason: "non-text" };
 
@@ -153,7 +153,7 @@ export class Gate {
 		if (!text.trim()) return { folded: false, reason: "empty" };
 
 		const inTokens = estTokens(text);
-		// D31: error-shaped = the isError flag OR a lexical error hit. Error-shaped results get a much
+		// Error-shaped = the isError flag OR a lexical error hit. Error-shaped results get a much
 		// higher threshold (errCap×) so a short error is never folded away.
 		const errorShaped = o.isError || categorize(text).errors.length > 0;
 		const threshold = errorShaped ? this.cfg.threshold * this.cfg.errCap : this.cfg.threshold;
@@ -176,7 +176,7 @@ export class Gate {
 				fullOutputPath: o.fullOutputPath,
 			};
 			const outTokens = pointerDigestTokens(text, projMeta);
-			// D6: skip folding unless the pointer saves ≥ minSave of the full weight (no negative folds).
+			// Skip folding unless the pointer saves ≥ minSave of the full weight (no negative folds).
 			if (inTokens <= 0 || (inTokens - outTokens) / inTokens < this.cfg.minSave) {
 				return { folded: false, reason: "min-save", inTokens, outTokens };
 			}

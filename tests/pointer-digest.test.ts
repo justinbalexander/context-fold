@@ -1,7 +1,7 @@
 /*
  * pointer-digest.test.ts — the born-folded L0 pointer digest + L3 risk-line retention.
  *
- * The load-bearing case: a pytest-style flood with a mid-payload ImportError (the rtk failure the
+ * The load-bearing case: a pytest-style flood with a mid-payload ImportError (the failure the
  * gate exists to prevent). The error line must survive verbatim in BOTH the L0 pointer and the L3
  * aging digest — never reduced to a one-line summary.
  */
@@ -72,7 +72,7 @@ describe("L0 pointer digest", () => {
 		expect(pointerDigest(text, metaFor(text, { tool: "bash", input: { command: "git log --oneline" } }))).toContain("git log");
 	});
 
-	it("notes a dedup hit when dedupOf is set (D18)", () => {
+	it("notes a dedup hit when dedupOf is set", () => {
 		const text = "dup body";
 		const p = pointerDigest(text, metaFor(text, { dedupOf: "orig99" }));
 		expect(p).toContain("identical to #orig99");

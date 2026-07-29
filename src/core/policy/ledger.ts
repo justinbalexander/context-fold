@@ -36,7 +36,7 @@ interface CategorizedMarkers {
  * plain-word list is deliberately broad and any-case: test runners say "3 failed", tools print
  * "fatal:", CI says "Aborted" — a failure signal in any of those spellings must count as
  * error-shaped (this detector feeds the gate's never-fold-a-short-error threshold, the pointer's
- * kept-verbatim risk lines, AND the index's error field; a missed spelling is the rtk failure
+ * kept-verbatim risk lines, AND the index's error field; a missed spelling is the failure
  * mode). Kept as a SOURCE string so each consumer builds its own regex (no shared lastIndex).
  */
 export const ERROR_MARKER_SOURCE =

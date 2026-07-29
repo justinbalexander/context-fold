@@ -7,7 +7,7 @@
 #   (c) the view folded  — the next-turn outgoing view (CONTEXTFOLD_DUMP) has the pointer, not the
 #       buried payload marker.
 #
-# Phase 2 extends this (see the recall block, enabled once P2.2 lands): after the fold, a second
+# The recall block below extends this: after the fold, a second
 # prompt makes the agent answer a buried-line question via recall grep/lines.
 #
 # Model: defaults to gpt-5.6-sol via the openai-codex provider (reliable tool use). Override with
@@ -100,12 +100,12 @@ else
   echo "FAIL (c) no dump file written"; fail=1
 fi
 
-# ── Phase 2: recall a buried line the pointer does not carry (P2.2) ────────────
+# ── recall a buried line the pointer does not carry ────────────────────────────
 # Two calls on ONE session: call 1 forces the flood through the read tool; the file is then
 # DELETED, so on call 2 the spool is the only place the answer exists — the agent must recall.
 # (A single-call version let the agent bash-grep the still-on-disk file and skip recall entirely.)
 if [[ "${E2E_PHASE2:-1}" == "1" ]]; then
-  echo "== Phase 2: buried-line recall =="
+  echo "== buried-line recall =="
   P2FILE="$WORK/report2.log"; P2SESS="$WORK/sessions2"; mkdir -p "$P2SESS"
   P2SID="cfgate$$"
   PHRASE="banana-hammock-7"; TOKEN="FINDME_XR7"

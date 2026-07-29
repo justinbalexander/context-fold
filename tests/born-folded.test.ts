@@ -1,5 +1,5 @@
 /*
- * born-folded.test.ts — the L0 gate's born-folded block state in the pure core (P1.2).
+ * born-folded.test.ts — the L0 gate's born-folded block state in the pure core.
  *
  * A registered block enters the view already collapsed to a pointer digest, regardless of budget.
  * Criterion 6: the budget counts it at POINTER weight while ranking still sees its FULL weight; the
@@ -60,7 +60,7 @@ describe("born-folded blocks (L0 gate)", () => {
 		expect(isBalanced(out)).toBe(true);
 	});
 
-	it("criterion 6: budget counts pointer weight; ranking sees full weight", () => {
+	it("budget counts pointer weight; ranking sees full weight", () => {
 		const content = flood(400);
 		const gate = new MapGateRegistry();
 		register(gate, "c1", content);

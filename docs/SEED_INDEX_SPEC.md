@@ -1,11 +1,13 @@
 # Seed index — shared spec (v1)
 
 The seed index is the deterministic, lexical bridge back into a session's full
-history after context has been folded, compacted, or the session has ended. It
-is a **spec shared across harnesses** (Evoker's engine-owned substrate and the
-context-fold Pi extension emit the same shape), consumed by `/recall`-style
-reconstruction skills and journal synthesis — not an internal detail of any
-one implementation.
+history after context has been folded, compacted, or the session has ended.
+
+It is written as a **spec, not an internal detail**, so that other emitters
+(another harness's built-in compaction, a session-log indexer) can produce the
+same shape and the same recovery tooling — `/recall`-style reconstruction
+skills, journal synthesis — can read all of them. This document is the contract;
+`src/core/index/seed-index.ts` is one implementation of it.
 
 Design constraints it answers:
 
@@ -87,10 +89,10 @@ Field semantics:
   folded span, with turn number. User intent is never folded away silently.
 - `spans` — the recovery pointers. Each names the durable artifact holding
   the folded content and byte/line extent inside it. `log.path` is the
-  emitter's ground-truth store for that span (Evoker: the session log;
-  Pi extension: the sha256-verified spool envelope's content file — offsets
-  address the raw content, not the JSON envelope). `code` is the in-context
-  recall handle when the emitter has one.
+  emitter's ground-truth store for that span — for this extension, the
+  sha256-verified spool envelope's content file, so offsets address the raw
+  content and not the JSON envelope; another emitter might name a session log.
+  `code` is the in-context recall handle when the emitter has one.
 
 ## Consumption contract
 

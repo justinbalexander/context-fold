@@ -1,6 +1,6 @@
 /*
  * helpers.ts — fixture builders + provider-safety assertions for the tests. Builds AgentMessage
- * arrays in the exact structural shape Pi uses (verified against the Willow fork's types).
+ * arrays in the exact structural shape Pi uses (verified against Pi's types).
  */
 import type { AgentMessage } from "../src/core/block";
 import { linearize } from "../src/core/block";

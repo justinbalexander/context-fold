@@ -7,15 +7,15 @@ automatic path.
 
 Three layers, applied in this order:
 
-- **B — deterministic observation masking (default).** At discrete fold events, stale tool outputs
-  collapse to short reversible pointers; user intent, assistant conclusions, and the record of
-  actions stay verbatim. Zero model calls, zero hallucination risk.
-- **C — always-on reversibility floor.** Everything masked is spooled to disk (sha256-verified),
-  a deterministic **seed index** (files, commands, error lines, exact identifiers) is emitted at
-  every fold, and the agent gets span-capable `recall` over all of it.
-- **A — LLM summarization is opt-in only, never automatic.** `/fold-handoff` writes a handoff seed
-  for a fresh session — deterministic index first, model narrative clearly marked untrusted, with
-  a degradation warning up front.
+- **Deterministic observation masking.** At discrete fold events, stale tool outputs collapse to
+  short reversible pointers; user intent, assistant conclusions, and the record of actions stay
+  verbatim. Zero model calls, zero hallucination risk.
+- **An always-on reversibility floor.** Everything masked is spooled to disk (sha256-verified), a
+  deterministic **seed index** (files, commands, error lines, exact identifiers) is emitted at every
+  fold, and the agent gets span-capable `recall` over all of it.
+- **LLM summarization, opt-in only, never automatic.** `/fold-handoff` writes a handoff seed for a
+  fresh session — deterministic index first, model narrative clearly marked untrusted, with a
+  degradation warning up front.
 
 ## Why deterministic
 
@@ -36,7 +36,7 @@ why every fold emits a deterministic index of exact tokens rather than a paraphr
 
 ## What it does
 
-### Big tool results fold the moment they land (L0 ingestion gate)
+### Big tool results fold the moment they land (the L0 ingestion gate)
 
 With `CONTEXTFOLD_L0` enabled, every tool result is observed as it lands (observe-only — the
 session file keeps the raw payload). A result over ~2000 est-tokens is **spooled** to a
@@ -44,7 +44,7 @@ sha256-verified envelope and **born-folded**: the view shows a ≤400-token poin
 `{#code FOLDED}` recovery tag, a tool-aware summary, head + tail, and **every detected error/risk
 line verbatim**. Error-shaped results get 4× threshold headroom, so a short error never folds away.
 
-### Discrete fold events (the default ladder)
+### Discrete fold events
 
 Between fold events, context is **append-only** — rewriting history invalidates the provider's
 prompt-cache suffix, so mutations are batched where that cost is paid once:
@@ -58,6 +58,10 @@ prompt-cache suffix, so mutations are batched where that cost is paid once:
 - Each further event needs at least a ladder step (~12 % of window) of maskable mass; crossing
   the absolute budget cap (`min(200k, 0.75 × window)`) folds immediately.
 - Past `CONTEXTFOLD_MAX_LAYERS`, layer records merge (bookkeeping only — bytes untouched).
+
+When everything maskable is already folded and the context is still over budget, the extension
+says so rather than churning — the protected tail and user turns are the floor, and re-planning
+would only reproduce byte-identical digests at the cost of a cache re-prefill.
 
 ### The seed index
 
@@ -98,24 +102,14 @@ cache read ≈ 0.1× input):
   a large carry ("a reset is economically free right now"), and recall churn. Advisory only —
   nothing blocks.
 
-## Legacy / opt-in paths
-
-- `CONTEXTFOLD_MODE=keel` — the original continuous per-turn conductor (relevance ranking,
-  fidelity ladder, budget floor). Kept for comparison; an isolated evaluation found the full
-  ladder costly and unstable as a default (recall-churn loops), while the L0 gate alone kept
-  exact-detail parity at ~13 % of raw cost. The discrete ladder above is the redesign.
-- `CONTEXTFOLD_MODEL` / `CONTEXTFOLD_COLDNESS` (keel mode only) — a local model writes richer
-  digest strings / flags keep-warm candidates. A mechanism demo showed model digests preserve
-  mid-block identifiers that first-line deterministic digests structurally drop (n=1, not a
-  measured effect size); the model is never load-bearing and every failure falls back
-  deterministic.
-
 ## Guarantees
 
 - **History is never mutated.** Folding exists only in the per-call outgoing copy; the session
   file keeps every raw payload.
 - **Nothing is destroyed.** Ground truth lives in the session file and the spool; every `{#code}`
   handle resolves through `recall`/`unfold` until spool GC ages it out (default 14 days).
+- **Tool pairs cannot orphan.** Folding is in-place content substitution and never changes the
+  message count, so a `tool_call` can never lose its `tool_result`. Structural, not policed.
 - **Failure signals survive compression** at every fidelity level — the error lexicon is
   deliberately broad and any-case.
 - **The automatic path is model-free.** No LLM call ever fires without an explicit opt-in.
@@ -127,22 +121,23 @@ cache read ≈ 0.1× input):
 ## Install
 
 ```bash
-# Try it in one session:
-pi -e <path-to-repo>/src/adapters/pi/index.ts
+# Try it for one session, without installing:
+pi -e npm:context-fold
 
-# Or install persistently (symlink into Pi's extension dir — note dev tree == live install):
-ln -sfn <path-to-repo> ~/.pi/agent/extensions/context-fold
+# Install persistently:
+pi install npm:context-fold
 
 # Enable the ingestion gate (all models, or a comma-separated model-substring allowlist):
 export CONTEXTFOLD_L0=1
 ```
+
+From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 
 ## Configuration
 
 | Var | Default | Meaning |
 |---|---|---|
 | `CONTEXTFOLD` | _(on)_ | Master kill switch: `0`/`off` = the extension registers nothing this session. |
-| `CONTEXTFOLD_MODE` | `ladder` | `ladder` = discrete fold events (default); `keel` = legacy continuous conductor. |
 | `CONTEXTFOLD_FOLD_AT` | `0.45` | First fold when usage ≥ this fraction of the context window. |
 | `CONTEXTFOLD_FOLD_STEP` | `0.12` | A fold event must save at least this fraction of the window (spaces events). |
 | `CONTEXTFOLD_COLD_FOLD_AT` | `0.25` | First-fold threshold when no live cache read has ever been observed. |
@@ -157,8 +152,6 @@ export CONTEXTFOLD_L0=1
 | `CONTEXTFOLD_L0_MINSAVE` | `0.5` | Minimum fraction the pointer must save to bother folding. |
 | `CONTEXTFOLD_L0_ERRCAP` | `4` | Threshold multiplier for error-shaped results. |
 | `CONTEXTFOLD_SPOOL_RETAIN_DAYS` | `14` | Spool GC window at session start. `0`/`off` = never delete. |
-| `CONTEXTFOLD_PREFIX_STABLE` | _(keel only)_ | Opt the legacy keel mode into frozen layers. The ladder is always prefix-stable. |
-| `CONTEXTFOLD_MODEL`, `CONTEXTFOLD_COLDNESS`, `CONTEXTFOLD_MODEL_*` | _(off)_ | Keel-mode model digests/coldness (see Legacy above). |
 | `CONTEXTFOLD_DEBUG` | off | One-line fold/cache summary to stderr each turn. |
 | `CONTEXTFOLD_DUMP` | _(unset)_ | Debug/e2e seam: write each turn's outgoing (folded) view to this JSON path. |
 
@@ -170,18 +163,10 @@ npm install && npm run typecheck && npm test   # unit + integration suite
 scripts/e2e-ladder.sh   # live: fold event fires, index emitted, head byte-stable, buried value recalled
 scripts/e2e-gate.sh     # live: L0 gate folds a real flood; agent recovers a buried line via recall
 scripts/e2e-resume.sh   # live: folds survive a session restart
-scripts/e2e-cache.sh    # live: legacy keel prefix-stable byte-stability (local OpenAI-compatible server)
 ```
 
-The live scripts drive real Pi sessions and need provider auth (defaults:
-`openai-codex`/`gpt-5.6-sol`; override with `E2E_PROVIDER`/`E2E_MODEL`).
-
-Historical note: `e2e-gate.sh` check (c) used to flake live. Root cause (found 2026-07-28, was
-previously misattributed to result dedup): a payload arriving as ONE enormous line rode through
-every recall cap on the "always keep at least one line" rule — `recall lines=2-2` once returned
-a 40KB line and re-flooded what the gate saved. All recall surfaces now clip/window single huge
-lines (`tests/recall-reflood.test.ts`); the dedup path was verified sound separately
-(`tests/gate-dedup.test.ts`).
+The live scripts drive real Pi sessions and need provider auth (override the defaults with
+`E2E_PROVIDER`/`E2E_MODEL`).
 
 ## Develop
 
@@ -192,12 +177,15 @@ npm test
 ```
 
 The core (`src/core/*`) has zero harness dependencies; the Pi adapter (`src/adapters/pi/*`) owns
-all I/O and hook wiring. Design notes live in `DESIGN.md` and `docs/`; the build/eval record in
-`docs/HISTORY.md`.
+all I/O and hook wiring. Architecture notes are in `DESIGN.md`, the index format in
+`docs/SEED_INDEX_SPEC.md`, the Pi APIs this leans on in `docs/pi-api-surface.md`, and the record
+of what shipped and why in `CHANGELOG.md`.
+
+`typebox` and the `@earendil-works/*` packages are peer dependencies that Pi injects at runtime —
+never bundle a copy.
 
 ## Provenance & license
 
-MIT. The pure core and the legacy Keel policy are ported from
-[Accordion](https://github.com/a-Fig/Accordion) (pinned commit `0c22434`), stripped of UI
-coupling and hardened since; the discrete ladder, seed index, and advisor layers are original to
-this project.
+MIT. The pure core is ported from [Accordion](https://github.com/a-Fig/Accordion) (pinned commit
+`0c22434`), stripped of UI coupling and hardened since; the discrete fold ladder, the L0 ingestion
+gate, the seed index, and the advisor layers are original to this project.

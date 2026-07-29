@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# e2e-resume.sh — fold state survives a restart (P3.1, criterion 9).
+# e2e-resume.sh — fold state survives a restart.
 #
 # Run 1 reads a large file (born-folded → spooled, ledger entry appended). Run 2 RESUMES the same
 # session id and asks a question about a buried line. We assert:
