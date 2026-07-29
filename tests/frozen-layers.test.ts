@@ -2,24 +2,22 @@
  * frozen-layers.test.ts — the prefix-stability mechanism: a fold event's substitutions are
  * committed as a frozen layer whose bytes never change again, so the context head stays
  * byte-identical turn over turn (what keeps a provider's prompt cache warm). Covers commit,
- * re-emission, unfold masking, consolidation breaks, and the byte-exact persistence roundtrip.
+ * re-emission, unfold masking, and the byte-exact persistence roundtrip.
  */
 import { describe, expect, it } from "vitest";
 import { ContextFoldEngine, type FrozenLayer } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import { MapGateRegistry } from "../src/core/gate-registry";
-import { restoreFoldState, recordLayer, recordLayerBreak, FOLD_CUSTOM_TYPE, type EntryLike } from "../src/adapters/pi/persistence";
+import { restoreFoldState, recordLayer, FOLD_CUSTOM_TYPE, type EntryLike } from "../src/adapters/pi/persistence";
 import type { AgentMessage } from "../src/core/block";
 import { foldCode } from "../src/core/digest";
 import { user, assistantWithCalls, bigResult } from "./helpers";
 
 function engine(cfg: Record<string, unknown> = {}) {
-	const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100, ...cfg }, new MapGateRegistry());
+	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100, ...cfg }, new MapGateRegistry());
 	const committed: FrozenLayer[] = [];
-	const broken: number[] = [];
 	e.onLayerCommit = (layer) => committed.push(layer);
-	e.onLayerBreak = (seq) => broken.push(seq);
-	return { e, committed, broken };
+	return { e, committed };
 }
 
 /** A session with `n` big tool results followed by a small tail exchange. */
@@ -95,17 +93,21 @@ describe("frozen layers", () => {
 	});
 
 	it("reports over-budget honestly rather than disturbing frozen bytes", () => {
-		const { e, committed, broken } = engine();
+		const { e, committed } = engine();
 		const base = session(6, 400);
 		e.process(base.messages, 20_000); // fold event → freeze a layer
 		expect(committed.length).toBe(1);
+		const layer1 = committed[0];
 
 		// Shrink the window until the frozen digests plus the protected tail exceed the cap. There
 		// is nothing left to mask (everything foldable is already frozen), so the honest answer is
 		// to say so — not to un-freeze and re-fold, which would re-prefill the cache to reproduce
 		// byte-identical digests.
-		e.process(base.messages, 700);
-		expect(broken).toEqual([]);
+		const out = e.process(base.messages, 700);
+		expect(committed.length).toBe(1); // no second commit, and nothing re-frozen
+		for (const entry of layer1.entries) {
+			expect(resultText(out, entry.id.replace(/^r:/, ""))).toBe(entry.digestText);
+		}
 		expect(e.status?.text).toContain("OVER BUDGET");
 		expect(e.status?.metrics?.over_budget).toBe(true);
 	});
@@ -125,7 +127,7 @@ describe("frozen layers", () => {
 });
 
 describe("persistence roundtrip", () => {
-	it("layers survive record → restore byte-exactly, and layer-break removes one", () => {
+	it("layers survive record → restore byte-exactly", () => {
 		const entries: EntryLike[] = [];
 		const appender = { appendEntry: (customType: string, data?: unknown) => entries.push({ customType, data }) };
 
@@ -144,9 +146,6 @@ describe("persistence roundtrip", () => {
 		const after = fresh.e.process(messages, 10_000_000);
 		expect(resultText(after, frozenCall)).toBe(frozenText);
 
-		// A break record deletes the layer on restore.
-		recordLayerBreak(appender, committed[0].seq);
-		expect(restoreFoldState(entries).layers.length).toBe(0);
 		expect(entries.every((x) => x.customType === FOLD_CUSTOM_TYPE)).toBe(true);
 	});
 });

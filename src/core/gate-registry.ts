@@ -6,7 +6,8 @@
  * the block enters the model-facing view ALREADY folded to a pointer digest — "born folded" — with
  * two distinct weights the policy must keep straight:
  *   • its POINTER weight (what actually costs tokens in the wire), charged to the budget;
- *   • its FULL weight (what it would cost warm), which ranking still sees so relevance stays honest.
+ *   • its FULL weight (what it would cost warm), reported so the policy's accounting of what the
+ *     block really costs stays honest.
  *
  * This is PURE core: the registry holds only serializable metadata (enough to render the pointer,
  * locate the spool file, and rebuild on resume). The adapter owns the disk I/O and populates it.
@@ -18,7 +19,7 @@ export interface GateEntry {
 	blockId: string;
 	/** The 6-char fold code (= foldCode(blockId)); the pointer's {#code FOLDED} handle. */
 	code: string;
-	/** Full-fidelity token weight (estTokens(content)+overhead) — ranking's view of this block. */
+	/** Full-fidelity token weight (estTokens(content)+overhead) — what this block would cost warm. */
 	fullTokens: number;
 	tool: string;
 	/** The tool's input arguments, for the tool-aware pointer summary. */
@@ -41,7 +42,6 @@ export interface GateRegistry {
 	has(blockId: string): boolean;
 	get(blockId: string): GateEntry | undefined;
 	set(entry: GateEntry): void;
-	delete(blockId: string): void;
 	readonly size: number;
 	entries(): IterableIterator<GateEntry>;
 }
@@ -58,9 +58,6 @@ export class MapGateRegistry implements GateRegistry {
 	}
 	set(entry: GateEntry): void {
 		this.byId.set(entry.blockId, entry);
-	}
-	delete(blockId: string): void {
-		this.byId.delete(blockId);
 	}
 	/** Drop every entry (session switch within one process — stale codes must not cross sessions). */
 	clear(): void {

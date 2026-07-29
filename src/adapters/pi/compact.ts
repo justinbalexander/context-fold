@@ -80,22 +80,29 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
 	return parts.join("\n");
 }
 
+/**
+ * Union a field across records, keeping the `cap` values seen most recently.
+ *
+ * Order is LAST-seen, not first-seen: re-encountering a value moves it to the end. That matters
+ * because the tail is what survives the cap — a value that recurs in every record is exactly the
+ * load-bearing one, and ordering by first sighting would drop it in favour of a one-off from the
+ * final record.
+ */
 function union(records: SeedIndexRecord[], pick: (r: SeedIndexRecord) => string[], cap: number): string[] {
 	const seen = new Set<string>();
-	const out: string[] = [];
 	for (const r of records) {
 		for (const v of pick(r)) {
-			if (seen.has(v)) continue;
+			seen.delete(v); // re-sighting refreshes position; Set preserves insertion order
 			seen.add(v);
-			out.push(v);
 		}
 	}
-	return out.slice(-cap); // newest-biased: later records carry the freshest work
+	return [...seen].slice(-cap);
 }
 
+/** Dedup by key, keeping the newest value per key in first-sighting (chronological) order. */
 function dedupBy<T>(items: T[], key: (t: T) => string): T[] {
 	const seen = new Map<string, T>();
-	for (const it of items) seen.set(key(it), it); // last wins
+	for (const it of items) seen.set(key(it), it);
 	return [...seen.values()];
 }
 

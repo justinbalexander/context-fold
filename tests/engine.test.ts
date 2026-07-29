@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import type { AgentMessage } from "../src/core/block";
 import { user, assistantWithCalls, toolResult, bigResult, isBalanced, liveTokensOf } from "./helpers";
 
@@ -26,7 +26,7 @@ const CAP = Math.floor(CW * CONFIG.budgetFraction);
 
 describe("fold under budget", () => {
 	it("folds cold blocks to digests and drives liveTokens to ≤ cap", () => {
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), CONFIG);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
 		const messages = bigSession(12);
 		const before = liveTokensOf(messages);
 		expect(before).toBeGreaterThan(CAP); // precondition: genuinely over budget
@@ -40,20 +40,20 @@ describe("fold under budget", () => {
 	});
 
 	it("keeps every tool pair balanced in the output (no orphans reach the provider)", () => {
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), CONFIG);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
 		const out = engine.process(bigSession(12), CW);
 		expect(isBalanced(out)).toBe(true);
 	});
 
 	it("passes through unchanged when under budget", () => {
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), CONFIG);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
 		const small: AgentMessage[] = [user("hi"), assistantWithCalls([{ id: "c0", name: "read" }], { text: "ok" }), toolResult("c0", "short")];
 		const out = engine.process(small, CW);
 		expect(out).toBe(small); // identity — nothing folded
 	});
 
 	it("folds when Pi reports pressure even if the local estimator says under budget", () => {
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), CONFIG);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
 		const messages = bigSession(5);
 		expect(liveTokensOf(messages)).toBeLessThan(CAP);
 
@@ -68,7 +68,7 @@ describe("fold under budget", () => {
 	});
 
 	it("keeps the fold applied once reported usage falls back under the threshold", () => {
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), CONFIG);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
 		const messages = bigSession(5);
 		const pressured = engine.process(messages, { contextWindow: CW, tokens: 7_900 });
 		// The ladder is idle on the second turn, but the committed frozen layer still governs those
@@ -80,7 +80,7 @@ describe("fold under budget", () => {
 	});
 
 	it("falls back to estimator behavior when Pi has no token value", () => {
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), CONFIG);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
 		const small: AgentMessage[] = [user("hi"), assistantWithCalls([{ id: "fallback", name: "read" }], { text: "ok" }), toolResult("fallback", "short")];
 		const out = engine.process(small, { contextWindow: CW, tokens: null });
 		expect(out).toBe(small);
@@ -90,7 +90,7 @@ describe("fold under budget", () => {
 		// Tail target large enough to comfortably include the newest big result (~1k tok) — so it
 		// is genuinely inside the protected tail and must survive verbatim. (A tail smaller than a
 		// single block correctly protects only the newest block — covered in core.test.ts.)
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), { ...CONFIG, tailTarget: 2500 });
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { ...CONFIG, tailTarget: 2500 });
 		const messages = bigSession(12);
 		const out = engine.process(messages, CW);
 		const lastResult = [...out].reverse().find((m) => m.role === "toolResult");
@@ -101,7 +101,7 @@ describe("fold under budget", () => {
 
 describe("recall — read the original back verbatim", () => {
 	it("returns the exact original content of a folded block", () => {
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), CONFIG);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
 		const messages = bigSession(12);
 		const out = engine.process(messages, CW);
 
@@ -125,7 +125,7 @@ describe("recall — read the original back verbatim", () => {
 
 describe("unfold — sticky re-expansion next turn", () => {
 	it("a block the agent unfolds is no longer folded on the next pass", () => {
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), CONFIG);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
 		const messages = bigSession(12);
 		const out1 = engine.process(messages, CW);
 

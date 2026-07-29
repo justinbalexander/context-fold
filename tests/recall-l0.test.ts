@@ -14,7 +14,7 @@ import { Gate, GATE_DEFAULTS, type GateConfig } from "../src/adapters/pi/gate";
 import { SpoolStore } from "../src/adapters/pi/spool";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import { foldCode } from "../src/core/digest";
 import { user, assistantWithCalls, toolResult } from "./helpers";
 import type { AgentMessage } from "../src/core/block";
@@ -40,7 +40,7 @@ function floodWith(buried: string): string {
 }
 
 function engineWith(reg: MapGateRegistry): ContextFoldEngine {
-	return new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg);
+	return new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg);
 }
 
 function foldOne(content: string, callId = "c1", tool = "read", input: unknown = { path: "/x/y.log" }, fullOutputPath?: string) {

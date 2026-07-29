@@ -9,7 +9,7 @@
  * This file is PURE and has ZERO harness dependencies. It models only the structural shape
  * of a provider message (`AgentMessage`) — the exact fields `linearize`/`foldOne`
  * read. A harness adapter casts its real message array to `AgentMessage[]` at the boundary;
- * that cast is the documented seam (see adapters/pi/hook.ts).
+ * that cast is the documented seam (see adapters/pi/index.ts, the `context` hook).
  *
  * Block ids are durable and content-anchored — identical whether derived now or after the
  * message array shifts position:
@@ -33,44 +33,10 @@ export type BlockKind =
 	| "tool_call" // WHAT the agent did (tiny, durable record of an action)
 	| "tool_result"; // WHAT the agent saw (often huge, decays fast)
 
-/** Who last changed a block's fold state. */
-export type Actor = "you" | "agent" | "auto" | "conductor";
-
-/** A manual override the automatic folder must respect. */
-export type Override = "pinned" | "folded" | "unfolded" | null;
-
 /**
- * A full engine Block. Immutable content fields + mutable fold state. In this headless port
- * the policy reasons over `ViewBlock` (contract.ts); `Block` exists for the digest functions
- * and any adapter that wants the richer shape.
- */
-export interface Block {
-	id: string;
-	kind: BlockKind;
-	/** 1-based index of the user turn this block belongs to (0 = preamble). */
-	turn: number;
-	/** Global 0-based position in the conversation. */
-	order: number;
-	/** Full, normalized text content. Never mutated by folding. */
-	text: string;
-	/** Estimated token cost at full fidelity. */
-	tokens: number;
-	toolName?: string;
-	/** Pairing key. tool_call → its own call id; tool_result → the id of the call it answers. */
-	callId?: string;
-	model?: string;
-	isError?: boolean;
-	// --- mutable fold state ------------------------------------------------
-	override: Override;
-	autoFolded: boolean;
-	by: Actor | null;
-	subst?: string;
-}
-
-/**
- * The minimal content surface the digest functions read. Both `Block` and `WireBlock` satisfy
- * it, so digests can be computed on either without converting. (Keyed by object identity in
- * the digest WeakMap caches — see digest.ts.)
+ * The minimal content surface the digest functions read. `WireBlock` satisfies it, so digests
+ * can be computed without converting. (Keyed by object identity in the digest WeakMap cache —
+ * see digest.ts.)
  */
 export interface DigestBlock {
 	id: string;
@@ -95,8 +61,6 @@ export interface WireBlock {
 	callId?: string;
 	model?: string;
 	isError?: boolean;
-	/** Provider-message grouping key (per-pass positional). Blocks of one message share it. */
-	messageKey?: string;
 }
 
 /** One fold instruction: replace block `id`'s content with `digestText` (carries the {#code} tag). */
@@ -198,7 +162,6 @@ export function linearize(messages: AgentMessage[]): WireBlock[] {
 	let order = 0;
 	let turn = 0;
 
-	let messageKey = "";
 	const push = (
 		id: string,
 		kind: WireBlock["kind"],
@@ -206,11 +169,10 @@ export function linearize(messages: AgentMessage[]): WireBlock[] {
 		extra: Partial<Pick<WireBlock, "toolName" | "callId" | "model" | "isError">> = {},
 	) => {
 		if (!text && kind !== "tool_result") return; // drop empty non-results
-		out.push({ id, kind, turn, order: order++, text, tokens: tokensFor(text), messageKey, ...extra });
+		out.push({ id, kind, turn, order: order++, text, tokens: tokensFor(text), ...extra });
 	};
 
 	messages.forEach((m, i) => {
-		messageKey = `m${i}`;
 		switch (m.role) {
 			case "user": {
 				turn += 1;
@@ -248,24 +210,5 @@ export function linearize(messages: AgentMessage[]): WireBlock[] {
 	});
 
 	return out;
-}
-
-/** Convert a wire block back into a full engine Block (fresh, auto-controlled). */
-export function wireToBlock(w: WireBlock): Block {
-	return {
-		id: w.id,
-		kind: w.kind,
-		turn: w.turn,
-		order: w.order,
-		text: w.text,
-		tokens: w.tokens,
-		toolName: w.toolName,
-		callId: w.callId,
-		model: w.model,
-		isError: w.isError,
-		override: null,
-		autoFolded: false,
-		by: null,
-	};
 }
 

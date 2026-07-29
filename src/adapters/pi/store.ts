@@ -1,20 +1,22 @@
 /*
- * store.ts — the headless host/store glue for the Pi adapter.
+ * store.ts — the fold engine: the mechanism half of the policy ⇄ mechanism contract.
  *
- * This is the small piece Accordion did in Svelte, reduced to plain functions (port spec
- * §"Minimal headless core to reimplement"): hold blocks, compute `protectedFromIndex`, build the
- * `ConductorView`, call `conduct`, lower `Command[]` → `FoldOp[]`/`GroupOp[]`, call `applyPlan`.
+ * One pass per model call: linearize the outgoing messages into blocks, compute the protected
+ * tail, build the `PolicyView`, ask the policy what to fold, lower its `FoldCommand[]` into wire
+ * ops, and apply them. The policy decides WHICH blocks fold; this file owns everything else.
  *
- * It owns the only mutable session state: the set of agent-unfolded block ids (sticky
- * "held" — protected from re-folding) and a per-turn snapshot of the linearized blocks (so the
- * unfold/recall tool can resolve a fold-code back to its block). No durable ledger this phase.
+ * It holds the session's mutable fold state: the set of agent-unfolded block ids (sticky — an
+ * unfolded block is never re-folded), the committed prefix-stable layers, and a per-turn snapshot
+ * of the linearized blocks so the recall/unfold tools can resolve a fold code back to its block.
+ * That state is persisted separately as an event-sourced ledger (persistence.ts) so it survives
+ * resume.
  */
-import type { Command, ConductorHost, ConductorView, HostCapabilityId, JSONValue, ViewBlock } from "../../core/contract";
-import type { Conductor } from "../../core/contract";
+import type { FoldCommand, PolicyHost, PolicyView, JSONValue, ViewBlock } from "../../core/contract";
+import type { FoldPolicy } from "../../core/contract";
 import type { AgentMessage, FoldOp, WireBlock } from "../../core/block";
-import { linearize, isDurableId, wireToBlock } from "../../core/block";
+import { linearize, isDurableId } from "../../core/block";
 import { applyPlan } from "../../core/apply";
-import { digest, wireFoldable, foldCode, foldTag, pointerDigest, substTokens, type PointerMeta } from "../../core/digest";
+import { digest, wireFoldable, foldCode, pointerDigest, substTokens, type PointerMeta } from "../../core/digest";
 import { estTokens, safeSlice, BLOCK_OVERHEAD } from "../../core/tokens";
 import { MapGateRegistry, type GateRegistry, type GateEntry } from "../../core/gate-registry";
 import { readEnvelopeAt, SpoolError } from "./spool";
@@ -38,12 +40,6 @@ export interface FoldConfig {
 	tailTarget: number;
 	/** Fallback context window when the host can't report one. */
 	defaultContextWindow: number;
-	/**
-	 * Consolidation bound on committed layers: a commit that would exceed this merges all layer
-	 * RECORDS into one (bookkeeping only — digest bytes are unchanged, so the warm prefix is
-	 * preserved for free). 0 disables the bound.
-	 */
-	maxLayers: number;
 	/** Emit a one-line fold summary to stderr each turn. */
 	debug: boolean;
 }
@@ -53,17 +49,16 @@ export const DEFAULT_CONFIG: FoldConfig = {
 	absoluteTokenCap: 200_000,
 	tailTarget: 20_000,
 	defaultContextWindow: DEFAULT_CONTEXT_WINDOW,
-	maxLayers: 2,
 	debug: false,
 };
 
 /** What the engine reports after committing a fold event's frozen layer (index emission seam). */
 export interface FoldEventReport {
-	/** The committed layer's seq (post-consolidation when a merge fired). */
+	/** The committed layer's seq. */
 	seq: number;
-	/** Why the policy folded (ladder: "threshold" | "cap"; consolidation merges report separately). */
-	trigger: "threshold" | "cap" | "consolidation";
-	/** Ids masked by THIS event (empty for a pure consolidation merge). */
+	/** Why the policy folded. */
+	trigger: "threshold" | "cap";
+	/** Ids masked by THIS event. */
 	maskedIds: string[];
 	/** Every block in this turn's view, full content — the extractor's span input. */
 	blocks: WireBlock[];
@@ -153,7 +148,7 @@ const RECALL_WHOLE_TOKEN_CAP = 2000;
 
 export class ContextFoldEngine {
 	private readonly cfg: FoldConfig;
-	private readonly policy: Conductor;
+	private readonly policy: FoldPolicy;
 
 	/** Agent-unfolded block ids — held (protected from re-folding) for the rest of the session. */
 	private readonly unfolded = new Set<string>();
@@ -170,7 +165,7 @@ export class ContextFoldEngine {
 	/** Last status the policy published (display-only). */
 	private lastStatus: { text: string | null; metrics?: Record<string, number | string | boolean>; details?: JSONValue } | null = null;
 
-	private readonly host: ConductorHost;
+	private readonly host: PolicyHost;
 
 	// ── L0 ingestion gate: registry of born-folded blocks (recall reads the spool by entry path) ──
 	private readonly gate: GateRegistry;
@@ -181,34 +176,24 @@ export class ContextFoldEngine {
 	/** Per-code recall counts — a code recalled again and again is the measured churn signature. */
 	private readonly recallByCode = new Map<string, number>();
 
-	// ── Stage 2: prefix-stable frozen layers ─────────────────────────────────────────────────────
-	/** Committed layers, oldest first. Substitution bytes are fixed; unfold masks per id at render. */
-	private frozenLayers: FrozenLayer[] = [];
-	/** Derived id → frozen digestText (rebuilt on commit/break/restore). */
+	// ── Prefix-stable frozen layers ──────────────────────────────────────────────────────────────
+	/** Committed substitutions: id → frozen digestText. Bytes are fixed once committed; an agent
+	 *  unfold masks a single id at render time rather than changing what is stored here. */
 	private frozenById = new Map<string, string>();
+	/** Seq of the newest committed layer (layers are numbered from 1). */
+	private lastLayerSeq = 0;
 	/** Adapter callback: persist a committed layer (event-sourced, like gate folds). */
 	onLayerCommit: ((layer: FrozenLayer) => void) | null = null;
-	/** Adapter callback: persist a consolidation break. */
-	onLayerBreak: ((seq: number) => void) | null = null;
 	/** Adapter callback: a fold event committed — emit the seed index (spool + JSONL). */
 	onFoldEvent: ((event: FoldEventReport) => void) | null = null;
 
-	constructor(policy: Conductor, cfg: Partial<FoldConfig> = {}, gate: GateRegistry = new MapGateRegistry()) {
+	constructor(policy: FoldPolicy, cfg: Partial<FoldConfig> = {}, gate: GateRegistry = new MapGateRegistry()) {
 		this.cfg = { ...DEFAULT_CONFIG, ...cfg };
 		this.policy = policy;
 		this.gate = gate;
 		this.host = {
-			can: (c: HostCapabilityId) => c === "countTokens",
-			countTokens: (text: string) => estTokens(text),
-			digestOf: (id: string) => {
-				const b = this.snapshot.get(id);
-				return b ? this.detDigest(b) : null;
-			},
 			setStatus: (text, metrics, details) => {
 				this.lastStatus = { text, metrics, details };
-			},
-			requestRerun: () => {
-				/* The fold pass is fully synchronous — no async rerun. */
 			},
 		};
 		this.policy.attach?.(this.host);
@@ -216,11 +201,6 @@ export class ContextFoldEngine {
 
 	get status() {
 		return this.lastStatus;
-	}
-
-	/** The gate registry — the adapter's tool_result handler registers born-folded blocks here. */
-	get gateRegistry(): GateRegistry {
-		return this.gate;
 	}
 
 	/** Enable/disable L0 pointer substitution (the adapter resolves the per-model kill switch). */
@@ -235,19 +215,16 @@ export class ContextFoldEngine {
 		this.unfolded.clear();
 		this.snapshot = new Map();
 		this.detCache.clear();
-		this.frozenLayers = [];
 		this.frozenById = new Map();
+		this.lastLayerSeq = 0;
 	}
 
 	/** Restore committed layers on session resume (event-sourced; bytes verbatim). */
 	restoreLayers(layers: FrozenLayer[]): void {
-		this.frozenLayers = [...layers].sort((a, b) => a.seq - b.seq);
-		this.rebuildFrozenIndex();
-	}
-
-	private rebuildFrozenIndex(): void {
-		this.frozenById = new Map();
-		for (const layer of this.frozenLayers) for (const e of layer.entries) this.frozenById.set(e.id, e.digestText);
+		for (const layer of [...layers].sort((a, b) => a.seq - b.seq)) {
+			for (const e of layer.entries) this.frozenById.set(e.id, e.digestText);
+			if (layer.seq > this.lastLayerSeq) this.lastLayerSeq = layer.seq;
+		}
 	}
 
 	/** Frozen substitutions for blocks present this turn (skipping agent unfolds — an unfold is a
@@ -291,46 +268,8 @@ export class ContextFoldEngine {
 
 		// Commit this fold event's substitutions as a new frozen layer.
 		if (ops.length > 0) {
-			const entries = ops
-				.filter((op) => !gatePointers.has(op.id) && !this.frozenById.has(op.id))
-				.map((op) => ({ id: op.id, digestText: op.digestText }));
-			if (entries.length > 0) {
-				const layer: FrozenLayer = { seq: (this.frozenLayers[this.frozenLayers.length - 1]?.seq ?? 0) + 1, entries };
-				this.frozenLayers.push(layer);
-				for (const e of entries) this.frozenById.set(e.id, e.digestText);
-				this.onLayerCommit?.(layer);
-				if (this.cfg.debug)
-					process.stderr.write(`[context-fold] layer ${layer.seq} committed (${entries.length} blocks frozen)\n`);
-
-				// Fold-event report → the adapter emits the seed index for what just left the view.
-				const usage = {
-					tokens: frame.tokens ?? view.liveTokens,
-					contextWindow: cw,
-					fraction: cw > 0 ? (frame.tokens ?? view.liveTokens) / cw : 0,
-				};
-				const rawTrigger = this.lastStatus?.metrics?.trigger;
-				const trigger = rawTrigger === "cap" ? "cap" : "threshold";
-				this.onFoldEvent?.({ seq: layer.seq, trigger, maskedIds: entries.map((e) => e.id), blocks, usage });
-
-				// Consolidation bound: too many layer records → merge them into ONE record under the
-				// newest seq. Digest bytes are untouched (the warm prefix survives); only the
-				// bookkeeping collapses. Event-sourced as breaks + a re-commit (latest seq wins).
-				if (this.cfg.maxLayers > 0 && this.frozenLayers.length > this.cfg.maxLayers) {
-					const merged: FrozenLayer = {
-						seq: layer.seq,
-						entries: this.frozenLayers.flatMap((l) => l.entries),
-					};
-					for (const l of this.frozenLayers) if (l.seq !== merged.seq) this.onLayerBreak?.(l.seq);
-					this.frozenLayers = [merged];
-					this.rebuildFrozenIndex();
-					this.onLayerCommit?.(merged);
-					this.onFoldEvent?.({ seq: merged.seq, trigger: "consolidation", maskedIds: [], blocks, usage });
-					if (this.cfg.debug)
-						process.stderr.write(
-							`[context-fold] consolidation merge: ${merged.entries.length} frozen blocks now one layer (seq ${merged.seq})\n`,
-						);
-				}
-			}
+			const used = frame.tokens ?? view.liveTokens;
+			this.commitLayer(ops, gatePointers, blocks, { tokens: used, contextWindow: cw, fraction: cw > 0 ? used / cw : 0 });
 		}
 
 		// Merge order = gate > frozen > policy: the gate owns its ids outright; a frozen id's bytes
@@ -341,12 +280,45 @@ export class ContextFoldEngine {
 		if (this.cfg.debug) {
 			const l0 = gatePointers.size ? ` l0=${gatePointers.size}` : "";
 			const fz = frozenOps.size ? ` frozen=${frozenOps.size}` : "";
+			// Report BOTH counts when the provider gave us one. The policy decides on `reported`
+			// (Pi's whole-context number, system prompt included) but `live` only sums the message
+			// array, so a fold can fire with live *under* budget — printing live alone makes a
+			// correct fold look inexplicable to anyone reading this line to diagnose fold timing.
+			const rep = view.reportedTokens !== undefined ? ` reported=${view.reportedTokens}` : "";
 			process.stderr.write(
-				`[context-fold] ${ops.length} folds${l0}${fz}, live=${view.liveTokens} budget=${budget} ${this.lastStatus?.text ?? ""}\n`,
+				`[context-fold] ${ops.length} folds${l0}${fz}, live=${view.liveTokens}${rep} budget=${budget} ${this.lastStatus?.text ?? ""}\n`,
 			);
 		}
 
 		return applyPlan(messages, allOps);
+	}
+
+	/**
+	 * Commit this fold event's substitutions as a new frozen layer, then report the event so the
+	 * adapter can spool the masked blocks and append their seed-index record.
+	 *
+	 * Ids already owned by the gate or by an earlier layer are skipped: their bytes are committed
+	 * and are not this event's to change. One layer per event, numbered from 1 — the seq is the
+	 * seed index's key, so it must never repeat.
+	 */
+	private commitLayer(
+		ops: FoldOp[],
+		gatePointers: Map<string, string>,
+		blocks: WireBlock[],
+		usage: FoldEventReport["usage"],
+	): void {
+		const entries = ops
+			.filter((op) => !gatePointers.has(op.id) && !this.frozenById.has(op.id))
+			.map((op) => ({ id: op.id, digestText: op.digestText }));
+		if (entries.length === 0) return;
+
+		const layer: FrozenLayer = { seq: ++this.lastLayerSeq, entries };
+		for (const e of entries) this.frozenById.set(e.id, e.digestText);
+		this.onLayerCommit?.(layer);
+		if (this.cfg.debug) process.stderr.write(`[context-fold] layer ${layer.seq} committed (${entries.length} blocks frozen)\n`);
+
+		const trigger = this.lastStatus?.metrics?.trigger === "cap" ? "cap" : "threshold";
+		this.onFoldEvent?.({ seq: layer.seq, trigger, maskedIds: entries.map((e) => e.id), blocks, usage });
 	}
 
 	/** Born-folded pointer text per registered block id (skipping any the agent has unfolded).
@@ -367,8 +339,8 @@ export class ContextFoldEngine {
 		return out;
 	}
 
-	/** Inspection seam (tests/debug): the ConductorView this turn, incl. born-folded accounting. */
-	viewFor(messages: AgentMessage[], context: ContextFrameInput): ConductorView {
+	/** Inspection seam (tests/debug): the PolicyView this turn, incl. born-folded accounting. */
+	viewFor(messages: AgentMessage[], context: ContextFrameInput): PolicyView {
 		const blocks = linearize(messages);
 		const gatePointers = this.computeGatePointers(blocks);
 		const frozenOps = this.computeFrozenOps(blocks);
@@ -404,8 +376,8 @@ export class ContextFoldEngine {
 	 * Resolve fold-codes → ORIGINAL content (recall: read-only, no fold-state change). L0 (gate)
 	 * codes are served from the SPOOL — whole, or sliced by `grep`/`lines` (partial retrieval, so
 	 * recall never has to dump a whole flood back into context). A missing/corrupt spool becomes a
-	 * a typed error naming the path, surfaced to the agent rather than thrown. Non-gate folds (ladder masks)
-	 * resolve from the in-memory snapshot; grep/lines are ignored for them.
+	 * typed error naming the path, surfaced to the agent rather than thrown. Non-gate folds (ladder
+	 * masks) resolve from the in-memory snapshot; grep/lines are ignored for them.
 	 */
 	resolveRecall(codes: string[], opts: RecallOptions = {}): { matches: CodeMatch[]; missing: string[]; errors: CodeError[] } {
 		this.recallCallCount++;
@@ -555,13 +527,7 @@ export class ContextFoldEngine {
 	// ── internals ──────────────────────────────────────────────────────────────
 
 	private resolve(codes: string[]): { matches: CodeMatch[]; missing: string[] } {
-		const byCode = new Map<string, WireBlock[]>();
-		for (const b of this.snapshot.values()) {
-			const c = foldCode(b.id);
-			const arr = byCode.get(c);
-			if (arr) arr.push(b);
-			else byCode.set(c, [b]);
-		}
+		const byCode = this.snapshotByCode();
 		const matches: CodeMatch[] = [];
 		const missing: string[] = [];
 		for (const raw of codes) {
@@ -590,7 +556,7 @@ export class ContextFoldEngine {
 		gatePointers: Map<string, string>,
 		frozenOps: Map<string, string>,
 		reportedTokens: number | null,
-	): ConductorView {
+	): PolicyView {
 		let liveTokens = 0;
 		const viewBlocks: ViewBlock[] = blocks.map((b, i) => {
 			const pointer = gatePointers.get(b.id);
@@ -611,11 +577,10 @@ export class ContextFoldEngine {
 			liveTokens += born || frozen ? foldedTokens : b.tokens;
 			return {
 				id: b.id,
-				messageKey: b.messageKey,
 				kind: b.kind,
 				turn: b.turn,
 				order: b.order,
-				tokens: b.tokens, // FULL weight — ranking always sees a born-folded block's true cost
+				tokens: b.tokens, // FULL weight — what this block would cost warm, even when born folded
 				foldedTokens,
 				toolName: b.toolName,
 				callId: b.callId,
@@ -625,7 +590,6 @@ export class ContextFoldEngine {
 				bornFolded: born,
 				frozen,
 				protected: i >= protectFrom,
-				grouped: false,
 				text: b.text,
 			};
 		});
@@ -658,12 +622,12 @@ export class ContextFoldEngine {
 	}
 
 	/**
-	 * Lower the policy's `Command[]` into wire ops. The engine is the SOLE author of the
-	 * `{#code FOLDED}` tag. Single disposition: a fold/replace on a protected, held, frozen or
-	 * already-emitted id is dropped. Defense in depth — the policy already enforces these, but the
-	 * wire re-checks so a bad command can never corrupt context.
+	 * Lower the policy's `FoldCommand[]` into wire ops. The engine is the SOLE author of both the
+	 * digest text and its `{#code FOLDED}` tag. Single disposition: a fold on a protected, held,
+	 * frozen or already-emitted id is dropped. Defense in depth — the policy already enforces
+	 * these, but the wire re-checks so a bad command can never corrupt context.
 	 */
-	private lower(commands: Command[], blocks: WireBlock[], protectFrom: number): FoldOp[] {
+	private lower(commands: FoldCommand[], blocks: WireBlock[], protectFrom: number): FoldOp[] {
 		const byId = new Map(blocks.map((b) => [b.id, b] as const));
 		const protectedAt = (id: string): boolean => {
 			const b = byId.get(id);
@@ -678,23 +642,9 @@ export class ContextFoldEngine {
 		const opIds = new Set<string>();
 
 		for (const cmd of commands) {
-			if (cmd.kind === "fold") {
-				for (const id of cmd.ids) {
-					if (opIds.has(id) || !canFold(id)) continue;
-					const b = byId.get(id)!;
-					const digestText = cmd.digest ? authoritativeTag(id, cmd.digest) : this.detDigest(b);
-					ops.push({ id, digestText });
-					opIds.add(id);
-				}
-			} else if (cmd.kind === "replace") {
-				const id = cmd.id;
+			for (const id of cmd.ids) {
 				if (opIds.has(id) || !canFold(id)) continue;
-				const b = byId.get(id)!;
-				let digestText: string;
-				if (cmd.content === "") digestText = this.detDigest(b); // smallest wire-safe form
-				else if (cmd.recoverable) digestText = `${foldTag(id)} ${stripLeadingTag(cmd.content)}`;
-				else digestText = cmd.content;
-				ops.push({ id, digestText });
+				ops.push({ id, digestText: this.detDigest(byId.get(id)!) });
 				opIds.add(id);
 			}
 		}
@@ -844,16 +794,6 @@ function mergeOpsById(gatePointers: Map<string, string>, policyOps: FoldOp[]): F
 
 // ── small pure helpers ─────────────────────────────────────────────────────────
 
-/** Strip a leading `{#code FOLDED}` tag (if any) from policy-supplied content. */
-function stripLeadingTag(s: string): string {
-	return s.replace(/^\s*\{#[a-z0-9]{1,8}\s+FOLDED\}\s*/i, "");
-}
-
-/** The engine is the sole tag author: strip any supplied tag and prepend the authoritative one. */
-function authoritativeTag(id: string, supplied: string): string {
-	return `${foldTag(id)} ${stripLeadingTag(supplied)}`;
-}
-
 /** Accept a bare code or a full `{#code FOLDED}` tag from the agent. */
 function normalizeCode(raw: string): string {
 	const m = /\{#([a-z0-9]{1,8})\s+FOLDED\}/i.exec(raw);
@@ -867,6 +807,3 @@ function labelFor(blocks: WireBlock[]): string {
 	const name = b.toolName ? ` ${b.toolName}` : "";
 	return `${b.kind}${name} · turn ${b.turn}${more}`;
 }
-
-// wireToBlock kept reachable for adapters that want the richer Block shape.
-export { wireToBlock };

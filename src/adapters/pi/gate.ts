@@ -113,6 +113,8 @@ export type GateReason =
 export interface GateDecision {
 	folded: boolean;
 	reason: GateReason;
+	/** Present when reason="error", so the adapter can surface persistent spool failures. */
+	error?: string;
 	code?: string;
 	inTokens?: number;
 	outTokens?: number;
@@ -204,9 +206,9 @@ export class Gate {
 				dedupOf: res.dedupOf,
 			});
 			return { folded: true, reason: "folded", code, inTokens, outTokens, dedupOf: res.dedupOf };
-		} catch {
+		} catch (err) {
 			// Fail-open: a spool/registry error leaves the raw result untouched in the view.
-			return { folded: false, reason: "error", inTokens };
+			return { folded: false, reason: "error", inTokens, error: err instanceof Error ? err.message : String(err) };
 		}
 	}
 }

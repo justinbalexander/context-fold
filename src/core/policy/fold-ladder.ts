@@ -22,7 +22,7 @@
  * keeps risk/error lines verbatim and stays reversible via recall/unfold. Stateless across turns
  * (a pure function of the view), so resume needs no ladder state.
  */
-import type { Command, Conductor, ConductorHost, ConductorView, ViewBlock } from "../contract";
+import type { FoldCommand, FoldPolicy, PolicyHost, PolicyView, ViewBlock } from "../contract";
 import { isDurableId } from "../block";
 
 export interface LadderConfig {
@@ -39,30 +39,25 @@ export const LADDER_DEFAULTS: LadderConfig = { foldAt: 0.45, foldStep: 0.12, col
 /** The kinds a fold event masks: observations and ephemeral reasoning. */
 const MASKABLE_KINDS = new Set<ViewBlock["kind"]>(["tool_result", "thinking"]);
 
-export class FoldLadderConductor implements Conductor {
+export class FoldLadderPolicy implements FoldPolicy {
 	readonly id: string = "fold-ladder";
 	readonly label: string = "Discrete fold ladder";
 
-	private host: ConductorHost | null = null;
+	private host: PolicyHost | null = null;
 	/** No live cache read observed yet (adapter feeds this from measured telemetry each turn). */
 	private cold = false;
 
 	constructor(private readonly cfg: LadderConfig = LADDER_DEFAULTS) {}
 
-	attach(host: ConductorHost): void {
+	attach(host: PolicyHost): void {
 		this.host = host;
-	}
-
-	detach(): void {
-		this.host?.setStatus(null);
-		this.host = null;
 	}
 
 	setCold(cold: boolean): void {
 		this.cold = cold;
 	}
 
-	conduct(view: ConductorView): Command[] {
+	conduct(view: PolicyView): FoldCommand[] {
 		const cw = view.contextWindow ?? 0;
 		// Provider-anchored usage when Pi has it; the chars÷4 estimator otherwise.
 		const used = view.reportedTokens ?? view.liveTokens;
@@ -109,7 +104,7 @@ export class FoldLadderConductor implements Conductor {
 		return [{ kind: "fold", ids: eligible.map((b) => b.id) }];
 	}
 
-	private publishIdle(view: ConductorView, fraction: number, foldAt: number, savings: number, stepTokens: number): void {
+	private publishIdle(view: PolicyView, fraction: number, foldAt: number, savings: number, stepTokens: number): void {
 		// Between events the ladder is quiet; publish the position so the status command can show
 		// "next fold at N %" without the engine re-deriving policy internals.
 		this.host?.setStatus(null, {
@@ -126,7 +121,7 @@ export class FoldLadderConductor implements Conductor {
 		});
 	}
 
-	private publishIrreducible(view: ConductorView, overCap: boolean): void {
+	private publishIrreducible(view: PolicyView, overCap: boolean): void {
 		this.host?.setStatus(
 			overCap ? "OVER BUDGET: nothing left to mask (tail/roots are the floor)" : null,
 			{
@@ -147,7 +142,6 @@ function maskable(b: ViewBlock): boolean {
 		isDurableId(b.id) &&
 		!b.protected &&
 		!b.held &&
-		!b.grouped &&
 		!b.bornFolded &&
 		!b.frozen &&
 		b.foldedTokens < b.tokens

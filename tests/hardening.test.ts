@@ -11,7 +11,7 @@ import { Gate, GATE_DEFAULTS, type GateConfig } from "../src/adapters/pi/gate";
 import { SpoolStore, SpoolError } from "../src/adapters/pi/spool";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import { foldCode, pointerDigest, collectRiskLines } from "../src/core/digest";
 import { categorize } from "../src/core/policy/ledger";
 import type { AgentMessage } from "../src/core/block";
@@ -104,7 +104,7 @@ describe("kill switch controls pointer substitution, not recallability", () => {
 
 	it("gate active → pointer substitutes; gate off → raw renders; recall works either way", () => {
 		const { reg, code } = foldOne(flood);
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg);
 
 		engine.setGateActive(true);
 		let out = engine.process(msgs, 400_000);
@@ -129,7 +129,7 @@ describe("recall lines= is capped (no re-flood path)", () => {
 		const gate = new Gate(ENABLED, reg, () => new SpoolStore(dir));
 		const d = gate.observe({ toolName: "read", toolCallId: "cL", input: { path: "/big" }, isError: false, content: [{ type: "text", text: flood }] });
 		expect(d.folded).toBe(true);
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg);
 
 		const { matches } = engine.resolveRecall([d.code!], { lines: "1-999999" });
 		expect(matches).toHaveLength(1);

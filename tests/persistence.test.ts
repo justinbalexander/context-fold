@@ -21,7 +21,7 @@ import { Gate, GATE_DEFAULTS, type GateConfig } from "../src/adapters/pi/gate";
 import { SpoolStore } from "../src/adapters/pi/spool";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import { foldCode } from "../src/core/digest";
 import { user, assistantWithCalls, toolResult } from "./helpers";
 import type { AgentMessage } from "../src/core/block";
@@ -97,7 +97,7 @@ describe("resume restores fold state and all pointers resolve", () => {
 			gate1.observe({ toolName: "read", toolCallId: cid, input: { path: `/${cid}` }, isError: false, content: [{ type: "text", text }] });
 			recordGateFold(led, reg1.get(`r:${cid}`)!);
 		}
-		const engine1 = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg1);
+		const engine1 = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg1);
 		engine1.markUnfold([foldCode("r:c1")]);
 		recordUnfold(led, ["r:c1"]);
 
@@ -107,7 +107,7 @@ describe("resume restores fold state and all pointers resolve", () => {
 		const { valid, dropped } = revalidateSpools(gateEntries);
 		expect(dropped).toEqual([]); // both spools still on disk
 		for (const e of valid) reg2.set(e);
-		const engine2 = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg2);
+		const engine2 = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg2);
 		engine2.restoreUnfolded(unfoldedIds);
 
 		const out = engine2.process(msgs, 400_000);

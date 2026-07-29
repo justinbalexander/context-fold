@@ -32,8 +32,6 @@ export function configFromEnv(): Partial<FoldConfig> {
 	}
 	const tail = Number(process.env.CONTEXTFOLD_TAIL);
 	if (Number.isFinite(tail) && tail >= 0) cfg.tailTarget = tail;
-	const layers = Number(process.env.CONTEXTFOLD_MAX_LAYERS);
-	if (Number.isFinite(layers) && layers >= 0) cfg.maxLayers = Math.floor(layers);
 	if (process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true") cfg.debug = true;
 	return cfg;
 }

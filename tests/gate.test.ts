@@ -5,14 +5,14 @@
  * observe→spool→register→substitute path, and the kill switch's inertness guarantee.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Gate, resolveGateEnabled, gateConfigFromEnv, gateModelIdentity, GATE_DEFAULTS, type GateConfig, type ToolResultObservation } from "../src/adapters/pi/gate";
 import { SpoolStore } from "../src/adapters/pi/spool";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import { foldCode } from "../src/core/digest";
 import { user, assistantWithCalls, toolResult } from "./helpers";
 import type { AgentMessage } from "../src/core/block";
@@ -132,6 +132,19 @@ describe("gate fold decision matrix", () => {
 		gate.observe(obs(bigText(400), { toolName: "bash", input: { command: "git log" }, fullOutputPath: "/tmp/full.txt" }));
 		expect(reg.get("r:c1")?.fullOutputPath).toBe("/tmp/full.txt");
 	});
+
+	it("fails open with an actionable error when the spool cannot be written", () => {
+		const blocker = join(dir, "not-a-directory");
+		writeFileSync(blocker, "x");
+		const { gate, reg } = newGate(ENABLED, new MapGateRegistry(), new SpoolStore(join(blocker, "session")));
+
+		const d = gate.observe(obs(bigText(400)));
+
+		expect(d.folded).toBe(false);
+		expect(d.reason).toBe("error");
+		expect(d.error).toMatch(/ENOTDIR|not a directory/i);
+		expect(reg.size).toBe(0);
+	});
 });
 
 // ── kill switch inertness ────────────────────────────────────────
@@ -155,8 +168,8 @@ describe("kill-switch inertness", () => {
 		// The engine's outgoing view is byte-identical to a plain (never-gated) engine — feed BOTH the
 		// same message array (the fixture builder stamps fresh timestamps each call).
 		const msgs = floodSession(text);
-		const withEmptyReg = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg);
-		const baseline = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, new MapGateRegistry());
+		const withEmptyReg = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg);
+		const baseline = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, new MapGateRegistry());
 		const a = withEmptyReg.process(msgs, 400_000);
 		const b = baseline.process(msgs, 400_000);
 		expect(JSON.stringify(a)).toBe(JSON.stringify(b));
@@ -171,7 +184,7 @@ describe("observe→substitute integration", () => {
 		const gate = new Gate(ENABLED, reg, () => store);
 		gate.observe(obs(text));
 
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg);
 		const out = engine.process(floodSession(text), 400_000);
 		const tr = out.find((m) => m.role === "toolResult")!;
 		const rendered = (tr.content as any)[0].text as string;

@@ -1,25 +1,23 @@
 /*
  * fold-ladder.test.ts — the discrete fold ladder, the shipped folding policy:
  * threshold crossing, step spacing, cold branch, cap emergency, byte-stable layers,
- * consolidation merge, and fold-event reporting.
+ * and fold-event reporting.
  */
 import { describe, expect, it } from "vitest";
 import { ContextFoldEngine, type FoldEventReport, type FrozenLayer } from "../src/adapters/pi/store";
-import { FoldLadderConductor, LADDER_DEFAULTS } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy, LADDER_DEFAULTS } from "../src/core/policy/fold-ladder";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import type { AgentMessage } from "../src/core/block";
 import { user, assistantWithCalls, bigResult, toolResult, isBalanced } from "./helpers";
 
 function ladderEngine(cfg: Record<string, unknown> = {}, ladderCfg = LADDER_DEFAULTS) {
-	const policy = new FoldLadderConductor(ladderCfg);
+	const policy = new FoldLadderPolicy(ladderCfg);
 	const e = new ContextFoldEngine(policy, { tailTarget: 100, ...cfg }, new MapGateRegistry());
 	const committed: FrozenLayer[] = [];
-	const broken: number[] = [];
 	const events: FoldEventReport[] = [];
 	e.onLayerCommit = (layer) => committed.push(layer);
-	e.onLayerBreak = (seq) => broken.push(seq);
 	e.onFoldEvent = (ev) => events.push(ev);
-	return { e, policy, committed, broken, events };
+	return { e, policy, committed, events };
 }
 
 function session(n: number, linesEach = 400): { messages: AgentMessage[]; callIds: string[] } {
@@ -42,6 +40,19 @@ function resultText(messages: AgentMessage[], callId: string): string {
 		if (tr.toolCallId === callId) return tr.content?.[0]?.text ?? "";
 	}
 	throw new Error(`no toolResult for ${callId}`);
+}
+
+/** The parts of one assistant message as `{type, text}`, so each kind can be asserted separately. */
+function assistantParts(messages: AgentMessage[], responseId: string): { type: string; text: string }[] {
+	for (const m of messages) {
+		const a = m as { role?: string; responseId?: string; content?: unknown };
+		if (a.role !== "assistant" || a.responseId !== responseId) continue;
+		return (a.content as { type: string; text?: string; thinking?: string; name?: string }[]).map((p) => ({
+			type: p.type,
+			text: p.type === "thinking" ? (p.thinking ?? "") : p.type === "text" ? (p.text ?? "") : (p.name ?? ""),
+		}));
+	}
+	throw new Error(`no assistant message ${responseId}`);
 }
 
 describe("discrete fold events", () => {
@@ -69,6 +80,42 @@ describe("discrete fold events", () => {
 		// …while user intent survives verbatim.
 		const users = out.filter((m) => (m as { role?: string }).role === "user");
 		expect(users.length).toBe(2);
+	});
+
+	it("masks thinking, but never an assistant conclusion or the record of an action", () => {
+		const { e, committed } = ladderEngine();
+		// The oldest exchange carries all three kinds, so one fold event decides all three at once.
+		const messages: AgentMessage[] = [user("build the thing")];
+		messages.push(
+			assistantWithCalls([{ id: "c0", name: "read" }], {
+				responseId: "rA",
+				thinking: "weighing options: " + "consider the parser path ".repeat(1200), // ephemeral
+				text: "Conclusion: the parser is the bottleneck.", // a durable conclusion
+			}),
+		);
+		messages.push(bigResult("c0", 400));
+		for (let i = 1; i < 8; i++) {
+			messages.push(assistantWithCalls([{ id: `c${i}`, name: "read" }]));
+			messages.push(bigResult(`c${i}`, 400));
+		}
+		messages.push(user("now the newest question"));
+
+		const out = e.process(messages, { contextWindow: 80_000, tokens: null });
+		expect(committed.length).toBe(1);
+
+		const parts = assistantParts(out, "rA");
+		const thinking = parts.find((p) => p.type === "thinking");
+		const text = parts.find((p) => p.type === "text");
+		const call = parts.find((p) => p.type === "toolCall");
+
+		// Ephemeral reasoning masks to a reversible pointer keeping only a tag, a token count and a
+		// short gist — the bulk is gone, but enough remains to know what was there.
+		expect(thinking?.text).toContain("FOLDED");
+		expect(thinking?.text).toContain("thought · ~");
+		expect(thinking!.text.length).toBeLessThan(200);
+		// …while the conclusion and the action record survive byte-for-byte.
+		expect(text?.text).toBe("Conclusion: the parser is the bottleneck.");
+		expect(call?.text).toBe("read");
 	});
 
 	it("a fresh fold cannot re-fire next turn: frozen bytes hold and no second layer commits", () => {
@@ -127,33 +174,6 @@ describe("discrete fold events", () => {
 	});
 });
 
-describe("consolidation merge", () => {
-	it("exceeding maxLayers merges layer records into one without touching digest bytes", () => {
-		const { e, committed, broken, events } = ladderEngine({ maxLayers: 1 });
-		const base = session(8);
-		const first = e.process(base.messages, { contextWindow: 80_000, tokens: null });
-		expect(committed.length).toBe(1);
-		const firstFrozen = committed[0].entries[0];
-		const firstText = resultText(first, firstFrozen.id.replace(/^r:/, ""));
-
-		// Grow the session past the threshold again (new observations accumulate).
-		const grown = { messages: [...base.messages] };
-		for (let i = 8; i < 16; i++) {
-			grown.messages.push(assistantWithCalls([{ id: `c${i}`, name: "read" }]));
-			grown.messages.push(bigResult(`c${i}`, 400));
-		}
-		grown.messages.push(user("keep going"));
-		const second = e.process(grown.messages, { contextWindow: 80_000, tokens: null });
-
-		// Second event committed, then the merge: old seq broken, ONE merged layer re-committed.
-		expect(broken.length).toBeGreaterThan(0);
-		const merged = committed[committed.length - 1];
-		expect(merged.entries.map((x) => x.id)).toContain(firstFrozen.id);
-		expect(events.some((ev) => ev.trigger === "consolidation")).toBe(true);
-		// The merge is bookkeeping only: the first layer's bytes are unchanged in the view.
-		expect(resultText(second, firstFrozen.id.replace(/^r:/, ""))).toBe(firstText);
-	});
-});
 
 describe("reversibility", () => {
 	it("recall and unfold still resolve a ladder-masked block", () => {

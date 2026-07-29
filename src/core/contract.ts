@@ -1,70 +1,69 @@
 /*
  * contract.ts — the policy ⇄ mechanism contract.
  *
- * A "policy" (conductor) is an interchangeable context-management strategy. The whole contract
- * is the shape of one pure idea:
+ * A POLICY decides which blocks should be folded. The MECHANISM (the engine, in
+ * adapters/pi/store.ts) owns everything else: reading the message array, writing the digests,
+ * and keeping the result valid to send. The whole contract is one pure function:
  *
- *     conduct(view) → Command[]
+ *     conduct(view) → FoldCommand[]
  *
- * The host hands the policy a read-only VIEW of the context; the policy replies with COMMANDS
- * describing the context it wants. The host clamps those to the one floor it enforces —
- * provider-validity, "the message must always stay sendable" — applies them, and reports back
- * anything it had to clamp.
+ * The engine hands the policy a read-only VIEW of the context; the policy replies with the
+ * complete set of blocks it wants folded. The engine resets to baseline and applies that set,
+ * re-checking every id against its own rules, so a policy defect can shrink or waste a fold but
+ * can never corrupt the outgoing context.
  *
- * Pure, serializable data and types only. Zero engine/harness dependency — the block kind union
- * is mirrored locally. Ported from Accordion `conductors/contract/conductor.ts` (commit 0c22434),
- * trimmed to the surface this port uses.
+ * Pure, serializable data and types only — no engine or harness dependency, so a policy can be
+ * unit-tested against a hand-built view.
  */
 
-/** The block kinds, mirrored so this contract has zero engine dependency. */
-export type ConductorBlockKind = "user" | "text" | "thinking" | "tool_call" | "tool_result";
+/** The block kinds, mirrored here so this contract has zero engine dependency. */
+export type PolicyBlockKind = "user" | "text" | "thinking" | "tool_call" | "tool_result";
 
 /** JSON-shaped telemetry payloads a policy may attach to display-only status. */
 export type JSONValue = null | boolean | number | string | JSONValue[] | { [key: string]: JSONValue };
 
-/** One block as every policy sees it — pure serializable data. */
+/** One block as the policy sees it — pure serializable data. */
 export interface ViewBlock {
 	id: string;
-	/** Stable provider-message grouping key. Blocks with the same key snap together in groups. */
-	messageKey?: string;
-	kind: ConductorBlockKind;
+	kind: PolicyBlockKind;
 	turn: number;
 	order: number;
-	tokens: number; // full token cost
+	/** Token cost at full fidelity. */
+	tokens: number;
 	/** Token cost if folded — digest size for a foldable kind, full tokens for a non-foldable kind. */
 	foldedTokens: number;
 	toolName?: string;
 	callId?: string;
 	isError?: boolean;
-	held: boolean; // a human/agent override owns this block
-	folded: boolean; // currently rendered folded in the view
+	/** The agent unfolded this block; it is protected from re-folding for the rest of the session. */
+	held: boolean;
+	/** Currently rendered folded in the view. */
+	folded: boolean;
 	/**
 	 * Born folded by the L0 ingestion gate: this block entered the view already collapsed to a
-	 * pointer digest. It is TERMINAL — the fidelity ladder and hard-cap floor never touch it (its
-	 * `foldedTokens` is the pointer weight the budget already counts), but ranking still sees its
-	 * full `tokens` so relevance stays honest.
+	 * pointer digest. It is TERMINAL — the policy never folds it again (its `foldedTokens` is the
+	 * pointer weight the budget already counts), but its full `tokens` stays visible so the
+	 * policy's accounting of what the block really costs stays honest.
 	 */
 	bornFolded?: boolean;
 	/**
-	 * Frozen by a committed prefix-stable layer: this block's substitution bytes are fixed for
-	 * the session (they extend the byte-stable head that keeps the provider's prompt cache warm).
-	 * TERMINAL like `bornFolded` — never re-ranked, re-laddered, grouped, or dropped; only an
-	 * explicit agent unfold (which deliberately breaks the prefix at one point) or an engine
-	 * consolidation epoch releases it.
+	 * Frozen by a committed prefix-stable layer: this block's substitution bytes are fixed for the
+	 * session (they extend the byte-stable head that keeps the provider's prompt cache warm).
+	 * TERMINAL like `bornFolded` — released only by an explicit agent unfold, which deliberately
+	 * breaks the prefix at one point.
 	 */
 	frozen?: boolean;
-	protected: boolean; // inside the protected working tail
-	grouped: boolean; // member of a folded group (host owns it)
-	text?: string; // full content
-	preview?: string; // one-line taste
+	/** Inside the protected working tail — the newest blocks, never folded. */
+	protected: boolean;
+	/** Full content. */
+	text?: string;
 }
 
 /**
  * A read-only view of the context the policy reasons over. `liveTokens` is the baseline the
- * policy folds down FROM (the host has cleared the previous pass). `protectedFromIndex` /
- * `protectTokens` surface the host's protected working tail as policy.
+ * policy folds down FROM (the engine has cleared the previous pass).
  */
-export interface ConductorView {
+export interface PolicyView {
 	/** Every block, in conversation order. */
 	blocks: ViewBlock[];
 	/** Token budget for the live context window. */
@@ -77,72 +76,40 @@ export interface ConductorView {
 	reportedTokens?: number;
 	/** The real model-window threshold corresponding to `budgetFraction`. */
 	reportedBudget?: number;
-	/** Index of the first block in the host's protected working tail. `blocks.length` ⇒ no tail. */
+	/** Index of the first block in the protected working tail. `blocks.length` ⇒ no tail. */
 	protectedFromIndex: number;
 	/** The protected-tail token target driving `protectedFromIndex`. */
 	protectTokens: number;
 }
 
 /**
- * The command vocabulary. Every command is CONTENT SUBSTITUTION, never structural removal — a
- * block is never spliced out, only its content changes, and the message count never moves. That
- * rule makes broken states unrepresentable: a tool_call/tool_result pair can never orphan.
+ * Fold these blocks to their deterministic per-kind digests.
  *
- * Each `conduct()` return is the policy's COMPLETE desired state; the host resets to baseline
- * then applies the batch. `[]` = clear to raw; `null` = HOLD (reuse last batch).
+ * Folding is CONTENT SUBSTITUTION, never structural removal — a block is never spliced out, only
+ * its content changes, and the message count never moves. That rule makes broken states
+ * unrepresentable: a tool_call/tool_result pair can never orphan.
+ *
+ * Each `conduct()` return is the policy's COMPLETE desired state, not a delta. `[]` means "fold
+ * nothing this turn".
  */
-export type Command = FoldCommand | ReplaceCommand;
-
-/** Collapse blocks to a digest. No `digest` → host per-kind digest (with the recoverable tag). */
 export interface FoldCommand {
 	kind: "fold";
 	ids: string[];
-	digest?: string;
 }
 
-/**
- * Substitute a block's content with arbitrary text the policy chose. The block stays in place
- * (callId/pairing intact). `content: ""` → host folds to the standard digest (smallest wire-safe
- * form). `recoverable:true` → host prepends the `{#code FOLDED}` tag so the agent can unfold to
- * the ORIGINAL. The policy supplies the BODY only; the host owns the tag.
- */
-export interface ReplaceCommand {
-	kind: "replace";
-	id: string;
-	content: string;
-	recoverable?: boolean;
-}
-
-// ─── Host capabilities & ledger telemetry ────────────────────────────────────
-
-/** Optional services the host MAY offer. Always call `host.can(id)` before depending on one. */
-export type HostCapabilityId = "countTokens" | "digest";
-
-/** Host services available to an in-process policy. Optional ones are gated on `can()`. */
-export interface ConductorHost {
-	/** Is `capability` available right now? */
-	can(capability: HostCapabilityId): boolean;
-	/** Synchronous token estimate for `text`, using the host's tokenizer. */
-	countTokens(text: string): number;
-	/** The engine's per-kind folded digest for block `id`, or `null` if unknown. */
-	digestOf(id: string): string | null;
-	/** Surface display-only status to the human; `null` clears it. */
+/** Engine services available to a policy. */
+export interface PolicyHost {
+	/** Surface display-only status to the human; `null` clears the message. */
 	setStatus(text: string | null, metrics?: Record<string, number | string | boolean>, details?: JSONValue): void;
-	/** Ask the host to re-run `conduct()` after async work completes. */
-	requestRerun(): void;
 }
 
 /**
- * A context-management strategy. The host calls `conduct()` whenever the context changes.
- *  - `Command[]` — the complete desired state; the host resets to baseline and applies it.
- *  - `[]` — explicitly clear to raw.
- *  - `null` — HOLD: reuse the last non-null batch.
- * `conduct()` MUST be synchronous and side-effect-free with respect to the view.
+ * A context-management strategy. The engine calls `conduct()` once per model call.
+ * It MUST be synchronous and must not mutate the view.
  */
-export interface Conductor {
+export interface FoldPolicy {
 	readonly id: string;
 	readonly label: string;
-	attach?(host: ConductorHost): void;
-	detach?(): void;
-	conduct(view: ConductorView): Command[] | null;
+	attach?(host: PolicyHost): void;
+	conduct(view: PolicyView): FoldCommand[];
 }

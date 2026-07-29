@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { Gate, GATE_DEFAULTS } from "../src/adapters/pi/gate";
 import { SpoolStore, readEnvelopeAt } from "../src/adapters/pi/spool";
@@ -46,7 +46,7 @@ describe("duplicate flood folding", () => {
 			toolResult("call-2", BIG, "exec"),
 			user("tail"),
 		];
-		const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, registry);
+		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
 		const out = e.process(messages, { contextWindow: 10_000_000, tokens: null });
 		const texts = out
 			.filter((m) => (m as { role?: string }).role === "toolResult")

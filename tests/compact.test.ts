@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { SpoolStore } from "../src/adapters/pi/spool";
 import { SeedIndexStore, emitFoldIndex, emitCompactIndex } from "../src/adapters/pi/index-store";
@@ -25,7 +25,7 @@ function setup() {
 	const registry = new MapGateRegistry();
 	const spool = new SpoolStore(dir);
 	const index = new SeedIndexStore(dir);
-	const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, registry);
+	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
 	e.onFoldEvent = (ev) => emitFoldIndex(ev, { spool, registry, index, sessionId: "s-compact", now: 1_722_200_000_000 });
 	return { e, registry, spool, index };
 }

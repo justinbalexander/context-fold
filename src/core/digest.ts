@@ -50,14 +50,13 @@ export function foldTag(id: string): string {
 }
 
 /**
- * Per-block memo of the (immutable) digest string and its token cost.
+ * Per-block memo of the (immutable) digest string.
  *
  * TRIPWIRE: there is no invalidation. Sound ONLY because a committed block's content fields are
  * never mutated in place. If a future feature mutates an existing block's `text`/`tokens`, it
- * MUST clear both caches for that block.
+ * MUST clear this cache for that block.
  */
 const digestCache = new WeakMap<DigestBlock, string>();
-const digestTokenCache = new WeakMap<DigestBlock, number>();
 
 /**
  * The full folded representation. Foldable kinds get the `{#<code> FOLDED}` tag followed by the
@@ -105,17 +104,10 @@ function digestBody(b: DigestBlock): string {
 	}
 }
 
-export function digestTokens(b: DigestBlock): number {
-	const cached = digestTokenCache.get(b);
-	if (cached !== undefined) return cached;
-	const out = estTokens(digest(b)) + BLOCK_OVERHEAD;
-	digestTokenCache.set(b, out);
-	return out;
-}
-
 /**
- * Token cost of a conductor's substituted content. Arbitrary, mutable text the conductor chose,
- * so it is NOT cached on the block. Same estimate + per-block overhead as a digest.
+ * Token cost of substituted content (a gate pointer or a frozen layer's bytes). The text varies
+ * per block and per session, so it is NOT cached on the block. Same estimate + per-block overhead
+ * as a digest.
  */
 export function substTokens(content: string): number {
 	return estTokens(content) + BLOCK_OVERHEAD;
@@ -131,8 +123,7 @@ const RISK_LINE_CLIP = 200;
 
 /**
  * Is a single line risk-bearing, and does it carry an ERROR/traceback? Uses the ledger's
- * `categorize` harvester — the single detector for gate, pointer and digest risk lines (see the risk-flag
- * source), which INCLUDES the `errors` category that `riskFlags` (a stickiness signal) drops.
+ * `categorize` harvester — the single detector shared by the gate, the pointer and the digest.
  */
 function lineRisk(line: string): { risk: boolean; error: boolean } {
 	const c = categorize(line);

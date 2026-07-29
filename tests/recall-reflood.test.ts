@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { Gate, GATE_DEFAULTS } from "../src/adapters/pi/gate";
 import { SpoolStore } from "../src/adapters/pi/spool";
@@ -49,7 +49,7 @@ function setup() {
 		toolResult("call-1", PAYLOAD, "exec"),
 		user("now the newest question"),
 	];
-	const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, registry);
+	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
 	e.process(messages, { contextWindow: 10_000_000, tokens: null });
 	return { e, code: decision.code! };
 }

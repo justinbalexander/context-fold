@@ -89,7 +89,16 @@ export interface SpoolWriteParams {
  */
 export class SpoolStore {
 	private ensured = false;
-	/** sha256 → first code that stored this payload (within-session dedup index). */
+	/**
+	 * sha256 → first code that stored this payload, so a repeated payload aliases the first
+	 * envelope instead of storing the bytes twice.
+	 *
+	 * SCOPE: in-memory and never rebuilt from disk, so dedup spans one PROCESS, not one session.
+	 * Two identical results in the same run alias; the same result read again after a resume gets
+	 * its own envelope. That costs disk only — both codes render a pointer and both resolve through
+	 * recall — so rebuilding this index by scanning every envelope on startup would buy little for
+	 * the I/O it would add.
+	 */
 	private readonly bySha = new Map<string, string>();
 
 	constructor(private readonly dir: string) {}

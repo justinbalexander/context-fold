@@ -1,18 +1,15 @@
 /*
- * ledger.ts — deterministic FACT LEDGER + RISK FLAGS. Pure, zero-latency regex harvest over a
- * block's text. Two jobs:
- *   1. riskFlags(text) — which high-value categories a block contains (makes risk-bearing blocks
- *      STICKIER: they sort later in the fold-candidate list).
- *   2. harvestFacts(blocks) — a deduped, capped, category-ordered ledger of exact load-bearing
- *      tokens across all blocks, surfaced to the human so the *names* survive compression.
+ * ledger.ts — the shared risk detector: which load-bearing tokens a piece of text contains.
  *
- * No Date, no Math.random, no global state — same input ⇒ byte-identical output. Ported from
- * Accordion `conductors/keel/ledger.ts` (pinned commit 0c22434).
+ * Pure, zero-latency regex harvest with two consumers:
+ *   • `categorize(text)` sorts text into five buckets (paths, commands, errors, exact values,
+ *     decisions). The digest uses it to decide which lines of a folded block are worth keeping
+ *     verbatim; the L0 gate uses it to recognise error-shaped output it must not fold away.
+ *   • `ERROR_MARKER_SOURCE` / `errorMarkerRe()` are the one error lexicon, shared with the seed
+ *     index so "what counts as an error line" is answered identically everywhere.
+ *
+ * No Date, no Math.random, no global state — same input ⇒ byte-identical output.
  */
-
-export type FactCategory = "exact_values" | "decisions" | "commands" | "errors" | "paths";
-
-const RISK_CATEGORIES: readonly FactCategory[] = ["exact_values", "decisions", "commands", "paths"];
 
 const VALUE_STOPWORDS = new Set([
 	"the", "and", "for", "this", "that", "with", "from", "true", "false", "null",
@@ -100,10 +97,4 @@ export function categorize(text: string): CategorizedMarkers {
 	}
 
 	return result;
-}
-
-/** The risk categories present in a block's text. More flags ⇒ stickier (folded later). */
-export function riskFlags(text: string): FactCategory[] {
-	const cats = categorize(text);
-	return RISK_CATEGORIES.filter((c) => cats[c].length > 0);
 }

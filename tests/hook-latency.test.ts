@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import type { AgentMessage } from "../src/core/block";
 import { user, assistantWithCalls, bigResult, liveTokensOf } from "./helpers";
 
@@ -36,7 +36,7 @@ describe.skipIf(!BENCH)("hook latency", () => {
 		const messages = benchSession(120); // big, deeply over budget
 		const cw = 200_000;
 		const tokens = liveTokensOf(messages);
-		const engine = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: cw });
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: cw });
 
 		// Warm caches, then time the synchronous per-turn work.
 		engine.process(messages, cw);

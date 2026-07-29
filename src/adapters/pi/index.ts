@@ -15,7 +15,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage as CoreAgentMessage } from "../../core/block";
-import { FoldLadderConductor } from "../../core/policy/fold-ladder";
+import { FoldLadderPolicy } from "../../core/policy/fold-ladder";
 import { ContextFoldEngine } from "./store";
 import { SeedIndexStore, emitFoldIndex, emitCompactIndex } from "./index-store";
 import { renderDetCompactionSummary } from "./compact";
@@ -25,7 +25,7 @@ import { registerFoldTools } from "./unfold-tool";
 import { MapGateRegistry } from "../../core/gate-registry";
 import { Gate, gateConfigFromEnv, gateModelIdentity } from "./gate";
 import { SpoolStore } from "./spool";
-import { recordGateFold, recordLayer, recordLayerBreak, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
+import { recordGateFold, recordLayer, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
 import { spoolRetainMsFromEnv, sweepSpools } from "./retention";
 import { CacheTelemetry } from "./cache-telemetry";
 import { advise } from "./advisor";
@@ -52,13 +52,12 @@ export default function contextFold(pi: ExtensionAPI): void {
 	}
 	const acfg = adapterConfigFromEnv();
 	const foldCfg = configFromEnv();
-	const ladderPolicy = new FoldLadderConductor(acfg.ladder);
+	const ladderPolicy = new FoldLadderPolicy(acfg.ladder);
 
 	// ── L0 ingestion gate: registry (shared with the engine) + lazy per-session spool store ──────
 	const registry = new MapGateRegistry();
 	const engine = new ContextFoldEngine(ladderPolicy, foldCfg, registry);
 	engine.onLayerCommit = (layer) => recordLayer(pi, layer);
-	engine.onLayerBreak = (seq) => recordLayerBreak(pi, seq);
 
 	const debug = process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true";
 	const dumpPath = process.env.CONTEXTFOLD_DUMP?.trim() || null;
@@ -158,8 +157,9 @@ export default function contextFold(pi: ExtensionAPI): void {
 			const { valid, dropped } = revalidateSpools(gateEntries);
 			for (const e of valid) registry.set(e);
 			engine.restoreUnfolded(unfoldedIds);
-			// Layers restore byte-verbatim; rendering stays gated on the prefixStable flag, so a
-			// flag-off resume renders prior layers raw without losing the record.
+			// Layers restore byte-verbatim — the persisted substitution bytes are replayed rather
+			// than recomputed, so a resumed session's context head is byte-identical to the one
+			// the provider already cached.
 			engine.restoreLayers(layers);
 			if (debug)
 				process.stderr.write(
@@ -194,6 +194,10 @@ export default function contextFold(pi: ExtensionAPI): void {
 					const dup = decision.dedupOf ? ` dedup=#${decision.dedupOf}` : "";
 					process.stderr.write(`[context-fold] l0-fold #${decision.code} tool=${event.toolName} ${decision.inTokens}→${decision.outTokens}${dup}\n`);
 				}
+			} else if (decision.reason === "error") {
+				// Unlike a one-off fold miss, an unavailable spool can silently disable L0 for the
+				// rest of the session. Keep the turn fail-open, but make that degraded state visible.
+				process.stderr.write(`[context-fold] gate error (result flows raw): ${decision.error ?? "spool write failed"}\n`);
 			}
 		} catch (err) {
 			// Fail-open: never let the gate break a tool result — but a persistent failure (unwritable

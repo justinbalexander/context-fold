@@ -2,10 +2,11 @@
  * seed-index.ts — the deterministic seed index emitted at every fold event.
  *
  * The index is the lexical bridge back into folded content (spec: docs/SEED_INDEX_SPEC.md).
- * Grep-based recovery can only find what is indexed VERBATIM, so extraction is pure regex work — no model calls, no paraphrase, same input ⇒ byte-identical
- * output. First-class fields are exactly the classes summarization measurably drops: exact
- * identifiers/numbers buried in large tool outputs (summary-boundary loss) and error strings in
- * every spelling the shared lexicon knows (lowercase `failed`, `npm ERR!`, …).
+ * Grep-based recovery can only find what is indexed VERBATIM, so extraction is pure regex work —
+ * no model calls, no paraphrase, same input ⇒ byte-identical output. First-class fields are
+ * exactly the classes summarization measurably drops: exact identifiers/numbers buried in large
+ * tool outputs (summary-boundary loss) and error strings in every spelling the shared lexicon
+ * knows (lowercase `failed`, `npm ERR!`, …).
  *
  * Pure core: no disk, no Date (the caller supplies `at`), no harness imports.
  */
@@ -43,7 +44,7 @@ export interface SeedIndexRecord {
 	session: string;
 	seq: number;
 	at: string;
-	trigger: "threshold" | "consolidation" | "cap" | "compact";
+	trigger: "threshold" | "cap" | "compact";
 	usage: { tokens: number; contextWindow: number; fraction: number };
 	files: string[];
 	commands: string[];

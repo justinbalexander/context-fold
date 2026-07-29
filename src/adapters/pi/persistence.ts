@@ -25,13 +25,12 @@ export interface FrozenLayerRecord {
 }
 
 /** One event on the fold ledger. `gate` = a born-fold happened; `unfold` = the agent expanded
- *  folds; `layer` = a prefix-stable layer committed; `layer-break` = a consolidation epoch
- *  deliberately released that layer. */
+ *  folds; `layer` = a prefix-stable layer committed. Unknown kinds (from an older version) are
+ *  ignored on restore. */
 export type FoldRecord =
 	| { kind: "gate"; entry: GateEntry }
 	| { kind: "unfold"; ids: string[] }
-	| { kind: "layer"; layer: FrozenLayerRecord }
-	| { kind: "layer-break"; seq: number };
+	| { kind: "layer"; layer: FrozenLayerRecord };
 
 /** The subset of the pi API this module uses (kept minimal so it is trivially fakeable in tests). */
 export interface EntryAppender {
@@ -60,11 +59,6 @@ export function recordLayer(pi: EntryAppender, layer: FrozenLayerRecord): void {
 	if (layer.entries.length) pi.appendEntry(FOLD_CUSTOM_TYPE, { kind: "layer", layer } satisfies FoldRecord);
 }
 
-/** Record a consolidation break of layer `seq`. */
-export function recordLayerBreak(pi: EntryAppender, seq: number): void {
-	pi.appendEntry(FOLD_CUSTOM_TYPE, { kind: "layer-break", seq } satisfies FoldRecord);
-}
-
 /**
  * Left-fold the session's context-fold entries into the restored state: the latest gate entry per
  * block wins, and every unfolded id accumulates. Pure — no disk, deterministic in entry order.
@@ -85,7 +79,6 @@ export function restoreFoldState(entries: EntryLike[]): {
 		else if (rec.kind === "unfold" && Array.isArray(rec.ids)) for (const id of rec.ids) unfoldedIds.add(id);
 		else if (rec.kind === "layer" && rec.layer && typeof rec.layer.seq === "number" && Array.isArray(rec.layer.entries))
 			layersBySeq.set(rec.layer.seq, rec.layer);
-		else if (rec.kind === "layer-break" && typeof rec.seq === "number") layersBySeq.delete(rec.seq);
 	}
 	const layers = [...layersBySeq.values()].sort((a, b) => a.seq - b.seq);
 	return { gateEntries: [...byBlock.values()], unfoldedIds, layers };
