@@ -2,26 +2,6 @@
 
 Notable changes to context-fold.
 
-## Unreleased
-
-- **Fold-cost accounting.** Cache telemetry now attributes re-prefill to context-fold's own fold
-  events, and `/context-fold` plus the `CONTEXTFOLD_DEBUG` line report both sides: tokens masked per
-  turn against tokens the provider re-prefilled because the fold moved the prefix. The cost is
-  charged to the single turn carrying the new bytes, since every later turn reads them back from
-  cache. Reporting only the savings was dishonest accounting.
-- **A zero cost is distinguished from an unreported one.** Measuring fold cost needs a provider that
-  reports cache *writes*; the Codex route reports cached reads only and Pi hardcodes Google's write
-  to zero. Where writes are unreported the status says so rather than showing a zero and claiming a
-  net win against something never measured.
-- **Deferred L0 substitution** (`CONTEXTFOLD_L0_KEEP_RECENT`, default `0` = unchanged behaviour).
-  Holds the newest N gate-registered blocks at full fidelity, folding them once stale, as a
-  mitigation for recall churn. Its first live A/B did not support it; retained as an experiment, with
-  the reasoning and the open question recorded in the README.
-- **Fold thresholds measured; defaults unchanged.** Folding earlier was tested and is *worse*: the
-  dominant cost is the number of fold events rather than the size of any one re-prefill, so a tighter
-  budget fired more events and spent more input tokens for fewer cache reads. Fidelity held at every
-  threshold, with planted risk lines preserved verbatim inside every folded digest.
-
 ## 0.1.0
 
 First public release. context-fold was developed privately before this point, so this entry

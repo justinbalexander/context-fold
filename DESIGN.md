@@ -136,6 +136,11 @@ value warm, yet costs its full weight on every subsequent turn.
 - **Error policy.** Error-shaped results (the `isError` flag or a lexical error hit) get a
   `CONTEXTFOLD_L0_ERRCAP`× higher threshold, so a short error is never folded away; a large one
   folds but keeps every error line.
+- **Deferred substitution** (`CONTEXTFOLD_L0_KEEP_RECENT`, experimental, default `0`). The newest
+  N registered blocks render warm and take their pointer only once newer registrations push them
+  out of the hold-out set. The set is keyed on array position (not the token tail), so it stays
+  deterministic turn over turn; spooling and recall are unaffected. See the README for the A/B
+  evidence and the open question that keeps this flag alive.
 
 ## 6. Fold-state persistence
 

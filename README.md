@@ -230,7 +230,7 @@ From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 | `CONTEXTFOLD_L0` | _(off)_ | Ingestion gate: `1` = all models; comma-separated substrings = per-model allowlist; unset/`0` = inert. |
 | `CONTEXTFOLD_L0_THRESHOLD` | `2000` | est-token size above which a result is spooled + born-folded. |
 | `CONTEXTFOLD_L0_MINSAVE` | `0.5` | Minimum fraction the pointer must save to bother folding. |
-| `CONTEXTFOLD_L0_KEEP_RECENT` | `0` | Deferred substitution: hold the newest N gate-registered blocks at full fidelity and fold them only once stale. `0` = born-folded (cheapest per turn); non-zero trades those tokens against recall round trips. Spooling is unaffected, so held blocks stay recallable. Retained as an experiment — see the note below before removing it. |
+| `CONTEXTFOLD_L0_KEEP_RECENT` | `0` | Deferred substitution: hold the newest N gate-registered blocks at full fidelity and fold them only once stale. `0` = born-folded (cheapest per turn); non-zero trades those tokens against recall round trips. Spooling is unaffected, so held blocks stay recallable. Retained as an experiment — see the deferred-substitution note under *The L0 ingestion gate* before removing it. |
 | `CONTEXTFOLD_L0_ERRCAP` | `4` | Threshold multiplier for error-shaped results. |
 | `CONTEXTFOLD_SPOOL_RETAIN_DAYS` | `14` | Spool GC window at session start. `0`/`off` = never delete. |
 | `CONTEXTFOLD_DEBUG` | off | One-line fold/cache summary to stderr each turn. |
