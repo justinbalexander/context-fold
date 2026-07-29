@@ -42,6 +42,17 @@ describes what the package does rather than how it got here.
 - **Cache telemetry and the advisor.** Measured per-message `cacheRead`/`cacheWrite` drives cold
   detection (one stderr notice when an expected-warm turn reads zero cached tokens) and the
   `/context-fold` status command's flags.
+- **Fold-cost accounting.** Cache telemetry attributes re-prefill to context-fold's own fold
+  events, and `/context-fold` plus the `CONTEXTFOLD_DEBUG` line report both sides: tokens masked
+  per turn against tokens the provider re-prefilled because the fold moved the prefix, plus the
+  running net. The cost is charged to the single turn carrying the new bytes, since every later
+  turn reads them back from cache. Measuring it needs a provider that reports cache *writes*; where
+  they are unreported the status says so rather than showing a zero — "nothing was rewritten" and
+  "this provider never says" are different facts.
+- **Deferred L0 substitution** (`CONTEXTFOLD_L0_KEEP_RECENT`, default `0` = born-folded). Holds the
+  newest N gate-registered blocks at full fidelity, folding them once stale, as a mitigation for
+  recall churn. Experimental: its first live A/B did not support it, and the README records the
+  reasoning and the open question that keep the flag alive.
 
 ### Behaviour worth knowing
 
@@ -74,3 +85,8 @@ scopes its own reads, and decisive where a flood genuinely lands: a buried-error
 26,750 to 4,793 input tokens, a web-fetch task from 14,380 to 3,225. It saves most of the cost
 where a flood lands and costs a few percent elsewhere — not a flat ratio. That is why it ships off
 by default.
+
+Fold thresholds were measured before settling on the defaults: folding *earlier* is worse. The
+dominant cost is the number of fold events rather than the size of any one re-prefill, so a tighter
+budget fired more events and spent more input tokens for fewer cache reads. Fidelity held at every
+threshold, with planted risk lines preserved verbatim inside every folded digest.

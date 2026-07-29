@@ -25,7 +25,7 @@ they are a checklist rather than a script.
 ## Every publish
 
 ```bash
-npm install                # a clean tree, so the lockfile in the tarball matches
+npm install                # a clean node_modules, so the checks below test what ships
 npm run typecheck
 npm test                   # prepublishOnly runs both again, but fail early
 npm pack --dry-run         # read the file list; nothing from tests/ or scripts/ belongs in it
