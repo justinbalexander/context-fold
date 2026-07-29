@@ -1,0 +1,336 @@
+/*
+ * extension-hooks.test.ts — the entry point's hook BODIES, not just their registration.
+ *
+ * extension-load.test.ts proves the hooks get registered; this file drives each one the way Pi
+ * drives it. Everything here is wiring that only exists in index.ts — the gate handoff, the
+ * teaching-text gate, the resume restore, the session-switch reset, and the compaction branch —
+ * so a regression in any of them would otherwise surface first in a user's session.
+ *
+ * Skipped when the Pi CLI is not installed alongside (the adapter imports `typebox`, which Pi
+ * injects at runtime — see vitest.config.ts).
+ */
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { user, assistantWithCalls, bigResult, toolResult } from "./helpers";
+import type { AgentMessage } from "../src/core/block";
+
+const PI_PRESENT = existsSync(resolve(__dirname, "../node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"));
+
+type Hook = (event: unknown, ctx: unknown) => unknown;
+interface Entry {
+	customType: string;
+	data: unknown;
+}
+
+/** A stub ExtensionAPI that keeps every registration so the test can invoke it. */
+function stubPi() {
+	const hooks = new Map<string, Hook>();
+	const tools = new Map<string, { execute(id: string, p: Record<string, unknown>): Promise<{ content: { text: string }[] }> }>();
+	const commands = new Map<string, { handler(args: unknown, ctx: unknown): Promise<void> }>();
+	const entries: Entry[] = [];
+	return {
+		hooks,
+		tools,
+		commands,
+		entries,
+		api: {
+			on: (name: string, fn: Hook) => hooks.set(name, fn),
+			registerTool: (t: never) => tools.set((t as { name: string }).name, t),
+			registerCommand: (name: string, c: never) => commands.set(name, c),
+			appendEntry: (customType: string, data?: unknown) => entries.push({ customType, data }),
+			setLabel: () => {},
+		} as never,
+	};
+}
+
+let dir: string;
+const savedEnv: Record<string, string | undefined> = {};
+const ENV_KEYS = ["CONTEXTFOLD", "CONTEXTFOLD_L0", "CONTEXTFOLD_COMPACT", "CONTEXTFOLD_RETAIN_DAYS"];
+
+beforeEach(() => {
+	dir = mkdtempSync(join(tmpdir(), "cf-hooks-"));
+	for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+	// Spool GC reaps by mtime across sibling sessions; keep it inert so it can't touch a fixture.
+	process.env.CONTEXTFOLD_RETAIN_DAYS = "0";
+});
+afterEach(() => {
+	rmSync(dir, { recursive: true, force: true });
+	for (const k of ENV_KEYS) {
+		if (savedEnv[k] === undefined) delete process.env[k];
+		else process.env[k] = savedEnv[k];
+	}
+});
+
+/** A ctx shaped like Pi's, backed by a real on-disk session dir. */
+function ctxFor(opts: { sessionId?: string; entries?: unknown[]; usage?: { contextWindow: number; tokens: number | null } | null } = {}) {
+	const notices: string[] = [];
+	return {
+		notices,
+		ctx: {
+			model: { id: "test-model", provider: "test" },
+			sessionManager: {
+				getSessionDir: () => dir,
+				getSessionId: () => opts.sessionId ?? "s1",
+				getEntries: () => opts.entries ?? [],
+			},
+			getContextUsage: () => opts.usage ?? { contextWindow: 200_000, tokens: null },
+			ui: { notify: (m: string) => notices.push(m) },
+		},
+	};
+}
+
+async function load() {
+	const { default: contextFold } = await import("../src/adapters/pi/index");
+	const s = stubPi();
+	contextFold(s.api);
+	return s;
+}
+
+/** A session heavy enough to cross the ladder's first-fold threshold on an 80k window. */
+function heavySession(): AgentMessage[] {
+	const messages: AgentMessage[] = [user("build the thing")];
+	for (let i = 0; i < 8; i++) {
+		messages.push(assistantWithCalls([{ id: `c${i}`, name: "read" }]));
+		messages.push(bigResult(`c${i}`, 400));
+	}
+	messages.push(user("now the newest question"));
+	return messages;
+}
+
+const bigPayload = () => Array.from({ length: 400 }, (_, i) => `line ${i}: ${"content ".repeat(8)}`).join("\n");
+
+describe.skipIf(!PI_PRESENT)("context hook", () => {
+	it("folds the outgoing messages and leaves the caller's array untouched", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		const messages = heavySession();
+
+		const out = (await s.hooks.get("context")!({ messages }, ctx)) as { messages: AgentMessage[] };
+		const folded = out.messages.filter((m) => JSON.stringify(m).includes("FOLDED"));
+
+		expect(folded.length).toBeGreaterThan(0);
+		// The input array is Pi's copy; folding must not mutate it in place.
+		expect(JSON.stringify(messages)).not.toContain("FOLDED");
+	});
+
+	it("sends context raw rather than failing the turn when the pass throws", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		const s = await load();
+		const messages = heavySession();
+		const broken = {
+			model: { id: "m" },
+			sessionManager: { getSessionDir: () => dir, getSessionId: () => "s1", getEntries: () => [] },
+			getContextUsage: () => {
+				throw new Error("usage exploded");
+			},
+		};
+
+		const out = (await s.hooks.get("context")!({ messages }, broken)) as { messages: AgentMessage[] };
+		expect(out.messages).toBe(messages); // fail-open: the same array, unfolded
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("tool_result hook (the L0 gate handoff)", () => {
+	it("spools and event-sources a large result when the gate is on", async () => {
+		process.env.CONTEXTFOLD_L0 = "1";
+		const s = await load();
+		const { ctx } = ctxFor();
+
+		await s.hooks.get("tool_result")!(
+			{ toolName: "read", toolCallId: "c1", input: { path: "/x.log" }, isError: false, content: [{ type: "text", text: bigPayload() }] },
+			ctx,
+		);
+
+		const gateEntries = s.entries.filter((e) => (e.data as { kind?: string }).kind === "gate");
+		expect(gateEntries.length).toBe(1);
+		expect((gateEntries[0].data as { entry: { blockId: string } }).entry.blockId).toBe("r:c1");
+	});
+
+	it("is completely inert when the gate is off", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		const s = await load();
+		const { ctx } = ctxFor();
+
+		await s.hooks.get("tool_result")!(
+			{ toolName: "read", toolCallId: "c1", input: {}, isError: false, content: [{ type: "text", text: bigPayload() }] },
+			ctx,
+		);
+
+		expect(s.entries).toEqual([]);
+	});
+
+	it("never lets a gate failure break the tool result", async () => {
+		process.env.CONTEXTFOLD_L0 = "1";
+		const s = await load();
+		// Point the session dir *inside a regular file* so the spool mkdir fails with ENOTDIR: the
+		// gate must swallow it and let the raw result through rather than breaking the turn.
+		const blocker = join(dir, "not-a-dir");
+		writeFileSync(blocker, "x");
+		const badCtx = {
+			model: { id: "m" },
+			sessionManager: { getSessionDir: () => join(blocker, "session"), getSessionId: () => "s1", getEntries: () => [] },
+		};
+
+		const writes: string[] = [];
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			expect(() => s.hooks.get("tool_result")!(
+				{ toolName: "read", toolCallId: "c1", input: {}, isError: false, content: [{ type: "text", text: bigPayload() }] },
+				badCtx,
+			)).not.toThrow();
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+		expect(s.entries).toEqual([]); // nothing recorded, and the result flows raw
+		expect(writes.join("")).toContain("gate error (result flows raw)");
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("before_agent_start hook (teaching text)", () => {
+	it("teaches the pointer contract only when the gate is active for this model", async () => {
+		process.env.CONTEXTFOLD_L0 = "1";
+		const on = await load();
+		const withGate = (await on.hooks.get("before_agent_start")!({ systemPrompt: "BASE" }, ctxFor().ctx)) as { systemPrompt: string };
+
+		expect(withGate.systemPrompt).toContain("BASE");
+		expect(withGate.systemPrompt).toContain("FOLDED");
+		expect(withGate.systemPrompt).toContain("recall search=");
+
+		process.env.CONTEXTFOLD_L0 = "0";
+		const off = await load();
+		// Gate off ⇒ no pointers can appear, so the teaching text must not tax the prompt.
+		expect(off.hooks.get("before_agent_start")!({ systemPrompt: "BASE" }, ctxFor().ctx)).toBeUndefined();
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("session_start hook", () => {
+	it("restores a prior session's folds so they render without the tool_result hook re-firing", async () => {
+		process.env.CONTEXTFOLD_L0 = "1";
+		const first = await load();
+		const { ctx } = ctxFor();
+		await first.hooks.get("tool_result")!(
+			{ toolName: "read", toolCallId: "c0", input: {}, isError: false, content: [{ type: "text", text: bigPayload() }] },
+			ctx,
+		);
+		expect(first.entries.length).toBe(1);
+
+		// A fresh process: only the recorded ledger entries survive.
+		const resumed = await load();
+		const ledger = first.entries.map((e) => ({ customType: e.customType, data: e.data }));
+		const resumedCtx = ctxFor({ entries: ledger }).ctx;
+		await resumed.hooks.get("session_start")!({}, resumedCtx);
+
+		const messages = [user("go"), assistantWithCalls([{ id: "c0", name: "read" }]), toolResult("c0", bigPayload())];
+		const out = (await resumed.hooks.get("context")!({ messages }, resumedCtx)) as { messages: AgentMessage[] };
+		expect(JSON.stringify(out.messages)).toContain("FOLDED");
+	});
+
+	it("a session switch drops the previous session's codes (they must not serve another session)", async () => {
+		process.env.CONTEXTFOLD_L0 = "1";
+		const s = await load();
+		const firstCtx = ctxFor({ sessionId: "s1" }).ctx;
+		await s.hooks.get("session_start")!({}, firstCtx);
+		await s.hooks.get("tool_result")!(
+			{ toolName: "read", toolCallId: "c0", input: {}, isError: false, content: [{ type: "text", text: bigPayload() }] },
+			firstCtx,
+		);
+		const code = (s.entries[0].data as { entry: { code: string } }).entry.code;
+
+		// Switch sessions in the same process, carrying no ledger into the new one.
+		await s.hooks.get("session_start")!({}, ctxFor({ sessionId: "s2", entries: [] }).ctx);
+
+		const res = await s.tools.get("recall")!.execute("t1", { codes: [code] });
+		expect(res.content.map((c) => c.text).join("")).toContain("no folded block with that code");
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("session_before_compact hook", () => {
+	it("replaces Pi's LLM summary with a deterministic one rendered from the seed index", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		process.env.CONTEXTFOLD_COMPACT = "det";
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+
+		// Drive a fold event first so the seed index has something to render from.
+		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
+
+		const prep = {
+			messagesToSummarize: heavySession(),
+			turnPrefixMessages: [],
+			tokensBefore: 40_000,
+			firstKeptEntryId: "e9",
+		};
+		const out = (await s.hooks.get("session_before_compact")!({ preparation: prep }, ctx)) as {
+			compaction: { summary: string; firstKeptEntryId: string };
+		};
+
+		expect(out.compaction.firstKeptEntryId).toBe("e9");
+		expect(out.compaction.summary).toContain("deterministic seed index");
+		expect(out.compaction.summary).toContain("no model involved");
+	});
+
+	it("carries a previous summary forward but marks it untrusted", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		process.env.CONTEXTFOLD_COMPACT = "det";
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
+
+		const out = (await s.hooks.get("session_before_compact")!(
+			{
+				preparation: {
+					messagesToSummarize: heavySession(),
+					turnPrefixMessages: [],
+					tokensBefore: 40_000,
+					firstKeptEntryId: "e9",
+					previousSummary: "An earlier model wrote this.",
+				},
+			},
+			ctx,
+		)) as { compaction: { summary: string } };
+
+		expect(out.compaction.summary).toContain("An earlier model wrote this.");
+		expect(out.compaction.summary).toContain("UNTRUSTED");
+	});
+
+	it("stands aside for Pi's own compaction under CONTEXTFOLD_COMPACT=native", async () => {
+		process.env.CONTEXTFOLD_COMPACT = "native";
+		const s = await load();
+		const { ctx } = ctxFor();
+
+		const out = await s.hooks.get("session_before_compact")!(
+			{ preparation: { messagesToSummarize: [], turnPrefixMessages: [], tokensBefore: 1, firstKeptEntryId: "e1" } },
+			ctx,
+		);
+		expect(out).toBeUndefined();
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("message_end hook and the status command", () => {
+	it("records provider usage and reports it through /context-fold", async () => {
+		const s = await load();
+		const { ctx, notices } = ctxFor();
+
+		await s.hooks.get("message_end")!({ message: { role: "assistant", usage: { input: 1000, cacheRead: 3000, cacheWrite: 0, output: 50 } } }, ctx);
+		await s.commands.get("context-fold")!.handler("", ctx);
+
+		expect(notices.join("\n")).toContain("cache read 3.0k");
+	});
+
+	it("ignores messages that carry no usage", async () => {
+		const s = await load();
+		const { ctx, notices } = ctxFor();
+
+		await s.hooks.get("message_end")!({ message: { role: "user" } }, ctx);
+		await s.commands.get("context-fold")!.handler("", ctx);
+
+		expect(notices.join("\n")).toContain("no usage yet");
+	});
+});
