@@ -40,7 +40,7 @@ unknown extra fields and records with a higher `v` they do not understand.
   "session": "<session id>",
   "seq": 3,
   "at": "2026-07-28T21:14:03.000Z",
-  "trigger": "threshold | consolidation | cap | compact",
+  "trigger": "threshold | cap | compact",
   "usage": { "tokens": 91000, "contextWindow": 200000, "fraction": 0.455 },
 
   "files": ["src/adapters/pi/store.ts", "tests/ladder.test.ts"],
@@ -67,9 +67,9 @@ unknown extra fields and records with a higher `v` they do not understand.
 Field semantics:
 
 - `seq` — the fold event's sequence number (monotonic per session; for the Pi
-  extension it is the frozen-layer seq). A consolidation record replaces the
-  merged records' seqs going forward but earlier records are never rewritten
-  (append-only file; latest record per seq wins).
+  extension it is the frozen-layer seq). The file is append-only and never
+  rewritten, so a consumer resolving a seq that appears more than once takes the
+  latest record for it.
 - `trigger` — why this fold fired.
 - `files` — every path the folded span touched: tool inputs (read/edit/write
   targets) and path-shaped tokens inside outputs. Repo-relative when the
@@ -87,12 +87,26 @@ Field semantics:
   class) and cap per record (Pi: ≤ 64) favoring rarer/longer tokens.
 - `userMessages` — first line (≤ 200 chars) of each user message in the
   folded span, with turn number. User intent is never folded away silently.
-- `spans` — the recovery pointers. Each names the durable artifact holding
-  the folded content and byte/line extent inside it. `log.path` is the
-  emitter's ground-truth store for that span — for this extension, the
-  sha256-verified spool envelope's content file, so offsets address the raw
-  content and not the JSON envelope; another emitter might name a session log.
-  `code` is the in-context recall handle when the emitter has one.
+- `spans` — the recovery pointers. Each names the durable artifact holding the
+  folded content, and the extent of that content. `log.path` is the emitter's
+  ground-truth store for the span; `code` is the in-context recall handle when
+  the emitter has one.
+
+  How to read a span depends on what the emitter's store is, so consumers must
+  look at the artifact rather than assume a byte range into a flat file. For
+  this extension `log.path` is a **spool envelope**: a JSON object at
+  `<spoolDir>/<code>.json` whose `content` field holds the folded text, with
+  `sha256` over that text. `byteStart`/`byteEnd` are offsets **within the
+  decoded `content` string** (so `byteStart` is 0 and `byteEnd` is the content's
+  byte length), *not* offsets into the `.json` file — parse the envelope, then
+  slice. Another emitter might point at a plain session log, where the offsets
+  would address the file directly.
+
+  One envelope shape needs special handling: when two folded blocks had
+  byte-identical content, the second is written as an **alias** — `content` is
+  `""` and an `aliasOf` field names the code whose envelope holds the bytes.
+  A consumer that finds `aliasOf` follows exactly one hop to
+  `<spoolDir>/<aliasOf>.json` and reads `content` there. Aliases never chain.
 
 ## Consumption contract
 

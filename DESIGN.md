@@ -33,10 +33,10 @@ The session file is never modified. Folding exists only in the per-call outgoing
 ```
 src/
   core/                    # ZERO harness dependencies. Pure, portable, unit-testable in isolation.
-    tokens.ts              # estTokens = ceil(len/4) + BLOCK_OVERHEAD, clip, firstLine, safeSlice
+    tokens.ts              # estTokens = ceil(len/4), BLOCK_OVERHEAD, clip, firstLine, safeSlice
     digest.ts              # the {#code FOLDED} tag, foldCode (FNV-1a), per-kind and pointer digests
-    contract.ts            # ConductorView / Command / ViewBlock — types only, pure
-    block.ts               # the Block model, linearize(), blockId(), isDurableId()
+    contract.ts            # PolicyView / FoldCommand / ViewBlock — types only, pure
+    block.ts               # the WireBlock model, linearize(), blockId(), isDurableId()
     apply.ts               # applyPlan(messages, ops) — the wire rewrite
     gate-registry.ts       # id → born-folded pointer entry (the L0 gate's registry)
     index/seed-index.ts    # deterministic extraction of the seed index record
@@ -51,7 +51,7 @@ src/
     index-store.ts         # seed-index.jsonl emission
     persistence.ts         # event-sourced fold state (survives resume)
     compact.ts             # the deterministic hard-compaction summary
-    handoff.ts             # /fold-handoff — the one opt-in LLM path
+    handoff.ts             # /fold-handoff — writes a deterministic seed for a fresh session
     advisor.ts             # cold detection and the reset yellow flag
     cache-telemetry.ts     # measured cacheRead/cacheWrite accounting
     retention.ts           # spool GC
@@ -60,7 +60,7 @@ src/
 ```
 
 **The seam:** the core speaks only its own `AgentMessage`-shaped block model and a
-`conduct(view) → Command[]` policy interface. The Pi adapter converts Pi's `AgentMessage[]`
+`conduct(view) → FoldCommand[]` policy interface. The Pi adapter converts Pi's `AgentMessage[]`
 to and from core blocks and owns every Pi API call. An adapter for another harness implements the
 same conversion against that tool's hooks; the core is untouched.
 
@@ -82,7 +82,7 @@ on "context" (messages, ctx):
   frozen   = computeFrozenOps(blocks)             # committed layer bytes (every turn)
   view     = buildView(blocks, protect, budget, …)
   cmds     = policy.conduct(view)                 # the fold ladder; [] = nothing to do
-  ops      = lower(cmds, blocks, protect)         # Command[] → FoldOp[]
+  ops      = lower(cmds, blocks, protect)         # FoldCommand[] → FoldOp[]
   commit(ops)                                     # freeze as a layer, emit the seed index
   return applyPlan(messages, merge(gate, frozen, ops))
 ```
@@ -110,8 +110,9 @@ prefix break) — never by the engine deciding to re-plan, which would re-prefil
 reproduce byte-identical digests. When everything maskable is already frozen and the context is
 still over budget, the engine says so rather than churning.
 
-`CONTEXTFOLD_MAX_LAYERS` bounds the layer *records*: past the bound they merge into one. Digest
-bytes are untouched, so the warm prefix survives the merge for free.
+Layers accumulate for the life of the session. Nothing scans them per turn — the engine keeps a
+flat `id → digestText` map and the newest seq — so there is no bound to enforce and no reason to
+merge them.
 
 ---
 
@@ -178,17 +179,18 @@ incident, with no need to touch the install.
 2. **The engine is the sole author of the `{#code}` tag.** Strip any tag a policy supplies and
    prepend the authoritative one.
 3. **Single disposition.** No block id in two ops.
-4. **The token estimator is uniform `ceil(chars/4) + 4`,** one swappable oracle in `tokens.ts`.
+4. **A block's token cost is uniform `ceil(chars/4) + 4`** (`estTokens` plus `BLOCK_OVERHEAD`),
+   one swappable oracle in `tokens.ts`.
 5. **Frozen bytes are immutable** for the life of the layer. Only an explicit unfold or a recorded
    layer break releases one.
 6. **Risk lines survive every fidelity level.** The error lexicon is deliberately broad and
    any-case; a failure signal that vanishes into an elision marker is the bug this project exists
    to prevent.
-7. **No model call on the automatic path**, ever. `/fold-handoff` is the only LLM path and it is
-   explicitly invoked.
-8. **Import Pi helpers only from `@earendil-works/pi-ai/compat`.** Pi injects bundled virtual
-   modules; a separately installed copy will not see the engine's model registry. Never vendor
-   `typebox` or the `@earendil-works/*` packages — declare them as peers.
+7. **No model call anywhere**, on any path. Folding, digests, compaction and the handoff seed are
+   all deterministic, so nothing this extension produces can be a paraphrase or a fabrication.
+8. **Never vendor `typebox` or the `@earendil-works/*` packages** — Pi injects bundled virtual
+   modules at runtime, so a separately installed copy would not be the one the engine uses.
+   Declare them as peer dependencies.
 
 ---
 

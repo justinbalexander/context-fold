@@ -47,7 +47,7 @@ does not exist inside an installed package.
 
 ## Dependencies
 
-The package installs **nothing**. Pi bundles `typebox` and the `@earendil-works/*` packages and
+The package installs **nothing**. Pi bundles `typebox` and `@earendil-works/pi-coding-agent` and
 injects them into extensions at runtime, so both are declared as *optional* peer dependencies —
 optional so that npm 7+ does not try to install a copy of the whole Pi CLI alongside the extension,
 and peers so nobody vendors a second copy that would miss the engine's model registry.
