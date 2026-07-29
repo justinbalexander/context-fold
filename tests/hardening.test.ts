@@ -1,7 +1,7 @@
 /*
  * hardening.test.ts — adapter-level regressions from the 2026-07-04 review:
  * error-lexicon coverage (the rtk failure mode), the spool collision guard, kill-switch pointer
- * suppression, the lines= re-flood cap, and judge negative-reply parsing.
+ * suppression, and the lines= re-flood cap.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -11,10 +11,9 @@ import { Gate, GATE_DEFAULTS, type GateConfig } from "../src/adapters/pi/gate";
 import { SpoolStore, SpoolError } from "../src/adapters/pi/spool";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { KeelConductor } from "../src/core/policy/keel";
+import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
 import { foldCode, pointerDigest, collectRiskLines } from "../src/core/digest";
 import { categorize } from "../src/core/policy/ledger";
-import { parseKeep } from "../src/core/model/relevance-judge";
 import type { AgentMessage } from "../src/core/block";
 
 const ENABLED: GateConfig = { enabled: true, ...GATE_DEFAULTS };
@@ -105,7 +104,7 @@ describe("kill switch controls pointer substitution, not recallability (D20)", (
 
 	it("gate active → pointer substitutes; gate off → raw renders; recall works either way", () => {
 		const { reg, code } = foldOne(flood);
-		const engine = new ContextFoldEngine(new KeelConductor(), { defaultContextWindow: 400_000 }, null, null, reg);
+		const engine = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg);
 
 		engine.setGateActive(true);
 		let out = engine.process(msgs, 400_000);
@@ -130,7 +129,7 @@ describe("recall lines= is capped (no re-flood path)", () => {
 		const gate = new Gate(ENABLED, reg, () => new SpoolStore(dir));
 		const d = gate.observe({ toolName: "read", toolCallId: "cL", input: { path: "/big" }, isError: false, content: [{ type: "text", text: flood }] });
 		expect(d.folded).toBe(true);
-		const engine = new ContextFoldEngine(new KeelConductor(), { defaultContextWindow: 400_000 }, null, null, reg);
+		const engine = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg);
 
 		const { matches } = engine.resolveRecall([d.code!], { lines: "1-999999" });
 		expect(matches).toHaveLength(1);
@@ -140,19 +139,5 @@ describe("recall lines= is capped (no re-flood path)", () => {
 		const malformed = engine.resolveRecall([d.code!], { lines: "banana" });
 		expect(malformed.matches[0].text).toBe(""); // malformed spec no longer dumps everything
 		expect(malformed.matches[0].note).toContain("malformed");
-	});
-});
-
-describe("relevance judge: leading 'none' is a negative even with digits after it", () => {
-	const candidates = [
-		{ id: "b1", kind: "tool_result", preview: "one" },
-		{ id: "b2", kind: "tool_result", preview: "two" },
-		{ id: "b3", kind: "tool_result", preview: "three" },
-	];
-	it('parses "None. Blocks 1-3 were already compressed." as keep-nothing', () => {
-		expect(parseKeep("None. Blocks 1-3 were already compressed.", candidates).size).toBe(0);
-	});
-	it("still parses a plain keep list", () => {
-		expect([...parseKeep("2, 3", candidates)]).toEqual(["b2", "b3"]);
 	});
 });

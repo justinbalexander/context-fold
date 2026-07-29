@@ -113,3 +113,17 @@ describe("collectRiskLines", () => {
 		expect(lines.filter((l) => l === "config: value=42").length).toBe(1);
 	});
 });
+
+describe("pointer digest budget holds on risk-free long-line floods", () => {
+	it("≤400 est-tokens even when head/tail lines are all ~190 chars", () => {
+		const lines = Array.from({ length: 40 }, (_, i) => String.fromCharCode(97 + (i % 26)).repeat(190));
+		const text = lines.join("\n");
+		const out = pointerDigest(text, {
+			code: "abc123", tool: "bash", input: { command: "x" }, isError: false,
+			bytes: text.length, fullEstTokens: estTokens(text), spoolPath: "/tmp/x.json",
+		});
+		expect(estTokens(out)).toBeLessThanOrEqual(400);
+		expect(out).toContain("{#abc123 FOLDED}"); // still a functioning pointer
+		expect(out).toContain("recall #abc123");
+	});
+});

@@ -1,20 +1,20 @@
 /*
- * prefix-stable.test.ts — Stage 2: frozen layers, oldest-first ranking, floor guard,
- * consolidation, unfold masking, and byte-exact persistence roundtrip.
+ * frozen-layers.test.ts — the prefix-stability mechanism: a fold event's substitutions are
+ * committed as a frozen layer whose bytes never change again, so the context head stays
+ * byte-identical turn over turn (what keeps a provider's prompt cache warm). Covers commit,
+ * re-emission, unfold masking, consolidation breaks, and the byte-exact persistence roundtrip.
  */
 import { describe, expect, it } from "vitest";
 import { ContextFoldEngine, type FrozenLayer } from "../src/adapters/pi/store";
-import { PrefixStableKeel } from "../src/core/policy/prefix-stable";
-import { KeelConductor } from "../src/core/policy/keel";
+import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { restoreFoldState, recordLayer, recordLayerBreak, FOLD_CUSTOM_TYPE, type EntryLike } from "../src/adapters/pi/persistence";
-import type { ViewBlock } from "../src/core/contract";
 import type { AgentMessage } from "../src/core/block";
 import { foldCode } from "../src/core/digest";
 import { user, assistantWithCalls, bigResult } from "./helpers";
 
 function engine(cfg: Record<string, unknown> = {}) {
-	const e = new ContextFoldEngine(new PrefixStableKeel(), { tailTarget: 100, prefixStable: true, ...cfg }, null, null, new MapGateRegistry());
+	const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100, ...cfg }, new MapGateRegistry());
 	const committed: FrozenLayer[] = [];
 	const broken: number[] = [];
 	e.onLayerCommit = (layer) => committed.push(layer);
@@ -45,39 +45,11 @@ function resultText(messages: AgentMessage[], callId: string): string {
 	throw new Error(`no toolResult for ${callId}`);
 }
 
-describe("PrefixStableKeel ranking", () => {
-	it("orders candidates strictly by conversation position, oldest first", () => {
-		class Probe extends PrefixStableKeel {
-			rankPublic(blocks: ViewBlock[], roots: Set<string>) {
-				return this.rank(blocks, roots, { currentTurn: 10, recalls: new Map(), tailCallIds: new Set() });
-			}
-		}
-		const mk = (id: string, order: number, extra: Partial<ViewBlock> = {}): ViewBlock => ({
-			id,
-			kind: "tool_result",
-			turn: order,
-			order,
-			tokens: 1000,
-			foldedTokens: 40,
-			held: false,
-			folded: false,
-			protected: false,
-			grouped: false,
-			text: `content of ${id}`,
-			...extra,
-		});
-		// Deliberately adversarial order: newest first in the array, a frozen block in between.
-		const blocks = [mk("b3", 30), mk("b1", 10), mk("bf", 20, { frozen: true }), mk("b2", 25)];
-		const ranked = new Probe().rankPublic(blocks, new Set());
-		expect(ranked.map((r) => r.block.id)).toEqual(["b1", "b2", "b3"]); // frozen excluded, oldest first
-	});
-});
-
 describe("frozen layers", () => {
-	it("commits an epoch as a layer and re-emits byte-identical substitutions", () => {
+	it("commits a fold event as a layer and re-emits byte-identical substitutions", () => {
 		const { e, committed } = engine();
 		const { messages, callIds } = session(3);
-		const cw = 16_000; // budget 12k against ~15k live → digest folds, no groups
+		const cw = 16_000; // ~13.5k live against a 16k window → past the 45 % fold threshold
 
 		const first = e.process(messages, cw);
 		expect(committed.length).toBe(1);
@@ -89,10 +61,10 @@ describe("frozen layers", () => {
 		expect(firstText).toContain("FOLDED");
 
 		const second = e.process(messages, cw);
-		// No second layer for the same epoch, and the frozen bytes are identical.
+		// No second layer for an unchanged view, and the frozen bytes are identical.
 		expect(committed.length).toBe(1);
 		expect(resultText(second, frozenCall)).toBe(firstText);
-		// Oldest-first: the earliest tool result is among the frozen ids.
+		// The event masks every stale observation, oldest included.
 		expect(committed[0].entries.map((x) => x.id)).toContain(`r:${callIds[0]}`);
 	});
 
@@ -103,7 +75,8 @@ describe("frozen layers", () => {
 		expect(committed.length).toBe(1);
 		const frozenCall = committed[0].entries[0].id.replace(/^r:/, "");
 
-		// Same session, huge window: keel returns [] but the frozen head must stay folded.
+		// Same session, huge window: the ladder is idle but the frozen head must stay folded —
+		// un-folding it would move bytes and cost the warm prefix for nothing.
 		const relaxed = e.process(messages, 10_000_000);
 		expect(resultText(relaxed, frozenCall)).toContain("FOLDED");
 	});
@@ -121,35 +94,32 @@ describe("frozen layers", () => {
 		expect(resultText(after, frozenCall)).toContain("line 0:"); // raw content back
 	});
 
-	it("consolidation breaks the oldest layer when the budget is unreachable, bounded", () => {
+	it("reports over-budget honestly rather than disturbing frozen bytes", () => {
 		const { e, committed, broken } = engine();
 		const base = session(6, 400);
-		e.process(base.messages, 20_000); // freeze an epoch
+		e.process(base.messages, 20_000); // fold event → freeze a layer
 		expect(committed.length).toBe(1);
 
-		// Shrink the window drastically: frozen digests + tail exceed the cap, the floor may not
-		// touch frozen blocks, so the engine must break layer 1 and replan (groups now allowed).
-		const squeezed = e.process(base.messages, 700);
-		expect(broken).toEqual([1]);
-		expect(squeezed).not.toBe(base.messages);
+		// Shrink the window until the frozen digests plus the protected tail exceed the cap. There
+		// is nothing left to mask (everything foldable is already frozen), so the honest answer is
+		// to say so — not to un-freeze and re-fold, which would re-prefill the cache to reproduce
+		// byte-identical digests.
+		e.process(base.messages, 700);
+		expect(broken).toEqual([]);
+		expect(e.status?.text).toContain("OVER BUDGET");
+		expect(e.status?.metrics?.over_budget).toBe(true);
 	});
 
-	it("frozen bytes change only through an explicit, recorded layer break", () => {
-		const { e, committed, broken } = engine();
+	it("frozen bytes are byte-stable across turns even as the window shrinks", () => {
+		const { e, committed } = engine();
 		const grown = session(6, 400);
 		e.process(grown.messages, 20_000);
 		const layer1 = committed[0];
-		// Squeeze the window. Two sanctioned outcomes: the frozen head still fits (bytes must be
-		// identical), or it no longer can (a consolidation MUST be recorded before anything moves).
+		// Squeeze the window: a committed layer's bytes are fixed for the session, so every frozen
+		// block must still render exactly the digest that was committed.
 		const out = e.process(grown.messages, 6_000);
-		if (broken.length === 0) {
-			for (const entry of layer1.entries) {
-				expect(resultText(out, entry.id.replace(/^r:/, ""))).toBe(entry.digestText);
-			}
-		} else {
-			expect(broken).toEqual([layer1.seq]);
-			// The deepened replan recommitted — the head is governed by a layer again, not adrift.
-			expect(committed.length).toBeGreaterThan(1);
+		for (const entry of layer1.entries) {
+			expect(resultText(out, entry.id.replace(/^r:/, ""))).toBe(entry.digestText);
 		}
 	});
 });
@@ -178,16 +148,5 @@ describe("persistence roundtrip", () => {
 		recordLayerBreak(appender, committed[0].seq);
 		expect(restoreFoldState(entries).layers.length).toBe(0);
 		expect(entries.every((x) => x.customType === FOLD_CUSTOM_TYPE)).toBe(true);
-	});
-});
-
-describe("default path unchanged", () => {
-	it("with the flag off, no layers commit and plain Keel behavior holds", () => {
-		const e = new ContextFoldEngine(new KeelConductor(), { tailTarget: 100 }, null, null, new MapGateRegistry());
-		let commits = 0;
-		e.onLayerCommit = () => commits++;
-		const { messages } = session(3);
-		e.process(messages, 16_000);
-		expect(commits).toBe(0);
 	});
 });

@@ -46,7 +46,7 @@ describe("duplicate flood folding", () => {
 			toolResult("call-2", BIG, "exec"),
 			user("tail"),
 		];
-		const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100, prefixStable: true }, null, null, registry);
+		const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, registry);
 		const out = e.process(messages, { contextWindow: 10_000_000, tokens: null });
 		const texts = out
 			.filter((m) => (m as { role?: string }).role === "toolResult")

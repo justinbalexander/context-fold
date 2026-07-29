@@ -12,7 +12,7 @@ import { Gate, resolveGateEnabled, gateConfigFromEnv, gateModelIdentity, GATE_DE
 import { SpoolStore } from "../src/adapters/pi/spool";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { KeelConductor } from "../src/core/policy/keel";
+import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
 import { foldCode } from "../src/core/digest";
 import { user, assistantWithCalls, toolResult } from "./helpers";
 import type { AgentMessage } from "../src/core/block";
@@ -155,8 +155,8 @@ describe("criterion 11 — kill-switch inertness", () => {
 		// The engine's outgoing view is byte-identical to a plain (never-gated) engine — feed BOTH the
 		// same message array (the fixture builder stamps fresh timestamps each call).
 		const msgs = floodSession(text);
-		const withEmptyReg = new ContextFoldEngine(new KeelConductor(), { defaultContextWindow: 400_000 }, null, null, reg);
-		const baseline = new ContextFoldEngine(new KeelConductor(), { defaultContextWindow: 400_000 }, null, null, new MapGateRegistry());
+		const withEmptyReg = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg);
+		const baseline = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, new MapGateRegistry());
 		const a = withEmptyReg.process(msgs, 400_000);
 		const b = baseline.process(msgs, 400_000);
 		expect(JSON.stringify(a)).toBe(JSON.stringify(b));
@@ -171,7 +171,7 @@ describe("observe→substitute integration", () => {
 		const gate = new Gate(ENABLED, reg, () => store);
 		gate.observe(obs(text));
 
-		const engine = new ContextFoldEngine(new KeelConductor(), { defaultContextWindow: 400_000 }, null, null, reg);
+		const engine = new ContextFoldEngine(new FoldLadderConductor(), { defaultContextWindow: 400_000 }, reg);
 		const out = engine.process(floodSession(text), 400_000);
 		const tr = out.find((m) => m.role === "toolResult")!;
 		const rendered = (tr.content as any)[0].text as string;

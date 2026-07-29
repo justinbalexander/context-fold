@@ -49,7 +49,7 @@ function setup() {
 		toolResult("call-1", PAYLOAD, "exec"),
 		user("now the newest question"),
 	];
-	const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100, prefixStable: true }, null, null, registry);
+	const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, registry);
 	e.process(messages, { contextWindow: 10_000_000, tokens: null });
 	return { e, code: decision.code! };
 }

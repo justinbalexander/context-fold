@@ -12,7 +12,7 @@ import { user, assistantWithCalls, bigResult, toolResult, isBalanced } from "./h
 
 function ladderEngine(cfg: Record<string, unknown> = {}, ladderCfg = LADDER_DEFAULTS) {
 	const policy = new FoldLadderConductor(ladderCfg);
-	const e = new ContextFoldEngine(policy, { tailTarget: 100, prefixStable: true, ...cfg }, null, null, new MapGateRegistry());
+	const e = new ContextFoldEngine(policy, { tailTarget: 100, ...cfg }, new MapGateRegistry());
 	const committed: FrozenLayer[] = [];
 	const broken: number[] = [];
 	const events: FoldEventReport[] = [];

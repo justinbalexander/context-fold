@@ -7,30 +7,21 @@
  * lives only in the outgoing copy. The agent pulls any folded block back with the
  * `unfold`/`recall` tools by its `{#<code> FOLDED}` handle.
  *
- * Modes (CONTEXTFOLD_MODE):
- *   • ladder (default) — discrete fold events masking stale observations into prefix-stable
- *     frozen layers, with a deterministic seed index emitted at every event. Model-free.
- *   • keel — the legacy continuous conductor; CONTEXTFOLD_MODEL / CONTEXTFOLD_COLDNESS
- *     (opt-in local-model digests / coldness) apply only here.
- * Fully autonomous (no UI prompts) — runs identically headless.
+ * The policy is the discrete fold ladder: fold events mask stale observations into prefix-stable
+ * frozen layers, with a deterministic seed index emitted at every event. No model call ever fires
+ * on the automatic path. Fully autonomous (no UI prompts) — runs identically headless.
  */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage as CoreAgentMessage } from "../../core/block";
-import type { Conductor } from "../../core/contract";
-import { KeelConductor } from "../../core/policy/keel";
-import { ModelConductor } from "../../core/policy/model";
-import { PrefixStableKeel } from "../../core/policy/prefix-stable";
 import { FoldLadderConductor } from "../../core/policy/fold-ladder";
-import { ContextFoldEngine, type FoldConfig } from "./store";
+import { ContextFoldEngine } from "./store";
 import { SeedIndexStore, emitFoldIndex, emitCompactIndex } from "./index-store";
 import { renderDetCompactionSummary } from "./compact";
 import { registerHandoffCommand } from "./handoff";
 import { linearize, type WireBlock } from "../../core/block";
 import { registerFoldTools } from "./unfold-tool";
-import { fetchDigestWriter, DEFAULT_WRITER_CONFIG, type DigestWriter } from "../../core/model/digest-writer";
-import { fetchRelevanceJudge, DEFAULT_JUDGE_CONFIG, type RelevanceJudge } from "../../core/model/relevance-judge";
 import { MapGateRegistry } from "../../core/gate-registry";
 import { Gate, gateConfigFromEnv, gateModelIdentity } from "./gate";
 import { SpoolStore } from "./spool";
@@ -38,11 +29,6 @@ import { recordGateFold, recordLayer, recordLayerBreak, recordUnfold, restoreFol
 import { spoolRetainMsFromEnv, sweepSpools } from "./retention";
 import { CacheTelemetry } from "./cache-telemetry";
 import { advise } from "./advisor";
-
-// Qwen3.5-4B-MTP: benchmarked against the 9B for this task — 3.3× faster decode (~116 tok/s via
-// multi-token prediction), identical digest quality (100% buried-identifier retention), and lighter
-// to keep permanently loaded (3.4 GB). Hybrid-reasoning, so thinking is disabled by default.
-const DEFAULT_MODEL = "Qwen3.5-4B-MTP-GGUF";
 
 // ≤6 lines. Teaches the L0 pointer contract; positive framing (says when to reach for recall).
 const L0_TEACHING = [
@@ -55,20 +41,6 @@ const L0_TEACHING = [
 import { adapterConfigFromEnv, configFromEnv } from "./config";
 export { adapterConfigFromEnv, configFromEnv };
 
-/** Shared model connection from env, or null when no model is configured (pure Phase 1). */
-function modelConnFromEnv(): { baseUrl: string; model: string; apiKey: string; disableThinking: boolean } | null {
-	const raw = process.env.CONTEXTFOLD_MODEL?.trim();
-	// COLDNESS implies a model even if CONTEXTFOLD_MODEL is just a flag; both default to DEFAULT_MODEL.
-	const coldness = process.env.CONTEXTFOLD_COLDNESS === "1" || process.env.CONTEXTFOLD_COLDNESS === "true";
-	if (!raw && !coldness) return null;
-	const model = !raw || raw === "1" || raw === "on" || raw === "true" ? DEFAULT_MODEL : raw;
-	const baseUrl = process.env.CONTEXTFOLD_MODEL_URL?.trim() || "http://localhost:13305/api/v1";
-	const apiKey = process.env.CONTEXTFOLD_MODEL_KEY?.trim() || DEFAULT_WRITER_CONFIG.apiKey;
-	// Thinking is OFF by default (the default model is a hybrid reasoning model). CONTEXTFOLD_MODEL_THINK=1 re-enables.
-	const think = process.env.CONTEXTFOLD_MODEL_THINK === "1" || process.env.CONTEXTFOLD_MODEL_THINK === "true";
-	return { baseUrl, model, apiKey, disableThinking: !think };
-}
-
 export default function contextFold(pi: ExtensionAPI): void {
 	// MASTER kill switch: CONTEXTFOLD=0/off/false disables the whole extension — no hooks, no
 	// tools, no folding — without touching the install symlink. The one-session escape hatch for
@@ -79,48 +51,12 @@ export default function contextFold(pi: ExtensionAPI): void {
 		return;
 	}
 	const acfg = adapterConfigFromEnv();
-	const ladderMode = acfg.mode === "ladder";
-	const conn = modelConnFromEnv();
-	// Model digests/coldness are keel-mode-only: in ladder mode a fold's bytes freeze at commit,
-	// so a late async model digest could never ship. Say so instead of silently ignoring.
-	let wantDigests = !!process.env.CONTEXTFOLD_MODEL?.trim() && !!conn;
-	let wantColdness = (process.env.CONTEXTFOLD_COLDNESS === "1" || process.env.CONTEXTFOLD_COLDNESS === "true") && !!conn;
-	if (ladderMode && (wantDigests || wantColdness)) {
-		process.stderr.write("[context-fold] CONTEXTFOLD_MODEL/COLDNESS apply only to CONTEXTFOLD_MODE=keel — ignored in ladder mode\n");
-		wantDigests = false;
-		wantColdness = false;
-	}
-
-	const maxBlocks = Number(process.env.CONTEXTFOLD_MODEL_MAXBLOCKS);
-	const concurrency = Number(process.env.CONTEXTFOLD_MODEL_CONCURRENCY);
-	const writer: DigestWriter | null = wantDigests
-		? fetchDigestWriter({
-				...DEFAULT_WRITER_CONFIG,
-				...conn!,
-				maxBlocks: Number.isFinite(maxBlocks) && maxBlocks > 0 ? maxBlocks : DEFAULT_WRITER_CONFIG.maxBlocks,
-				concurrency: Number.isFinite(concurrency) && concurrency > 0 ? concurrency : DEFAULT_WRITER_CONFIG.concurrency,
-			})
-		: null;
 	const foldCfg = configFromEnv();
-	// Ladder mode IS the prefix-stable design: discrete fold events committed as frozen layers.
-	if (ladderMode) foldCfg.prefixStable = true;
-	// Prefix-stable ranking and the coldness model conductor compete for the same rank() seam;
-	// prefix-stable wins (its ordering IS the point of the flag) and coldness degrades to digests.
-	if (!ladderMode && foldCfg.prefixStable && wantColdness)
-		process.stderr.write("[context-fold] CONTEXTFOLD_PREFIX_STABLE overrides CONTEXTFOLD_COLDNESS ranking (digests still apply)\n");
-	const judge: RelevanceJudge | null = wantColdness && !foldCfg.prefixStable ? fetchRelevanceJudge({ ...DEFAULT_JUDGE_CONFIG, ...conn! }) : null;
-	const ladderPolicy: FoldLadderConductor | null = ladderMode ? new FoldLadderConductor(acfg.ladder) : null;
-	const policy: Conductor = ladderPolicy
-		? ladderPolicy
-		: foldCfg.prefixStable
-			? new PrefixStableKeel()
-			: wantColdness
-				? new ModelConductor()
-				: new KeelConductor();
+	const ladderPolicy = new FoldLadderConductor(acfg.ladder);
 
 	// ── L0 ingestion gate: registry (shared with the engine) + lazy per-session spool store ──────
 	const registry = new MapGateRegistry();
-	const engine = new ContextFoldEngine(policy, foldCfg, writer, judge, registry);
+	const engine = new ContextFoldEngine(ladderPolicy, foldCfg, registry);
 	engine.onLayerCommit = (layer) => recordLayer(pi, layer);
 	engine.onLayerBreak = (seq) => recordLayerBreak(pi, seq);
 
@@ -314,10 +250,8 @@ export default function contextFold(pi: ExtensionAPI): void {
 			lastContextWindow = ctx.getContextUsage()?.contextWindow ?? lastContextWindow;
 			// Ladder cold branch: no live cache read observed after a few turns ⇒ there is no warm
 			// prefix to protect, so the ladder folds earlier and more freely (measured, not assumed).
-			if (ladderPolicy) {
-				const t = telemetry.snapshot();
-				ladderPolicy.setCold(t.turns >= 3 && t.totals.cacheRead === 0);
-			}
+			const t = telemetry.snapshot();
+			ladderPolicy.setCold(t.turns >= 3 && t.totals.cacheRead === 0);
 			// Fold-event → seed-index emission. Bound per turn so the emitter sees this ctx's stores.
 			engine.onFoldEvent = (foldEvent) => {
 				try {
@@ -413,12 +347,12 @@ export default function contextFold(pi: ExtensionAPI): void {
 			const m = s?.metrics ?? {};
 			const state = s?.text ? s.text : "idle (under budget)";
 			const pos =
-				ladderMode && typeof m.usage_fraction === "number"
+				typeof m.usage_fraction === "number"
 					? ` · usage ${Math.round((m.usage_fraction as number) * 100)}%${typeof m.fold_at === "number" ? ` (next fold ≥ ${Math.round((m.fold_at as number) * 100)}%)` : ""}`
 					: "";
 			const adv = buildAdvisory();
 			const lines = [
-				`context-fold [${acfg.mode}]: ${state}${pos} · L0 ${activeGate ? "on" : "off"} · model ${activeModelIdentity}`,
+				`context-fold: ${state}${pos} · L0 ${activeGate ? "on" : "off"} · model ${activeModelIdentity}`,
 				`${telemetry.statusLine()}${adv.coldNow ? " · COLD" : ""}${adv.paybackTurns !== null ? ` · reset pays back in ~${adv.paybackTurns} warm turns` : ""}`,
 				...adv.flags.map((f) => `⚑ ${f}`),
 			];

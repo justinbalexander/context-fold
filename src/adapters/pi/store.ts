@@ -15,13 +15,10 @@ import type { AgentMessage, FoldOp, GroupOp, Group, WireBlock } from "../../core
 import { linearize, isDurableId, wireToBlock } from "../../core/block";
 import { applyPlan } from "../../core/apply";
 import { digest, wireFoldable, foldCode, foldTag, groupDigest, pointerDigest, substTokens, type PointerMeta } from "../../core/digest";
-import { estTokens, firstLine, safeSlice, BLOCK_OVERHEAD } from "../../core/tokens";
+import { estTokens, safeSlice, BLOCK_OVERHEAD } from "../../core/tokens";
 import { MapGateRegistry, type GateRegistry, type GateEntry } from "../../core/gate-registry";
 import { readEnvelopeAt, SpoolError } from "./spool";
 import { readFileSync } from "node:fs";
-import type { DigestWriter, DigestRequest } from "../../core/model/digest-writer";
-import type { RelevanceJudge, JudgeCandidate } from "../../core/model/relevance-judge";
-import { isRelevanceAware } from "../../core/policy/model";
 
 /** The newest block is always protected (target>0); adding an older block may not overflow this. */
 const PROTECT_OVERFLOW_CAP = 1.25;
@@ -42,13 +39,6 @@ export interface FoldConfig {
 	/** Fallback context window when the host can't report one. */
 	defaultContextWindow: number;
 	/**
-	 * Prefix-stable folding (Stage 2): commit each epoch's substitutions as a frozen layer whose
-	 * bytes never change again, so the context head stays byte-identical across turns and the
-	 * provider's prompt cache keeps re-hitting it. Always on in ladder mode (the adapter forces
-	 * it); opt-in for keel mode.
-	 */
-	prefixStable: boolean;
-	/**
 	 * Consolidation bound on committed layers: a commit that would exceed this merges all layer
 	 * RECORDS into one (bookkeeping only — digest bytes are unchanged, so the warm prefix is
 	 * preserved for free). 0 disables the bound.
@@ -63,7 +53,6 @@ export const DEFAULT_CONFIG: FoldConfig = {
 	absoluteTokenCap: 200_000,
 	tailTarget: 20_000,
 	defaultContextWindow: DEFAULT_CONTEXT_WINDOW,
-	prefixStable: false,
 	maxLayers: 2,
 	debug: false,
 };
@@ -186,24 +175,6 @@ export class ContextFoldEngine {
 
 	private readonly host: ConductorHost;
 
-	// ── Phase 2: model-driven digests (async, fire-and-cache; null = pure Phase-1 path) ─────────
-	private readonly writer: DigestWriter | null;
-	/** id → model-written digest body (no tag). Applied to fold ops when present; stale-safe by id. */
-	private readonly modelDigests = new Map<string, string>();
-	/** Signature of the last cold zone we dispatched a writer batch for (avoid refiring the same zone). */
-	private lastColdSig = "";
-	/** One writer batch in flight at a time. */
-	private inflight = false;
-	/** How many fold ops used a model digest last pass (debug/telemetry). */
-	private lastModelUsed = 0;
-
-	// ── Phase 2 rep 2: model-decided coldness (relevance judge, async-cached) ───────────────────
-	private readonly judge: RelevanceJudge | null;
-	/** Model's latest "keep warm" judgment (block ids kept in full). Injected into the policy each pass. */
-	private keepWarm = new Set<string>();
-	private lastJudgeSig = "";
-	private judgeInflight = false;
-
 	// ── L0 ingestion gate: registry of born-folded blocks (recall reads the spool by entry path) ──
 	private readonly gate: GateRegistry;
 
@@ -225,17 +196,9 @@ export class ContextFoldEngine {
 	/** Adapter callback: a fold event committed — emit the seed index (spool + JSONL). */
 	onFoldEvent: ((event: FoldEventReport) => void) | null = null;
 
-	constructor(
-		policy: Conductor,
-		cfg: Partial<FoldConfig> = {},
-		writer: DigestWriter | null = null,
-		judge: RelevanceJudge | null = null,
-		gate: GateRegistry = new MapGateRegistry(),
-	) {
+	constructor(policy: Conductor, cfg: Partial<FoldConfig> = {}, gate: GateRegistry = new MapGateRegistry()) {
 		this.cfg = { ...DEFAULT_CONFIG, ...cfg };
 		this.policy = policy;
-		this.writer = writer;
-		this.judge = judge;
 		this.gate = gate;
 		this.host = {
 			can: (c: HostCapabilityId) => c === "countTokens",
@@ -263,11 +226,6 @@ export class ContextFoldEngine {
 		return this.gate;
 	}
 
-	/** True while an async model call (digest writer or relevance judge) is in flight. */
-	get busy(): boolean {
-		return this.inflight || this.judgeInflight;
-	}
-
 	/** Enable/disable L0 pointer substitution (the adapter resolves the per-model kill switch). */
 	setGateActive(active: boolean): void {
 		this.gateActive = active;
@@ -281,10 +239,6 @@ export class ContextFoldEngine {
 		this.snapshot = new Map();
 		this.groupCodes.clear();
 		this.detCache.clear();
-		this.modelDigests.clear();
-		this.keepWarm = new Set();
-		this.lastColdSig = "";
-		this.lastJudgeSig = "";
 		this.frozenLayers = [];
 		this.frozenById = new Map();
 	}
@@ -304,7 +258,7 @@ export class ContextFoldEngine {
 	 *  deliberate single-point prefix break and the block stays held, never re-frozen). */
 	private computeFrozenOps(blocks: WireBlock[]): Map<string, string> {
 		const out = new Map<string, string>();
-		if (!this.cfg.prefixStable || this.frozenById.size === 0) return out;
+		if (this.frozenById.size === 0) return out;
 		for (const b of blocks) {
 			const digestText = this.frozenById.get(b.id);
 			if (digestText === undefined || this.unfolded.has(b.id)) continue;
@@ -322,7 +276,7 @@ export class ContextFoldEngine {
 		const blocks = linearize(messages);
 		// Refresh the snapshot for the unfold/recall tool (full content — folding never mutates it).
 		this.snapshot = new Map(blocks.map((b) => [b.id, b] as const));
-		this.pruneModelDigests(blocks);
+		this.pruneCaches(blocks);
 
 		// ── L0 GATE: born-folded pointers ────────────────────────────────────────
 		// Registered blocks enter the view already folded to a pointer digest (unless the agent has
@@ -331,113 +285,79 @@ export class ContextFoldEngine {
 		const gatePointers = this.computeGatePointers(blocks);
 		const frame = normalizeContextFrame(context);
 
-		// Consolidation loop: normally one pass. When the plan is still over budget, layers exist,
-		// and the irreducible floor is not the cause, deliberately break the OLDEST layer — one
-		// full cache re-prefill at a chosen boundary — and replan. Bounded by the layer count.
-		for (let attempt = 0; ; attempt++) {
-			const frozenOps = this.computeFrozenOps(blocks);
-			const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers, frozenOps);
-			const view = this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens);
+		const frozenOps = this.computeFrozenOps(blocks);
+		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers, frozenOps);
+		const view = this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens);
 
-			// Phase 2 rep 2: inject the model's cached "keep warm" judgment into a relevance-aware policy
-			// (ModelConductor). Empty when no judge / not yet answered → deterministic behavior.
-			if (this.judge && isRelevanceAware(this.policy)) {
-				this.pruneKeepWarm(blocks);
-				this.policy.setKeepWarm(this.keepWarm);
-			}
+		const cmds = this.policy.conduct(view);
 
-			const cmds = this.policy.conduct(view);
-
-			let ops: FoldOp[] = [];
-			let groups: GroupOp[] = [];
-			if (cmds != null && cmds.length > 0) {
-				// Phase 2: the deterministic fold-command ids ARE the cold zone. Dispatch the model writer
-				// (digests) and the relevance judge (coldness) for them — async, non-blocking. Their results
-				// apply on a later turn. Keel's mechanism is untouched; the model only supplies string + order.
-				const foldIds = collectFoldIds(cmds);
-				this.maybeFireWriter(foldIds, blocks);
-				this.maybeFireJudge(foldIds, blocks, protectFrom);
-				const lowered = this.lower(cmds, blocks, protectFrom);
-				ops = lowered.ops;
-				groups = lowered.groups;
-			}
-
-			if (this.cfg.prefixStable) {
-				const overBudget = this.lastStatus?.metrics?.over_budget === true;
-				const irreducible = Number(this.lastStatus?.metrics?.irreducible_floor ?? 0);
-				const cap = Number(this.lastStatus?.metrics?.cap ?? 0);
-				if (overBudget && this.frozenLayers.length > 0 && attempt < this.frozenLayers.length + 1 && !(cap > 0 && irreducible > cap)) {
-					const broken = this.frozenLayers.shift()!;
-					this.rebuildFrozenIndex();
-					this.onLayerBreak?.(broken.seq);
-					process.stderr.write(
-						`[context-fold] consolidation: broke layer ${broken.seq} (${broken.entries.length} blocks) — one deliberate cache re-prefill\n`,
-					);
-					continue;
-				}
-				// Commit this epoch's substitutions as a new frozen layer — but never on a group turn
-				// (groups rewrite structure; freezing alongside one would fix bytes that just moved).
-				if (groups.length === 0 && ops.length > 0) {
-					const entries = ops
-						.filter((op) => !gatePointers.has(op.id) && !this.frozenById.has(op.id))
-						.map((op) => ({ id: op.id, digestText: op.digestText }));
-					if (entries.length > 0) {
-						const layer: FrozenLayer = { seq: (this.frozenLayers[this.frozenLayers.length - 1]?.seq ?? 0) + 1, entries };
-						this.frozenLayers.push(layer);
-						for (const e of entries) this.frozenById.set(e.id, e.digestText);
-						this.onLayerCommit?.(layer);
-						if (this.cfg.debug)
-							process.stderr.write(`[context-fold] layer ${layer.seq} committed (${entries.length} blocks frozen)\n`);
-
-						// Fold-event report → the adapter emits the seed index for what just left the view.
-						const usage = {
-							tokens: frame.tokens ?? view.liveTokens,
-							contextWindow: cw,
-							fraction: cw > 0 ? (frame.tokens ?? view.liveTokens) / cw : 0,
-						};
-						const rawTrigger = this.lastStatus?.metrics?.trigger;
-						const trigger = rawTrigger === "cap" ? "cap" : "threshold";
-						this.onFoldEvent?.({ seq: layer.seq, trigger, maskedIds: entries.map((e) => e.id), blocks, usage });
-
-						// Consolidation bound: too many layer records → merge them into ONE record under the
-						// newest seq. Digest bytes are untouched (the warm prefix survives); only the
-						// bookkeeping collapses. Event-sourced as breaks + a re-commit (latest seq wins).
-						if (this.cfg.maxLayers > 0 && this.frozenLayers.length > this.cfg.maxLayers) {
-							const merged: FrozenLayer = {
-								seq: layer.seq,
-								entries: this.frozenLayers.flatMap((l) => l.entries),
-							};
-							for (const l of this.frozenLayers) if (l.seq !== merged.seq) this.onLayerBreak?.(l.seq);
-							this.frozenLayers = [merged];
-							this.rebuildFrozenIndex();
-							this.onLayerCommit?.(merged);
-							this.onFoldEvent?.({ seq: merged.seq, trigger: "consolidation", maskedIds: [], blocks, usage });
-							if (this.cfg.debug)
-								process.stderr.write(
-									`[context-fold] consolidation merge: ${merged.entries.length} frozen blocks now one layer (seq ${merged.seq})\n`,
-								);
-						}
-					}
-				}
-			}
-
-			// Merge order = gate > frozen > policy: the gate owns its ids outright; a frozen id's bytes
-			// outrank any late policy op for it (defense in depth — candidates already exclude frozen).
-			const allOps = mergeOpsById(gatePointers, mergeOpsById(frozenOps, ops));
-			if (allOps.length === 0 && groups.length === 0) return messages; // nothing to fold → send unchanged
-
-			if (this.cfg.debug) {
-				const model = this.writer ? ` digest=${this.lastModelUsed}/${ops.length}${this.inflight ? " (writing…)" : ""}` : "";
-				const warm = this.judge ? ` keepWarm=${this.keepWarm.size}${this.judgeInflight ? " (judging…)" : ""}` : "";
-				const l0 = gatePointers.size ? ` l0=${gatePointers.size}` : "";
-				const fz = frozenOps.size ? ` frozen=${frozenOps.size}` : "";
-				process.stderr.write(
-					`[context-fold] ${ops.length} folds, ${groups.length} groups${l0}${fz}, live=${view.liveTokens} budget=${budget}${model}${warm} ${this.lastStatus?.text ?? ""}\n`,
-				);
-			}
-
-			return applyPlan(messages, allOps, groups);
+		let ops: FoldOp[] = [];
+		let groups: GroupOp[] = [];
+		if (cmds != null && cmds.length > 0) {
+			const lowered = this.lower(cmds, blocks, protectFrom);
+			ops = lowered.ops;
+			groups = lowered.groups;
 		}
+
+		// Commit this fold event's substitutions as a new frozen layer — but never on a group turn
+		// (groups rewrite structure; freezing alongside one would fix bytes that just moved).
+		if (groups.length === 0 && ops.length > 0) {
+			const entries = ops
+				.filter((op) => !gatePointers.has(op.id) && !this.frozenById.has(op.id))
+				.map((op) => ({ id: op.id, digestText: op.digestText }));
+			if (entries.length > 0) {
+				const layer: FrozenLayer = { seq: (this.frozenLayers[this.frozenLayers.length - 1]?.seq ?? 0) + 1, entries };
+				this.frozenLayers.push(layer);
+				for (const e of entries) this.frozenById.set(e.id, e.digestText);
+				this.onLayerCommit?.(layer);
+				if (this.cfg.debug)
+					process.stderr.write(`[context-fold] layer ${layer.seq} committed (${entries.length} blocks frozen)\n`);
+
+				// Fold-event report → the adapter emits the seed index for what just left the view.
+				const usage = {
+					tokens: frame.tokens ?? view.liveTokens,
+					contextWindow: cw,
+					fraction: cw > 0 ? (frame.tokens ?? view.liveTokens) / cw : 0,
+				};
+				const rawTrigger = this.lastStatus?.metrics?.trigger;
+				const trigger = rawTrigger === "cap" ? "cap" : "threshold";
+				this.onFoldEvent?.({ seq: layer.seq, trigger, maskedIds: entries.map((e) => e.id), blocks, usage });
+
+				// Consolidation bound: too many layer records → merge them into ONE record under the
+				// newest seq. Digest bytes are untouched (the warm prefix survives); only the
+				// bookkeeping collapses. Event-sourced as breaks + a re-commit (latest seq wins).
+				if (this.cfg.maxLayers > 0 && this.frozenLayers.length > this.cfg.maxLayers) {
+					const merged: FrozenLayer = {
+						seq: layer.seq,
+						entries: this.frozenLayers.flatMap((l) => l.entries),
+					};
+					for (const l of this.frozenLayers) if (l.seq !== merged.seq) this.onLayerBreak?.(l.seq);
+					this.frozenLayers = [merged];
+					this.rebuildFrozenIndex();
+					this.onLayerCommit?.(merged);
+					this.onFoldEvent?.({ seq: merged.seq, trigger: "consolidation", maskedIds: [], blocks, usage });
+					if (this.cfg.debug)
+						process.stderr.write(
+							`[context-fold] consolidation merge: ${merged.entries.length} frozen blocks now one layer (seq ${merged.seq})\n`,
+						);
+				}
+			}
+		}
+
+		// Merge order = gate > frozen > policy: the gate owns its ids outright; a frozen id's bytes
+		// outrank any late policy op for it (defense in depth — candidates already exclude frozen).
+		const allOps = mergeOpsById(gatePointers, mergeOpsById(frozenOps, ops));
+		if (allOps.length === 0 && groups.length === 0) return messages; // nothing to fold → send unchanged
+
+		if (this.cfg.debug) {
+			const l0 = gatePointers.size ? ` l0=${gatePointers.size}` : "";
+			const fz = frozenOps.size ? ` frozen=${frozenOps.size}` : "";
+			process.stderr.write(
+				`[context-fold] ${ops.length} folds, ${groups.length} groups${l0}${fz}, live=${view.liveTokens} budget=${budget} ${this.lastStatus?.text ?? ""}\n`,
+			);
+		}
+
+		return applyPlan(messages, allOps, groups);
 	}
 
 	/** Born-folded pointer text per registered block id (skipping any the agent has unfolded).
@@ -708,20 +628,13 @@ export class ContextFoldEngine {
 			const foldable = wireFoldable(b);
 			// Born-folded blocks are charged at POINTER weight (criterion 6: budget math counts the
 			// pre-folded block at digest weight); frozen blocks at their committed layer bytes;
-			// every other block starts warm at full weight. A cached MODEL digest is priced here
-			// too — it is what lowering will actually ship, so every projection (epoch band, floor,
-			// HOLD) sees the true wire cost, and the model can never push the wire past what the
-			// floor proved (the old accounting priced the shorter deterministic digest and went
-			// blind to the difference).
-			const modelBody = born || frozen ? undefined : this.modelDigests.get(b.id);
+			// every other block starts warm at full weight.
 			const foldedTokens = born
 				? substTokens(pointer)
 				: frozen
 					? substTokens(frozenText)
 					: foldable
-						? modelBody !== undefined
-							? substTokens(`${foldTag(b.id)} ${modelBody}`)
-							: this.detDigestTokens(b)
+						? this.detDigestTokens(b)
 						: b.tokens;
 			liveTokens += born || frozen ? foldedTokens : b.tokens;
 			return {
@@ -793,7 +706,6 @@ export class ContextFoldEngine {
 		const groups: GroupOp[] = [];
 		const groupedIds = new Set<string>();
 		const opIds = new Set<string>();
-		let modelUsed = 0;
 
 		// Pass 1: group commands claim their members.
 		for (const cmd of commands) {
@@ -830,18 +742,7 @@ export class ContextFoldEngine {
 				for (const id of cmd.ids) {
 					if (groupedIds.has(id) || opIds.has(id) || !canFold(id)) continue;
 					const b = byId.get(id)!;
-					// Phase 2: a cached model digest replaces the deterministic engine digest STRING for
-					// this fold — same fold decision, same authoritative {#code} tag, same reversibility.
-					const modelBody = this.modelDigests.get(id);
-					let digestText: string;
-					if (modelBody) {
-						digestText = `${foldTag(id)} ${modelBody}`;
-						modelUsed++;
-					} else if (cmd.digest) {
-						digestText = authoritativeTag(id, cmd.digest);
-					} else {
-						digestText = this.detDigest(b);
-					}
+					const digestText = cmd.digest ? authoritativeTag(id, cmd.digest) : this.detDigest(b);
 					ops.push({ id, digestText });
 					opIds.add(id);
 				}
@@ -859,107 +760,15 @@ export class ContextFoldEngine {
 			// restore / pin: no-op on the wire — the block stays live by not being folded.
 		}
 
-		this.lastModelUsed = modelUsed;
 		return { ops, groups };
 	}
 
-	/**
-	 * Phase 2: dispatch the model digest writer for the current cold zone (the deterministic
-	 * fold-command ids). Fire-and-cache, NON-BLOCKING — `process()` returns this turn using whatever
-	 * digests are already cached; the resolved digests apply on a later turn. Only one batch in
-	 * flight, and only when the cold zone changed (so a stable session makes no repeat calls).
-	 */
-	private maybeFireWriter(foldIds: string[], blocks: WireBlock[]): void {
-		if (!this.writer || foldIds.length === 0 || this.inflight) return;
-		const byId = new Map(blocks.map((b) => [b.id, b] as const));
-		// Only foldable blocks we don't already have a model digest for. Frozen ids are excluded:
-		// their bytes are committed, so a late-arriving model digest could never ship for them.
-		const pending = foldIds.filter((id) => {
-			const b = byId.get(id);
-			return !!b && wireFoldable(b) && !this.modelDigests.has(id) && !this.frozenById.has(id);
-		});
-		if (pending.length === 0) return;
-		const sig = [...pending].sort().join("\0");
-		if (sig === this.lastColdSig) return; // already dispatched this exact cold zone
-		this.lastColdSig = sig;
-
-		const reqs: DigestRequest[] = pending.map((id) => {
-			const b = byId.get(id)!;
-			return { id, kind: b.kind, toolName: b.toolName, text: b.text };
-		});
-		this.inflight = true;
-		void this.writer.write(reqs).then(
-			(map) => {
-				for (const [id, body] of map) {
-					// The engine is the SOLE author of {#code FOLDED} tags: strip any tag-shaped text the
-					// model emitted ANYWHERE in the body, or a weak model could inject phantom unfold
-					// handles into context. Empty after stripping → deterministic fallback.
-					const clean = body.replace(/\{#[a-z0-9]{1,8}\s+FOLDED\}/gi, "").replace(/\s+/g, " ").trim();
-					if (clean.length >= 3) this.modelDigests.set(id, clean);
-				}
-				if (map.size === 0) this.lastColdSig = ""; // total failure → allow a retry at the next epoch
-				this.inflight = false;
-			},
-			() => {
-				this.lastColdSig = ""; // network/parse failure → keep deterministic digests, retry later
-				this.inflight = false;
-			},
-		);
-	}
-
 	/** Drop cached state for blocks no longer in the session (bounds memory). */
-	private pruneModelDigests(blocks: WireBlock[]): void {
-		if (this.modelDigests.size === 0 && this.detCache.size === 0 && this.groupCodes.size === 0) return;
+	private pruneCaches(blocks: WireBlock[]): void {
+		if (this.detCache.size === 0 && this.groupCodes.size === 0) return;
 		const present = new Set(blocks.map((b) => b.id));
-		for (const id of [...this.modelDigests.keys()]) if (!present.has(id)) this.modelDigests.delete(id);
 		for (const id of [...this.detCache.keys()]) if (!present.has(id)) this.detCache.delete(id);
 		for (const [code, ids] of [...this.groupCodes]) if (!ids.some((id) => present.has(id))) this.groupCodes.delete(code);
-	}
-
-	/**
-	 * Phase 2 rep 2: dispatch the relevance judge for the current cold zone (the about-to-fold
-	 * blocks). Fire-and-cache, NON-BLOCKING — the resulting keep-warm set reorders the NEXT pass's
-	 * ranking (model-kept blocks fold last). One call per changed cold zone; the deterministic floor
-	 * still guarantees the budget regardless of what the model keeps.
-	 */
-	private maybeFireJudge(foldIds: string[], blocks: WireBlock[], protectFrom: number): void {
-		if (!this.judge || foldIds.length === 0 || this.judgeInflight) return;
-		const sig = [...foldIds].sort().join("\0");
-		if (sig === this.lastJudgeSig) return; // already judged this exact cold zone
-		this.lastJudgeSig = sig;
-
-		const byId = new Map(blocks.map((b) => [b.id, b] as const));
-		const candidates: JudgeCandidate[] = foldIds
-			.map((id) => byId.get(id))
-			.filter((b): b is WireBlock => !!b)
-			.map((b) => ({ id: b.id, kind: b.kind, toolName: b.toolName, preview: firstLine(b.text, 100) }));
-		if (candidates.length === 0) return;
-
-		// "Current work" = the protected-tail text (what the agent is actively reasoning over).
-		const tailText = blocks
-			.filter((b) => b.order >= protectFrom)
-			.map((b) => b.text)
-			.join("\n");
-
-		this.judgeInflight = true;
-		void this.judge.judge(tailText, candidates).then(
-			(keep) => {
-				this.keepWarm = keep;
-				this.judgeInflight = false;
-			},
-			() => {
-				this.judgeInflight = false; // failure → keep the previous (or empty) judgment
-			},
-		);
-	}
-
-	/** Drop keep-warm ids for blocks no longer present (bounds memory; stale-safe). */
-	private pruneKeepWarm(blocks: WireBlock[]): void {
-		if (this.keepWarm.size === 0) return;
-		const present = new Set(blocks.map((b) => b.id));
-		let changed = false;
-		for (const id of this.keepWarm) if (!present.has(id)) changed = true;
-		if (changed) this.keepWarm = new Set([...this.keepWarm].filter((id) => present.has(id)));
 	}
 }
 
@@ -1093,13 +902,6 @@ function mergeOpsById(gatePointers: Map<string, string>, policyOps: FoldOp[]): F
 	for (const [id, digestText] of gatePointers) out.push({ id, digestText });
 	for (const op of policyOps) if (!gatePointers.has(op.id)) out.push(op);
 	return out;
-}
-
-/** Collect the ids targeted by `fold` commands — the deterministic-digest cold zone. */
-function collectFoldIds(commands: Command[]): string[] {
-	const ids: string[] = [];
-	for (const cmd of commands) if (cmd.kind === "fold") ids.push(...cmd.ids);
-	return ids;
 }
 
 // ── small pure helpers ─────────────────────────────────────────────────────────

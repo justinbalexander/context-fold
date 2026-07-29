@@ -5,13 +5,13 @@
  */
 import { describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { KeelConductor } from "../src/core/policy/keel";
+import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
 import { MapGateRegistry } from "../src/core/gate-registry";
 import { configFromEnv } from "../src/adapters/pi/config";
 import { user } from "./helpers";
 
 function engine(cfg: Record<string, unknown> = {}) {
-	return new ContextFoldEngine(new KeelConductor(), cfg, null, null, new MapGateRegistry());
+	return new ContextFoldEngine(new FoldLadderConductor(), cfg, new MapGateRegistry());
 }
 
 const msgs = [user("hello")];

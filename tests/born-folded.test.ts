@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { KeelConductor } from "../src/core/policy/keel";
+import { FoldLadderConductor } from "../src/core/policy/fold-ladder";
 import { MapGateRegistry, type GateEntry } from "../src/core/gate-registry";
 import { foldCode, foldTag } from "../src/core/digest";
 import { estTokens, BLOCK_OVERHEAD } from "../src/core/tokens";
@@ -47,7 +47,7 @@ describe("born-folded blocks (L0 gate)", () => {
 		const content = flood(400);
 		const gate = new MapGateRegistry();
 		const code = register(gate, "c1", content);
-		const engine = new ContextFoldEngine(new KeelConductor(), { tailTarget: 100 }, null, null, gate);
+		const engine = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, gate);
 
 		// Huge context window → the policy has nothing to fold; only the gate acts.
 		const out = engine.process(session(content), 400_000);
@@ -64,8 +64,8 @@ describe("born-folded blocks (L0 gate)", () => {
 		const content = flood(400);
 		const gate = new MapGateRegistry();
 		register(gate, "c1", content);
-		const withGate = new ContextFoldEngine(new KeelConductor(), { tailTarget: 100 }, null, null, gate);
-		const withoutGate = new ContextFoldEngine(new KeelConductor(), { tailTarget: 100 }, null, null, new MapGateRegistry());
+		const withGate = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, gate);
+		const withoutGate = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, new MapGateRegistry());
 
 		const msgs = session(content);
 		const gv = withGate.viewFor(msgs, 400_000);
@@ -99,7 +99,7 @@ describe("born-folded blocks (L0 gate)", () => {
 			assistantWithCalls([{ id: "c2", name: "read" }], { text: "two" }),
 			toolResult("c2", flood(400)),
 		];
-		const engine = new ContextFoldEngine(new KeelConductor(), { tailTarget: 200, defaultContextWindow: 8_000 }, null, null, gate);
+		const engine = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 200, defaultContextWindow: 8_000 }, gate);
 		const out = engine.process(msgs, 8_000);
 
 		const tr1 = out.filter((m) => m.role === "toolResult")[0];
@@ -113,7 +113,7 @@ describe("born-folded blocks (L0 gate)", () => {
 		const content = flood(400);
 		const gate = new MapGateRegistry();
 		const code = register(gate, "c1", content);
-		const engine = new ContextFoldEngine(new KeelConductor(), { tailTarget: 100 }, null, null, gate);
+		const engine = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, gate);
 
 		// First pass folds it; then the agent unfolds it.
 		const msgs = session(content);

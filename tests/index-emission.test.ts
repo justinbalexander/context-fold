@@ -23,7 +23,7 @@ function setup() {
 	const registry = new MapGateRegistry();
 	const spool = new SpoolStore(dir);
 	const index = new SeedIndexStore(dir);
-	const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100, prefixStable: true }, null, null, registry);
+	const e = new ContextFoldEngine(new FoldLadderConductor(), { tailTarget: 100 }, registry);
 	e.onFoldEvent = (ev) => emitFoldIndex(ev, { spool, registry, index, sessionId: "s-test", now: 1_722_200_000_000 });
 	return { e, registry, spool, index };
 }
