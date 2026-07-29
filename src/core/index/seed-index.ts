@@ -1,9 +1,8 @@
 /*
  * seed-index.ts — the deterministic seed index emitted at every fold event.
  *
- * The index is the lexical bridge back into folded content (docs/SEED_INDEX_SPEC.md, a spec
- * shared with the Evoker engine): grep-based recovery can only find what is indexed VERBATIM,
- * so extraction is pure regex work — no model calls, no paraphrase, same input ⇒ byte-identical
+ * The index is the lexical bridge back into folded content (spec: docs/SEED_INDEX_SPEC.md).
+ * Grep-based recovery can only find what is indexed VERBATIM, so extraction is pure regex work — no model calls, no paraphrase, same input ⇒ byte-identical
  * output. First-class fields are exactly the classes summarization measurably drops: exact
  * identifiers/numbers buried in large tool outputs (summary-boundary loss) and error strings in
  * every spelling the shared lexicon knows (lowercase `failed`, `npm ERR!`, …).

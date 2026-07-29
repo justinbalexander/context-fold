@@ -1,5 +1,5 @@
 /*
- * fold-ladder.test.ts — the discrete fold ladder (CONTEXTFOLD_MODE=ladder default path):
+ * fold-ladder.test.ts — the discrete fold ladder, the shipped folding policy:
  * threshold crossing, step spacing, cold branch, cap emergency, byte-stable layers,
  * consolidation merge, and fold-event reporting.
  */

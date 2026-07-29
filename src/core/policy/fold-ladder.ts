@@ -1,9 +1,9 @@
 /*
- * fold-ladder.ts — the discrete fold ladder (the rebuild's default policy, CONTEXTFOLD_MODE=ladder).
+ * fold-ladder.ts — the discrete fold ladder: the folding policy.
  *
- * Deterministic observation masking at DISCRETE fold events, replacing the continuous per-turn
- * Keel ladder as the default path (the Sol campaign demoted full Keel; JetBrains/SWE-agent-class
- * evidence says deterministic masking matches LLM summarization at lower cost). Between fold
+ * Deterministic observation masking at DISCRETE fold events rather than continuous per-turn
+ * folding (the published evidence says deterministic masking matches LLM summarization at lower
+ * cost, and continuous folding measurably drove recall churn here). Between fold
  * events the context is append-only: any mutation of history moves bytes and invalidates the
  * provider's prompt-cache suffix, so masking is batched at chosen boundaries where that
  * invalidation is paid once, and each event's substitutions are committed by the engine as a

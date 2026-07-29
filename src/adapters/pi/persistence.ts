@@ -1,12 +1,11 @@
 /*
  * persistence.ts — event-sourced fold state across restarts (DESIGN.md §6).
  *
- * The gate's cross-turn state — which tool results are born-folded, and which folds the agent has
- * unfolded — lives only in memory during a session. Keel's own L2/L3 folds are re-derived from the
- * view every turn, so they need nothing here; but a born-folded block is registered from the
- * `tool_result` hook, which does NOT re-fire on resume (the result is already in history, not
- * re-executed). So we persist the gate registry and unfold decisions as custom session entries and
- * left-fold them back on load — the pi-blackhole `foldLedger` pattern.
+ * The gate's cross-turn state — which tool results are born-folded, which folds the agent has
+ * unfolded, and which layers are committed — lives only in memory during a session. A born-folded
+ * block is registered from the `tool_result` hook, which does NOT re-fire on resume (the result is
+ * already in history, not re-executed), so that state is persisted as custom session entries and
+ * left-folded back on load.
  *
  * Custom entries don't enter LLM context; they exist purely to reconstruct state (CustomEntry docs).
  */

@@ -104,7 +104,7 @@ describe("born-folded blocks (L0 gate)", () => {
 
 		const tr1 = out.filter((m) => m.role === "toolResult")[0];
 		const text1 = (tr1.content as any)[0].text as string;
-		// r:c1 is the GATE pointer (has a recall usage line), not Keel's generic digest.
+		// r:c1 is the GATE pointer (it carries a recall usage line), not the generic fold digest.
 		expect(text1).toContain(`recall #${code}`);
 		expect(isBalanced(out)).toBe(true);
 	});
