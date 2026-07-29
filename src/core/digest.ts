@@ -14,7 +14,7 @@
  * Ported ~verbatim from Accordion `engine/digest.ts` (pinned commit 0c22434); only the type
  * imports were retargeted to this port's block model.
  */
-import type { BlockKind, DigestBlock, Group } from "./block";
+import type { BlockKind, DigestBlock } from "./block";
 import { estTokens, clip, firstLine, safeSlice, BLOCK_OVERHEAD } from "./tokens";
 import { categorize } from "./policy/ledger";
 
@@ -119,74 +119,6 @@ export function digestTokens(b: DigestBlock): number {
  */
 export function substTokens(content: string): number {
 	return estTokens(content) + BLOCK_OVERHEAD;
-}
-
-// ── multiblock folds ─────────────────────────────────────────────────────────
-
-/** The minimal member surface `groupDigest` reads. Both WireBlock and ViewBlock satisfy it. */
-export interface GroupMember {
-	kind: BlockKind;
-	turn: number;
-	text: string;
-	tokens: number;
-}
-
-const GROUP_KIND_NOUN: Record<BlockKind, [string, string]> = {
-	user: ["ask", "asks"],
-	text: ["reply", "replies"],
-	thinking: ["thought", "thoughts"],
-	tool_call: ["call", "calls"],
-	tool_result: ["result", "results"],
-};
-const GROUP_KIND_ORDER: BlockKind[] = ["tool_result", "thinking", "text", "tool_call", "user"];
-
-/** Compact "turn 3" / "turns 3–5" / "preamble" label for a group's span. */
-function turnSpan(members: GroupMember[]): string {
-	let lo = Infinity;
-	let hi = -Infinity;
-	for (const b of members) {
-		if (b.turn < lo) lo = b.turn;
-		if (b.turn > hi) hi = b.turn;
-	}
-	if (!isFinite(lo)) return "";
-	const name = (t: number) => (t > 0 ? `turn ${t}` : "preamble");
-	if (lo === hi) return name(lo);
-	return lo > 0 ? `turns ${lo}–${hi}` : `preamble–turn ${hi}`;
-}
-
-/**
- * The deterministic recap a folded group collapses to. Pure function of the group id + its
- * member blocks. Always names that a user instruction is inside (a group may legally summarize
- * a `user` turn), so the agent is never silently deprived of the human's ask. `members` must be
- * the group's blocks in conversation order.
- */
-export function groupDigest(group: Group, members: GroupMember[]): string {
-	const tag = foldTag(group.id);
-	if (!members.length) return `${tag} group · empty`;
-	const counts = new Map<BlockKind, number>();
-	let tokens = 0;
-	let ask = "";
-	for (const b of members) {
-		counts.set(b.kind, (counts.get(b.kind) ?? 0) + 1);
-		tokens += b.tokens;
-		if (b.kind === "user" && !ask) ask = firstLine(b.text, 70);
-	}
-	const breakdown = GROUP_KIND_ORDER.filter((k) => counts.get(k))
-		.map((k) => {
-			const n = counts.get(k)!;
-			const [one, many] = GROUP_KIND_NOUN[k];
-			return `${n} ${n === 1 ? one : many}`;
-		})
-		.join(", ");
-	const span = turnSpan(members);
-	const head = `${tag} group · ${members.length} block${members.length === 1 ? "" : "s"}${span ? " · " + span : ""} · ~${tokens} tok`;
-	const body = breakdown ? ` · ${breakdown}` : "";
-	const quote = ask ? ` · “${ask}”` : "";
-	return head + body + quote;
-}
-
-export function groupDigestTokens(group: Group, members: GroupMember[]): number {
-	return estTokens(groupDigest(group, members)) + BLOCK_OVERHEAD;
 }
 
 // ── L0 ingestion gate: risk-line retention + tool-aware pointer digests ─────────

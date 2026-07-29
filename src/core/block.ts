@@ -7,7 +7,7 @@
  * independently, because their value to the agent decays at very different rates.
  *
  * This file is PURE and has ZERO harness dependencies. It models only the structural shape
- * of a provider message (`AgentMessage`) — the exact fields `linearize`/`messageInfo`/`foldOne`
+ * of a provider message (`AgentMessage`) — the exact fields `linearize`/`foldOne`
  * read. A harness adapter casts its real message array to `AgentMessage[]` at the boundary;
  * that cast is the documented seam (see adapters/pi/hook.ts).
  *
@@ -81,20 +81,6 @@ export interface DigestBlock {
 	isError?: boolean;
 }
 
-/**
- * A multiblock fold. A group is an ENGINE OVERLAY, never a Block: it references a CONTIGUOUS,
- * non-overlapping run of member blocks (by id). Invariants: contiguous · non-overlapping ·
- * flat · ≥1 member · entirely older than the protected tail. `digest`: undefined→recap,
- * null/""→drop, string→verbatim.
- */
-export interface Group {
-	id: string;
-	memberIds: string[];
-	folded: boolean;
-	by?: Actor;
-	digest?: string | null;
-}
-
 // ── Wire types (the lowered fold plan applyPlan consumes) ────────────────────
 
 /** A serialisable block — the wire form of a Block minus the mutable fold state. */
@@ -109,8 +95,7 @@ export interface WireBlock {
 	callId?: string;
 	model?: string;
 	isError?: boolean;
-	/** Provider-message grouping key (per-pass positional). Blocks of one message share it — the
-	 *  budget floor uses it to build whole-message group runs applyPlan will actually accept. */
+	/** Provider-message grouping key (per-pass positional). Blocks of one message share it. */
 	messageKey?: string;
 }
 
@@ -118,16 +103,6 @@ export interface WireBlock {
 export interface FoldOp {
 	id: string;
 	digestText: string;
-}
-
-/**
- * One group-collapse instruction — the only op that changes the message count. `summaryText:
- * null` = DROP (remove the run, insert no message); a non-null string = the summary text.
- */
-export interface GroupOp {
-	id: string;
-	memberIds: string[];
-	summaryText: string | null;
 }
 
 // ── Structural model of a provider message (the harness seam) ────────────────
@@ -294,49 +269,3 @@ export function wireToBlock(w: WireBlock): Block {
 	};
 }
 
-/** The durable block ids a single message emits + its tool-pair callIds (mirrors `linearize`). */
-export interface MsgInfo {
-	ids: string[];
-	calls: string[]; // callIds of this message's tool_call parts
-	results: string[]; // callId of this message, if it is a tool_result
-	hasNonDurable: boolean; // any emitted id is positional → message is never group-removable
-}
-
-export function messageInfo(m: AgentMessage, i: number): MsgInfo {
-	const ids: string[] = [];
-	const calls: string[] = [];
-	const results: string[] = [];
-	let hasNonDurable = false;
-	const push = (id: string) => {
-		ids.push(id);
-		if (!isDurableId(id)) hasNonDurable = true;
-	};
-	switch (m.role) {
-		case "user":
-			push(blockId(m, i));
-			break;
-		case "assistant": {
-			const parts = Array.isArray(m.content) ? (m.content as MessagePart[]) : [];
-			parts.forEach((b, j) => {
-				// Mirror linearize: empty non-result parts are not emitted, so they are not members.
-				if (b?.type === "thinking") {
-					if ((b as ThinkingPart).thinking) push(blockId(m, i, j));
-				} else if (b?.type === "text") {
-					if ((b as TextPart).text) push(blockId(m, i, j));
-				} else if (b?.type === "toolCall") {
-					push(blockId(m, i, j));
-					const id = (b as ToolCallPart).id;
-					if (id) calls.push(id);
-				}
-			});
-			break;
-		}
-		case "toolResult":
-			push(blockId(m, i));
-			if (m.toolCallId) results.push(m.toolCallId);
-			break;
-		default:
-			if (typeof m.summary === "string" && m.summary) push(blockId(m, i));
-	}
-	return { ids, calls, results, hasNonDurable };
-}

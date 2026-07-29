@@ -85,14 +85,13 @@ export interface ConductorView {
 
 /**
  * The command vocabulary. Every command is CONTENT SUBSTITUTION, never structural removal — a
- * block is never spliced out, only its content changes. That rule makes broken states
- * unrepresentable: a tool_call/tool_result pair can never orphan. (The only exceptions are
- * group-collapse and group-drop, both whole-message and pair-balanced.)
+ * block is never spliced out, only its content changes, and the message count never moves. That
+ * rule makes broken states unrepresentable: a tool_call/tool_result pair can never orphan.
  *
  * Each `conduct()` return is the policy's COMPLETE desired state; the host resets to baseline
  * then applies the batch. `[]` = clear to raw; `null` = HOLD (reuse last batch).
  */
-export type Command = FoldCommand | ReplaceCommand | GroupCommand | RestoreCommand | PinCommand;
+export type Command = FoldCommand | ReplaceCommand;
 
 /** Collapse blocks to a digest. No `digest` → host per-kind digest (with the recoverable tag). */
 export interface FoldCommand {
@@ -114,63 +113,12 @@ export interface ReplaceCommand {
 	recoverable?: boolean;
 }
 
-/**
- * Collapse a CONTIGUOUS run of blocks into a single summary entry. `digest`: `undefined` →
- * default recap; `null`/`""` → DROP (no message); a non-empty string → verbatim summary.
- */
-export interface GroupCommand {
-	kind: "group";
-	ids: string[];
-	digest?: string | null;
-}
-
-/** Return blocks to full, live content. No-op on human-held blocks. */
-export interface RestoreCommand {
-	kind: "restore";
-	ids: string[];
-}
-
-/** Assert that blocks should stay live and open. Never overrides a human pin. */
-export interface PinCommand {
-	kind: "pin";
-	ids: string[];
-}
-
-export type ClampReason =
-	| "unknown-id"
-	| "human-override"
-	| "grouped"
-	| "invalid-group"
-	| "protected"
-	| "not-foldable"
-	| "noop";
-
-/** What the host did when a command could not be applied verbatim. Never thrown. */
-export interface ClampReport {
-	command: Command["kind"];
-	ids: string[];
-	reason: ClampReason;
-	detail: string;
-}
-
 // ─── Host capabilities & ledger telemetry ────────────────────────────────────
 
 /** Optional services the host MAY offer. Always call `host.can(id)` before depending on one. */
-export type HostCapabilityId = "complete" | "countTokens" | "digest" | "compress";
+export type HostCapabilityId = "countTokens" | "digest";
 
-/** One structured fact-ledger entry surfaced to the human (display-only). */
-export interface ConductorFactLedgerEntry {
-	category: "exact_values" | "decisions" | "commands" | "errors" | "paths" | string;
-	value: string;
-	turn?: number;
-	sourceId?: string;
-}
-
-/**
- * Host services available to an in-process policy. `complete`/`compress` are Phase-2/3 hooks —
- * optional, gated on `can()`. In the Phase-1 deterministic path they are never present, so the
- * policy degrades byte-identically to model-free behavior.
- */
+/** Host services available to an in-process policy. Optional ones are gated on `can()`. */
 export interface ConductorHost {
 	/** Is `capability` available right now? */
 	can(capability: HostCapabilityId): boolean;

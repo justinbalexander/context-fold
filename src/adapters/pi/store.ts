@@ -11,10 +11,10 @@
  */
 import type { Command, ConductorHost, ConductorView, HostCapabilityId, JSONValue, ViewBlock } from "../../core/contract";
 import type { Conductor } from "../../core/contract";
-import type { AgentMessage, FoldOp, GroupOp, Group, WireBlock } from "../../core/block";
+import type { AgentMessage, FoldOp, WireBlock } from "../../core/block";
 import { linearize, isDurableId, wireToBlock } from "../../core/block";
 import { applyPlan } from "../../core/apply";
-import { digest, wireFoldable, foldCode, foldTag, groupDigest, pointerDigest, substTokens, type PointerMeta } from "../../core/digest";
+import { digest, wireFoldable, foldCode, foldTag, pointerDigest, substTokens, type PointerMeta } from "../../core/digest";
 import { estTokens, safeSlice, BLOCK_OVERHEAD } from "../../core/tokens";
 import { MapGateRegistry, type GateRegistry, type GateEntry } from "../../core/gate-registry";
 import { readEnvelopeAt, SpoolError } from "./spool";
@@ -159,9 +159,6 @@ export class ContextFoldEngine {
 	private readonly unfolded = new Set<string>();
 	/** Per-turn snapshot: durable id → wire block (full content), for the unfold/recall tool. */
 	private snapshot = new Map<string, WireBlock>();
-	/** Emitted group summaries: fold code → member block ids, so a group's advertised {#code} tag
-	 *  actually resolves via recall/unfold (reversibility for L4 force-group). */
-	private readonly groupCodes = new Map<string, string[]>();
 	/** Cross-turn deterministic digest cache (id + text length → digest/tokens). linearize recreates
 	 *  block objects every turn, so the WeakMap caches in digest.ts never hit across turns — without
 	 *  this the full risk-line regex sweep re-runs over every foldable block on every model call. */
@@ -231,13 +228,12 @@ export class ContextFoldEngine {
 		this.gateActive = active;
 	}
 
-	/** Reset per-session state (session switch in one process): unfolds, caches, group registry. */
+	/** Reset per-session state (session switch in one process): unfolds and per-block caches. */
 	resetForSession(): void {
 		this.recallCallCount = 0;
 		this.recallByCode.clear();
 		this.unfolded.clear();
 		this.snapshot = new Map();
-		this.groupCodes.clear();
 		this.detCache.clear();
 		this.frozenLayers = [];
 		this.frozenById = new Map();
@@ -291,17 +287,10 @@ export class ContextFoldEngine {
 
 		const cmds = this.policy.conduct(view);
 
-		let ops: FoldOp[] = [];
-		let groups: GroupOp[] = [];
-		if (cmds != null && cmds.length > 0) {
-			const lowered = this.lower(cmds, blocks, protectFrom);
-			ops = lowered.ops;
-			groups = lowered.groups;
-		}
+		const ops: FoldOp[] = cmds != null && cmds.length > 0 ? this.lower(cmds, blocks, protectFrom) : [];
 
-		// Commit this fold event's substitutions as a new frozen layer — but never on a group turn
-		// (groups rewrite structure; freezing alongside one would fix bytes that just moved).
-		if (groups.length === 0 && ops.length > 0) {
+		// Commit this fold event's substitutions as a new frozen layer.
+		if (ops.length > 0) {
 			const entries = ops
 				.filter((op) => !gatePointers.has(op.id) && !this.frozenById.has(op.id))
 				.map((op) => ({ id: op.id, digestText: op.digestText }));
@@ -347,17 +336,17 @@ export class ContextFoldEngine {
 		// Merge order = gate > frozen > policy: the gate owns its ids outright; a frozen id's bytes
 		// outrank any late policy op for it (defense in depth — candidates already exclude frozen).
 		const allOps = mergeOpsById(gatePointers, mergeOpsById(frozenOps, ops));
-		if (allOps.length === 0 && groups.length === 0) return messages; // nothing to fold → send unchanged
+		if (allOps.length === 0) return messages; // nothing to fold → send unchanged
 
 		if (this.cfg.debug) {
 			const l0 = gatePointers.size ? ` l0=${gatePointers.size}` : "";
 			const fz = frozenOps.size ? ` frozen=${frozenOps.size}` : "";
 			process.stderr.write(
-				`[context-fold] ${ops.length} folds, ${groups.length} groups${l0}${fz}, live=${view.liveTokens} budget=${budget} ${this.lastStatus?.text ?? ""}\n`,
+				`[context-fold] ${ops.length} folds${l0}${fz}, live=${view.liveTokens} budget=${budget} ${this.lastStatus?.text ?? ""}\n`,
 			);
 		}
 
-		return applyPlan(messages, allOps, groups);
+		return applyPlan(messages, allOps);
 	}
 
 	/** Born-folded pointer text per registered block id (skipping any the agent has unfolded).
@@ -451,19 +440,6 @@ export class ContextFoldEngine {
 					errors.push({ code, message: `recall unavailable — spool file for #${code} could not be read (${path})` });
 				}
 				continue;
-			}
-			const groupIds = this.groupCodes.get(code);
-			if (groupIds) {
-				const hits = groupIds.map((id) => this.snapshot.get(id)).filter((b): b is WireBlock => !!b);
-				if (hits.length) {
-					matches.push({
-						code,
-						label: `group · ${hits.length} block${hits.length === 1 ? "" : "s"}`,
-						ids: hits.map((b) => b.id),
-						text: hits.map((b) => b.text).join("\n\n"),
-					});
-					continue;
-				}
 			}
 			const hits = snapByCode.get(code);
 			if (!hits || hits.length === 0) {
@@ -590,11 +566,7 @@ export class ContextFoldEngine {
 		const missing: string[] = [];
 		for (const raw of codes) {
 			const code = normalizeCode(raw);
-			// A group summary's code resolves to (and unfolds) all of its member blocks.
-			const groupIds = this.groupCodes.get(code);
-			const hits = groupIds
-				? groupIds.map((id) => this.snapshot.get(id)).filter((b): b is WireBlock => !!b)
-				: byCode.get(code);
+			const hits = byCode.get(code);
 			if (!hits || hits.length === 0) {
 				missing.push(raw);
 				continue;
@@ -653,7 +625,7 @@ export class ContextFoldEngine {
 				bornFolded: born,
 				frozen,
 				protected: i >= protectFrom,
-				grouped: false, // no human groups in Phase 1
+				grouped: false,
 				text: b.text,
 			};
 		});
@@ -687,11 +659,11 @@ export class ContextFoldEngine {
 
 	/**
 	 * Lower the policy's `Command[]` into wire ops. The engine is the SOLE author of the
-	 * `{#code FOLDED}` tag. Single disposition: groups claim their members first; a fold/replace on
-	 * a grouped (or protected, or held, or already-emitted) id is dropped. Defense in depth — the
-	 * policy already enforces these, but the wire re-checks so a bad command can never corrupt context.
+	 * `{#code FOLDED}` tag. Single disposition: a fold/replace on a protected, held, frozen or
+	 * already-emitted id is dropped. Defense in depth — the policy already enforces these, but the
+	 * wire re-checks so a bad command can never corrupt context.
 	 */
-	private lower(commands: Command[], blocks: WireBlock[], protectFrom: number): { ops: FoldOp[]; groups: GroupOp[] } {
+	private lower(commands: Command[], blocks: WireBlock[], protectFrom: number): FoldOp[] {
 		const byId = new Map(blocks.map((b) => [b.id, b] as const));
 		const protectedAt = (id: string): boolean => {
 			const b = byId.get(id);
@@ -703,44 +675,12 @@ export class ContextFoldEngine {
 		};
 
 		const ops: FoldOp[] = [];
-		const groups: GroupOp[] = [];
-		const groupedIds = new Set<string>();
 		const opIds = new Set<string>();
 
-		// Pass 1: group commands claim their members.
-		for (const cmd of commands) {
-			if (cmd.kind !== "group") continue;
-			const members = cmd.ids
-				.map((id) => byId.get(id))
-				.filter(
-					(b): b is WireBlock =>
-						!!b &&
-						isDurableId(b.id) &&
-						!protectedAt(b.id) &&
-						!this.unfolded.has(b.id) &&
-						!groupedIds.has(b.id) &&
-						!this.frozenById.has(b.id),
-				);
-			if (members.length === 0) continue;
-			const groupId = `g:${members[0].id}`;
-			const group: Group = { id: groupId, memberIds: members.map((m) => m.id), folded: true };
-			let summaryText: string | null;
-			if (cmd.digest === undefined) summaryText = groupDigest(group, members);
-			else if (cmd.digest === null || cmd.digest === "") summaryText = null; // DROP
-			else summaryText = cmd.digest; // verbatim
-			groups.push({ id: groupId, memberIds: group.memberIds, summaryText });
-			for (const m of members) groupedIds.add(m.id);
-			// Register the summary's advertised {#code} handle so recall/unfold can resolve it back to
-			// the member blocks (reversibility for L4 — the summary is the only place the member codes
-			// were erased from, so its own code must answer for them).
-			this.groupCodes.set(foldCode(groupId), group.memberIds);
-		}
-
-		// Pass 2: fold / replace (skip anything a group already claimed).
 		for (const cmd of commands) {
 			if (cmd.kind === "fold") {
 				for (const id of cmd.ids) {
-					if (groupedIds.has(id) || opIds.has(id) || !canFold(id)) continue;
+					if (opIds.has(id) || !canFold(id)) continue;
 					const b = byId.get(id)!;
 					const digestText = cmd.digest ? authoritativeTag(id, cmd.digest) : this.detDigest(b);
 					ops.push({ id, digestText });
@@ -748,7 +688,7 @@ export class ContextFoldEngine {
 				}
 			} else if (cmd.kind === "replace") {
 				const id = cmd.id;
-				if (groupedIds.has(id) || opIds.has(id) || !canFold(id)) continue;
+				if (opIds.has(id) || !canFold(id)) continue;
 				const b = byId.get(id)!;
 				let digestText: string;
 				if (cmd.content === "") digestText = this.detDigest(b); // smallest wire-safe form
@@ -757,18 +697,16 @@ export class ContextFoldEngine {
 				ops.push({ id, digestText });
 				opIds.add(id);
 			}
-			// restore / pin: no-op on the wire — the block stays live by not being folded.
 		}
 
-		return { ops, groups };
+		return ops;
 	}
 
-	/** Drop cached state for blocks no longer in the session (bounds memory). */
+	/** Drop cached digests for blocks no longer in the session (bounds memory). */
 	private pruneCaches(blocks: WireBlock[]): void {
-		if (this.detCache.size === 0 && this.groupCodes.size === 0) return;
+		if (this.detCache.size === 0) return;
 		const present = new Set(blocks.map((b) => b.id));
 		for (const id of [...this.detCache.keys()]) if (!present.has(id)) this.detCache.delete(id);
-		for (const [code, ids] of [...this.groupCodes]) if (!ids.some((id) => present.has(id))) this.groupCodes.delete(code);
 	}
 }
 

@@ -9,11 +9,9 @@
  * No Date, no Math.random, no global state — same input ⇒ byte-identical output. Ported from
  * Accordion `conductors/keel/ledger.ts` (pinned commit 0c22434).
  */
-import type { ViewBlock, ConductorFactLedgerEntry } from "../contract";
 
 export type FactCategory = "exact_values" | "decisions" | "commands" | "errors" | "paths";
 
-const CATEGORY_ORDER: readonly FactCategory[] = ["exact_values", "decisions", "commands", "errors", "paths"];
 const RISK_CATEGORIES: readonly FactCategory[] = ["exact_values", "decisions", "commands", "paths"];
 
 const VALUE_STOPWORDS = new Set([
@@ -108,32 +106,4 @@ export function categorize(text: string): CategorizedMarkers {
 export function riskFlags(text: string): FactCategory[] {
 	const cats = categorize(text);
 	return RISK_CATEGORIES.filter((c) => cats[c].length > 0);
-}
-
-/** Build the structured fact ledger across all blocks — deduped, capped, category-priority order. */
-export function harvestFacts(blocks: ViewBlock[], maxFacts = 24): ConductorFactLedgerEntry[] {
-	const seen = new Set<string>();
-	const byCat: Record<FactCategory, ConductorFactLedgerEntry[]> = {
-		exact_values: [], decisions: [], commands: [], errors: [], paths: [],
-	};
-	for (const block of blocks) {
-		if (block.text === undefined) continue;
-		const cats = categorize(block.text);
-		for (const cat of CATEGORY_ORDER) {
-			for (const value of cats[cat]) {
-				const key = `${cat}:${value.toLowerCase()}`;
-				if (seen.has(key)) continue;
-				seen.add(key);
-				byCat[cat].push({ category: cat, value, turn: block.turn, sourceId: block.id });
-			}
-		}
-	}
-	const out: ConductorFactLedgerEntry[] = [];
-	for (const cat of CATEGORY_ORDER) {
-		for (const entry of byCat[cat]) {
-			if (out.length >= maxFacts) return out;
-			out.push(entry);
-		}
-	}
-	return out;
 }
