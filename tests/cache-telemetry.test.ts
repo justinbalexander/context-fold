@@ -61,4 +61,115 @@ describe("CacheTelemetry", () => {
 		t.record({ input: 100, output: 10, cacheRead: 12_300, cacheWrite: 600, totalTokens: 13_010 });
 		expect(t.statusLine()).toBe("cache read 12.3k/wr 600 (hit 99%, last 99%)");
 	});
+
+	// A fold rewrites the prefix, so the provider re-prefills from the earliest masked block
+	// forward on the very next request. That cost is the extension's own, and it gets attributed
+	// to exactly one turn — the first one carrying the new bytes.
+	it("attributes the post-fold turn's cacheWrite to the fold, and only that turn", () => {
+		const t = new CacheTelemetry();
+		t.record({ input: 200, output: 10, cacheRead: 40_000, cacheWrite: 300, totalTokens: 40_510 });
+		expect(t.snapshot().foldEvents).toBe(0);
+		expect(t.snapshot().foldNetTokens).toBeNull();
+
+		t.noteFoldEvent(9_000);
+		// The re-prefill turn: read collapses to the surviving head, write covers the rest.
+		t.record({ input: 100, output: 10, cacheRead: 9_000, cacheWrite: 31_000, totalTokens: 40_110 });
+		// Two ordinary turns after it must not add to the fold's cost.
+		t.record({ input: 100, output: 10, cacheRead: 40_000, cacheWrite: 400, totalTokens: 40_510 });
+		t.record({ input: 100, output: 10, cacheRead: 40_400, cacheWrite: 350, totalTokens: 40_860 });
+
+		const s = t.snapshot();
+		expect(s.foldEvents).toBe(1);
+		expect(s.foldSavedTokens).toBe(9_000);
+		expect(s.foldReprefillTokens).toBe(31_000);
+		// Savings accrue per turn since the fold (2), the re-prefill was paid once.
+		expect(s.foldNetTokens).toBe(9_000 * 2 - 31_000);
+	});
+
+	it("accumulates across fold events and survives a fold with no measured savings", () => {
+		const t = new CacheTelemetry();
+		t.noteFoldEvent(5_000);
+		t.record({ input: 0, output: 0, cacheRead: 1_000, cacheWrite: 12_000, totalTokens: 13_000 });
+		t.noteFoldEvent(0);
+		t.record({ input: 0, output: 0, cacheRead: 1_000, cacheWrite: 8_000, totalTokens: 9_000 });
+		const s = t.snapshot();
+		expect(s.foldEvents).toBe(2);
+		expect(s.foldSavedTokens).toBe(5_000);
+		expect(s.foldReprefillTokens).toBe(20_000);
+	});
+
+	it("foldCostLine is null until a fold happens, then reports both sides", () => {
+		const t = new CacheTelemetry();
+		expect(t.foldCostLine()).toBeNull();
+		t.noteFoldEvent(9_000);
+		t.record({ input: 100, output: 10, cacheRead: 9_000, cacheWrite: 31_000, totalTokens: 40_110 });
+		expect(t.foldCostLine()).toBe("folds 1: masked 9.0k tok/turn, cost 31.0k re-prefilled · net -31.0k behind");
+		t.record({ input: 100, output: 10, cacheRead: 40_000, cacheWrite: 400, totalTokens: 40_510 });
+		t.record({ input: 100, output: 10, cacheRead: 40_400, cacheWrite: 350, totalTokens: 40_860 });
+		t.record({ input: 100, output: 10, cacheRead: 40_800, cacheWrite: 350, totalTokens: 41_260 });
+		t.record({ input: 100, output: 10, cacheRead: 41_200, cacheWrite: 350, totalTokens: 41_660 });
+		// 4 turns × 9k masked = 36k against 31k paid once.
+		expect(t.foldCostLine()).toBe("folds 1: masked 9.0k tok/turn, cost 31.0k re-prefilled · net +5.0k ahead");
+	});
+
+	// The Codex dialect reports cached_tokens only and Pi hardcodes Google's write to 0, so a
+	// zero cost can mean "nothing was rewritten" or "this provider never says". Claiming a net win
+	// against the second case is the dishonest accounting this feature exists to prevent.
+	it("reports the cost as unavailable when the provider never reports a cache write", () => {
+		const t = new CacheTelemetry();
+		t.noteFoldEvent(15_500);
+		t.record({ input: 0, output: 10, cacheRead: 7_680, cacheWrite: 0, totalTokens: 7_690 });
+		t.record({ input: 0, output: 10, cacheRead: 7_680, cacheWrite: 0, totalTokens: 7_690 });
+		const s = t.snapshot();
+		expect(s.writeReported).toBe(false);
+		expect(s.foldNetTokens).toBeNull();
+		expect(t.foldCostLine()).toBe("folds 1: masked 15.5k tok/turn, re-prefill cost not reported by this provider");
+	});
+
+	it("reports a real zero cost once the provider has proven it reports writes", () => {
+		const t = new CacheTelemetry();
+		// A non-zero write anywhere in the session establishes that this dialect does report them.
+		t.record({ input: 100, output: 10, cacheRead: 0, cacheWrite: 20_000, totalTokens: 20_110 });
+		t.noteFoldEvent(9_000);
+		t.record({ input: 100, output: 10, cacheRead: 20_000, cacheWrite: 0, totalTokens: 20_110 });
+		t.record({ input: 100, output: 10, cacheRead: 20_000, cacheWrite: 0, totalTokens: 20_110 });
+		const s = t.snapshot();
+		expect(s.writeReported).toBe(true);
+		expect(s.foldReprefillTokens).toBe(0);
+		expect(s.foldNetTokens).toBe(9_000);
+		expect(t.foldCostLine()).toBe("folds 1: masked 9.0k tok/turn, cost 0 re-prefilled · net +9.0k ahead");
+	});
+
+	// A second fold must not erase what the first one already banked: the ladder fires repeatedly
+	// in a normal session, and net is accrued turn by turn, not recomputed from the latest fold.
+	it("keeps savings accrued before a later fold in the net", () => {
+		const t = new CacheTelemetry();
+		t.noteFoldEvent(10_000);
+		t.record({ input: 100, output: 10, cacheRead: 5_000, cacheWrite: 20_000, totalTokens: 25_110 });
+		// Three ordinary turns bank 10k each.
+		for (let i = 0; i < 3; i++) {
+			t.record({ input: 100, output: 10, cacheRead: 25_000, cacheWrite: 300, totalTokens: 25_410 });
+		}
+		t.noteFoldEvent(2_000);
+		t.record({ input: 100, output: 10, cacheRead: 10_000, cacheWrite: 8_000, totalTokens: 18_110 });
+		// One turn after fold 2 banks the combined 12k rate.
+		t.record({ input: 100, output: 10, cacheRead: 18_000, cacheWrite: 300, totalTokens: 18_410 });
+		const s = t.snapshot();
+		expect(s.foldReprefillTokens).toBe(28_000);
+		// 3 × 10k before fold 2, plus 1 × 12k after it — the earlier accrual survives.
+		expect(s.foldNetTokens).toBe(30_000 + 12_000 - 28_000);
+	});
+
+	it("reset clears fold accounting too", () => {
+		const t = new CacheTelemetry();
+		t.noteFoldEvent(1_000);
+		t.record({ input: 0, output: 0, cacheRead: 0, cacheWrite: 5_000, totalTokens: 5_000 });
+		t.reset();
+		const s = t.snapshot();
+		expect(s.foldEvents).toBe(0);
+		expect(s.foldSavedTokens).toBe(0);
+		expect(s.foldReprefillTokens).toBe(0);
+		expect(s.foldNetTokens).toBeNull();
+		expect(t.foldCostLine()).toBeNull();
+	});
 });

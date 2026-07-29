@@ -221,7 +221,13 @@ export default function contextFold(pi: ExtensionAPI): void {
 		const message = event.message as { role?: string; usage?: Record<string, number> };
 		if (message.role !== "assistant" || !message.usage) return;
 		telemetry.record(message.usage);
-		if (debug) process.stderr.write(`[context-fold] ${telemetry.statusLine()}\n`);
+		if (debug) {
+			// The fold-cost half belongs on stderr too, not only in the interactive status command:
+			// headless `-p` runs are where fold cost actually gets measured, and there is no command
+			// to invoke there.
+			const foldCost = telemetry.foldCostLine();
+			process.stderr.write(`[context-fold] ${telemetry.statusLine()}${foldCost ? ` · ${foldCost}` : ""}\n`);
+		}
 		// Cold-session notification: one line at the START of a cold streak, never per-turn nagging.
 		const adv = buildAdvisory();
 		if (adv.coldNow && !wasCold) {
@@ -258,6 +264,10 @@ export default function contextFold(pi: ExtensionAPI): void {
 			ladderPolicy.setCold(t.turns >= 3 && t.totals.cacheRead === 0);
 			// Fold-event → seed-index emission. Bound per turn so the emitter sees this ctx's stores.
 			engine.onFoldEvent = (foldEvent) => {
+				// Arm the cache accounting first: the fold's re-prefill cost lands on the very next
+				// turn's cacheWrite, and it must be attributed even if index emission then throws.
+				const saved = engine.status?.metrics?.tokens_saved;
+				telemetry.noteFoldEvent(typeof saved === "number" ? saved : 0);
 				try {
 					const { record: rec, newEntries } = emitFoldIndex(foldEvent, {
 						spool: spoolFor(ctx),
@@ -358,6 +368,8 @@ export default function contextFold(pi: ExtensionAPI): void {
 			const lines = [
 				`context-fold: ${state}${pos} · L0 ${activeGate ? "on" : "off"} · model ${activeModelIdentity}`,
 				`${telemetry.statusLine()}${adv.coldNow ? " · COLD" : ""}${adv.paybackTurns !== null ? ` · reset pays back in ~${adv.paybackTurns} warm turns` : ""}`,
+				// Both sides of folding, not just the savings — see CacheTelemetry.foldCostLine.
+				...(telemetry.foldCostLine() ? [telemetry.foldCostLine() as string] : []),
 				...adv.flags.map((f) => `⚑ ${f}`),
 			];
 			cmdCtx.ui?.notify?.(lines.join("\n"), adv.flags.length ? "warning" : "info");

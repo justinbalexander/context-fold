@@ -112,6 +112,21 @@ The ladder alone cannot cover this case: it fires only at 45 % of the window and
 protected tail, and a result that just landed is in that tail. The gate is the only stage that
 acts at ingestion.
 
+**Deferred substitution (`CONTEXTFOLD_L0_KEEP_RECENT`), and why it is still here.** The gate's known
+failure mode is recall churn: born-folding on arrival means a model that reads several files gets
+pointers back and must recall them, and the extra turns can out-cost the per-turn saving. Holding the
+newest N registered blocks warm is the obvious mitigation, and its first live A/B did **not** support
+it — on a task where every masked payload was needed again, the gate cost 141 % of the no-gate control
+and deferral did not recover that. Churn turned out to be driven by the model needing *all* the masked
+content, which an arrival-time policy cannot predict.
+
+It is retained deliberately rather than reverted. That A/B was one adversarial shape at one run per
+arm, and model recall-batching variance (three codes in one call in one arm, split across calls in
+another) swamped the arms. The open question is whether a larger hold-out earns its keep on genuinely
+chunky tool results, which is the next thing to test. Setting it to `0` is exactly the shipped
+behaviour, so the flag costs nothing unset — do not remove it as dead weight without re-running that
+comparison.
+
 ### The seed index
 
 Every fold event appends one deterministic record to `seed-index.jsonl` in the session spool
@@ -142,6 +157,15 @@ price-agnostic input-token equivalents (fee *ratios* are near-constant across ve
 - **`/context-fold` status** — fold position (usage %, next fold threshold), cache hit ratios, and
   flags: a second forced compaction, irreducible context past half the window, cold with a large
   carry, and recall churn. Advisory only; nothing blocks.
+- **Fold cost accounting** — once a fold event has fired, the status reports *both* sides: tokens
+  masked per turn against tokens the provider re-prefilled because the fold moved the prefix, plus
+  the running net. A fold rewrites history from the earliest masked block forward, so that
+  re-prefill is a real cost this extension causes, and reporting only the savings would be
+  dishonest accounting. It is charged to the single turn carrying the new bytes, because every
+  later turn reads them back from cache. The cost side needs a provider that reports cache *writes*:
+  Anthropic and Bedrock Converse do, while the Codex route reports cached reads only and Pi
+  hardcodes Google's write to zero. Where writes are unreported the line says so instead of showing
+  a zero — "nothing was rewritten" and "this provider never says" are different facts.
 
 ## Guarantees
 
@@ -206,6 +230,7 @@ From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 | `CONTEXTFOLD_L0` | _(off)_ | Ingestion gate: `1` = all models; comma-separated substrings = per-model allowlist; unset/`0` = inert. |
 | `CONTEXTFOLD_L0_THRESHOLD` | `2000` | est-token size above which a result is spooled + born-folded. |
 | `CONTEXTFOLD_L0_MINSAVE` | `0.5` | Minimum fraction the pointer must save to bother folding. |
+| `CONTEXTFOLD_L0_KEEP_RECENT` | `0` | Deferred substitution: hold the newest N gate-registered blocks at full fidelity and fold them only once stale. `0` = born-folded (cheapest per turn); non-zero trades those tokens against recall round trips. Spooling is unaffected, so held blocks stay recallable. Retained as an experiment — see the note below before removing it. |
 | `CONTEXTFOLD_L0_ERRCAP` | `4` | Threshold multiplier for error-shaped results. |
 | `CONTEXTFOLD_SPOOL_RETAIN_DAYS` | `14` | Spool GC window at session start. `0`/`off` = never delete. |
 | `CONTEXTFOLD_DEBUG` | off | One-line fold/cache summary to stderr each turn. |

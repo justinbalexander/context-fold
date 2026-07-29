@@ -31,6 +31,25 @@ export interface CacheTelemetrySnapshot {
 	everWarm: boolean;
 	/** The retained ring, oldest first (bounded). */
 	ring: TurnUsage[];
+	/** Fold events committed this session. */
+	foldEvents: number;
+	/** Tokens the fold events removed from the per-turn view (the savings side). */
+	foldSavedTokens: number;
+	/** Tokens the provider re-prefilled on the turns right after a fold (the cost side). */
+	foldReprefillTokens: number;
+	/**
+	 * Has this provider ever reported a non-zero cache write? Several dialects never do — the Codex
+	 * route reports `cached_tokens` only, and Pi hardcodes Google's write to 0 — so "no write
+	 * reported" and "nothing was written" are different facts and must not be conflated.
+	 */
+	writeReported: boolean;
+	/**
+	 * Net tokens the folds are ahead by, in input-token equivalents: savings accrue every turn
+	 * after the fold, the re-prefill is paid once. Null until a fold event has been measured, and
+	 * null when the provider does not report cache writes — a net computed against an unmeasured
+	 * cost would be a guess wearing a number's clothes.
+	 */
+	foldNetTokens: number | null;
 }
 
 const RING_LIMIT = 50;
@@ -40,10 +59,38 @@ function ratio(cacheRead: number, input: number): number | null {
 	return denom > 0 ? cacheRead / denom : null;
 }
 
+/** Compact token count for status lines: 1234 → `1.2k`, negatives keep their sign. */
+function k(n: number): string {
+	return Math.abs(n) >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
 export class CacheTelemetry {
 	private ring: TurnUsage[] = [];
 	private turns = 0;
 	private totals: TurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+	/** Fold-event accounting. `pendingFold` arms the next recorded turn as the post-fold turn. */
+	private foldEvents = 0;
+	private foldSavedTokens = 0;
+	private foldReprefillTokens = 0;
+	/** Savings actually banked so far: foldSavedTokens added per post-fold turn as it happens.
+	 *  Accrued incrementally rather than multiplied out at snapshot time, because a later fold
+	 *  raises the per-turn rate without erasing what earlier folds already earned. */
+	private foldAccruedSavedTokens = 0;
+	private pendingFold = false;
+
+	/**
+	 * A fold event committed. The *next* recorded turn is the first request carrying the new bytes,
+	 * so its cacheWrite is what the mutation cost — measured, not modelled.
+	 *
+	 * Attribution is deliberately one-turn-wide. A fold rewrites history from the earliest masked
+	 * block forward, so the provider re-prefills that region exactly once and every later turn reads
+	 * it back; charging the fold for anything beyond that first turn would double-count normal growth.
+	 */
+	noteFoldEvent(savedTokens: number): void {
+		this.foldEvents += 1;
+		if (Number.isFinite(savedTokens) && savedTokens > 0) this.foldSavedTokens += savedTokens;
+		this.pendingFold = true;
+	}
 
 	/** Record one finalized assistant message's usage. Non-finite fields count as 0. */
 	record(usage: Partial<TurnUsage> | null | undefined): void {
@@ -63,12 +110,23 @@ export class CacheTelemetry {
 		this.totals.cacheRead += turn.cacheRead;
 		this.totals.cacheWrite += turn.cacheWrite;
 		this.totals.totalTokens += turn.totalTokens;
+		if (this.pendingFold) {
+			this.foldReprefillTokens += turn.cacheWrite;
+			this.pendingFold = false;
+		} else if (this.foldEvents > 0) {
+			this.foldAccruedSavedTokens += this.foldSavedTokens;
+		}
 	}
 
 	reset(): void {
 		this.ring = [];
 		this.turns = 0;
 		this.totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+		this.foldEvents = 0;
+		this.foldSavedTokens = 0;
+		this.foldReprefillTokens = 0;
+		this.foldAccruedSavedTokens = 0;
+		this.pendingFold = false;
 	}
 
 	snapshot(): CacheTelemetrySnapshot {
@@ -81,6 +139,14 @@ export class CacheTelemetry {
 			hitRatio: ratio(this.totals.cacheRead, this.totals.input),
 			everWarm: this.totals.cacheRead > 0,
 			ring: [...this.ring],
+			foldEvents: this.foldEvents,
+			foldSavedTokens: this.foldSavedTokens,
+			foldReprefillTokens: this.foldReprefillTokens,
+			writeReported: this.totals.cacheWrite > 0,
+			foldNetTokens:
+				this.foldEvents > 0 && this.totals.cacheWrite > 0
+					? this.foldAccruedSavedTokens - this.foldReprefillTokens
+					: null,
 		};
 	}
 
@@ -88,8 +154,26 @@ export class CacheTelemetry {
 	statusLine(): string {
 		const s = this.snapshot();
 		if (s.turns === 0) return "cache: no usage yet";
-		const k = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 		const pct = (r: number | null): string => (r === null ? "n/a" : `${Math.round(r * 100)}%`);
 		return `cache read ${k(s.totals.cacheRead)}/wr ${k(s.totals.cacheWrite)} (hit ${pct(s.hitRatio)}, last ${pct(s.lastHitRatio)})`;
+	}
+
+	/**
+	 * Both sides of what folding did to the cache, or null before any fold event.
+	 *
+	 * Reporting only the savings would be dishonest accounting: a fold rewrites the prefix, so the
+	 * provider re-prefills from the earliest masked block forward, and that is a real token cost the
+	 * extension caused. This is the line that lets a user see it.
+	 */
+	foldCostLine(): string | null {
+		const s = this.snapshot();
+		if (s.foldEvents === 0) return null;
+		const masked = `folds ${s.foldEvents}: masked ${k(s.foldSavedTokens)} tok/turn`;
+		// Without a reported write there is no cost side, and printing "cost 0 · net ahead" would
+		// claim a win against something never measured.
+		if (!s.writeReported) return `${masked}, re-prefill cost not reported by this provider`;
+		const net = s.foldNetTokens;
+		const verdict = net === null ? "" : net >= 0 ? ` · net +${k(net)} ahead` : ` · net ${k(net)} behind`;
+		return `${masked}, cost ${k(s.foldReprefillTokens)} re-prefilled${verdict}`;
 	}
 }

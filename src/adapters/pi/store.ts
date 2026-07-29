@@ -42,6 +42,18 @@ export interface FoldConfig {
 	defaultContextWindow: number;
 	/** Emit a one-line fold summary to stderr each turn. */
 	debug: boolean;
+	/**
+	 * How many of the newest gate-registered blocks stay at full fidelity instead of rendering as
+	 * pointers — deferred L0 substitution. 0 (default) is born-folded: a flood never reaches warm
+	 * context at all, which is the cheapest per turn.
+	 *
+	 * Non-zero trades those tokens for fewer recall round trips. The gate's measured failure mode is
+	 * recall churn: a capable model reads many files, each lands as a pointer, and it then recalls
+	 * them one by one — the extra turns cost more than the per-turn saving. Leaving the newest few
+	 * warm lets the model use a result on the turn it asked for it, and the pointer arrives only once
+	 * the block is stale. The payload is spooled on arrival either way, so nothing is lost.
+	 */
+	gateKeepRecent: number;
 }
 
 export const DEFAULT_CONFIG: FoldConfig = {
@@ -50,6 +62,7 @@ export const DEFAULT_CONFIG: FoldConfig = {
 	tailTarget: 20_000,
 	defaultContextWindow: DEFAULT_CONTEXT_WINDOW,
 	debug: false,
+	gateKeepRecent: 0,
 };
 
 /** What the engine reports after committing a fold event's frozen layer (index emission seam). */
@@ -321,15 +334,33 @@ export class ContextFoldEngine {
 		this.onFoldEvent?.({ seq: layer.seq, trigger, maskedIds: entries.map((e) => e.id), blocks, usage });
 	}
 
-	/** Born-folded pointer text per registered block id (skipping any the agent has unfolded).
-	 *  Empty when the kill switch is off for the active model — restored entries then render
-	 *  raw from history while staying recallable through the registry. */
+	/**
+	 * Deferred L0 substitution: the newest `gateKeepRecent` registered blocks that would otherwise
+	 * render as pointers, held at full fidelity instead.
+	 *
+	 * The hold-out set is keyed on array position, not on the token tail, because the tail is derived
+	 * from the very pointer weights deferral changes — position is the one input available before that
+	 * math runs, and it keeps the set deterministic turn over turn. Frozen and agent-unfolded ids are
+	 * never held: their in-view form belongs to someone else.
+	 */
+	private heldGateIds(blocks: ReadonlyArray<{ id: string }>): Set<string> {
+		const held = new Set<string>();
+		if (this.cfg.gateKeepRecent <= 0 || !this.gateActive) return held;
+		for (let i = blocks.length - 1; i >= 0 && held.size < this.cfg.gateKeepRecent; i--) {
+			const id = blocks[i].id;
+			if (this.gate.get(id) && !this.unfolded.has(id) && !this.frozenById.has(id)) held.add(id);
+		}
+		return held;
+	}
+
 	private computeGatePointers(blocks: WireBlock[]): Map<string, string> {
 		const out = new Map<string, string>();
 		if (!this.gateActive || this.gate.size === 0) return out;
+		const held = this.heldGateIds(blocks);
 		for (const b of blocks) {
 			const e = this.gate.get(b.id);
 			if (!e || this.unfolded.has(b.id)) continue;
+			if (held.has(b.id)) continue;
 			// A FROZEN id renders its committed layer bytes, not a pointer: ladder-masked blocks are
 			// registered (spool-backed recall must survive hard compaction), but their in-view form is
 			// owned by the frozen layer — swapping in a pointer here would silently move frozen bytes.
@@ -464,10 +495,13 @@ export class ContextFoldEngine {
 		let truncated = false;
 
 		const blocks = [...this.snapshot.values()].sort((a, b) => a.order - b.order);
+		// A held (deferred) block is registered but still rendered warm, so sweeping it here would
+		// hand back lines the model can already read — inflating the reply and the scanned count.
+		const held = this.heldGateIds(blocks);
 		for (const b of blocks) {
 			const gateEntry = this.gate.get(b.id);
 			const folded = (gateEntry !== undefined && this.gateActive) || this.frozenById.has(b.id);
-			if (!folded || this.unfolded.has(b.id)) continue;
+			if (!folded || this.unfolded.has(b.id) || held.has(b.id)) continue;
 			scanned++;
 			const code = gateEntry?.code ?? foldCode(b.id);
 			const lines: string[] = [];
