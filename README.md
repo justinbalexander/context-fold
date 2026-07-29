@@ -189,6 +189,10 @@ price-agnostic input-token equivalents (fee *ratios* are near-constant across ve
 - **Token counts are estimates.** The estimator is a uniform ~4-characters-per-token heuristic, not
   a per-model tokenizer, so every threshold in the table below is approximate. It drives budget
   decisions well enough; do not read it as billing truth.
+- **Images are invisible to the budget math.** A tool result carrying non-text parts (screenshots,
+  rendered pages) is never folded — neither by the gate nor the ladder, so nothing is ever lost —
+  but its real token cost is not counted either. Image-heavy sessions read as further from the fold
+  threshold than they are, so folding starts later than it should.
 - **The tool names are generic.** The extension registers `recall` and `unfold` as global tools.
   If another extension registers the same names, one will shadow the other.
 - **Tested against two Pi minors and one model family.** Pi 0.80.10 and 0.82.1, primarily with

@@ -153,7 +153,10 @@ a dead pointer.
 Retention: at session start, sibling session spools whose newest file is older than
 `CONTEXTFOLD_SPOOL_RETAIN_DAYS` are removed whole-directory. Dedup aliases only ever point at
 siblings in the same directory, so nothing dangles, and the current session's spool is never
-touched.
+touched. One accepted edge: siblings are protected only by mtime, so a *concurrently running*
+session that has not folded anything in over the retention window can lose its spool to a
+freshly-started sibling — recall then degrades to the typed spool error, loudly rather than
+silently.
 
 ---
 
