@@ -146,12 +146,29 @@ export default function contextFold(pi: ExtensionAPI): void {
 			}
 		}
 
+		if (isSwitch) {
+			registry.clear();
+			engine.resetForSession();
+			telemetry.reset();
+			// Closure-held advisory state is per-session too — stale values would make the new
+			// session's first /context-fold report the old session's compactions or cold streak.
+			compactions = 0;
+			wasCold = false;
+			lastContextWindow = null;
+		}
+
+		// Seq continuity across resume: a compact index record claims max(index)+1, and restoring
+		// layers alone would floor the engine below it — the next fold event would then reuse that
+		// seq and shadow the compaction recovery map (the JSONL contract is latest-per-seq wins).
+		// Runs AFTER the switch reset (which zeroes the floor) and regardless of whether any fold
+		// ledger exists — a compact record can exist without one.
 		try {
-			if (isSwitch) {
-				registry.clear();
-				engine.resetForSession();
-				telemetry.reset();
-			}
+			engine.ensureLayerSeqAtLeast(indexFor(ctx).readAll().reduce((m, r) => Math.max(m, r.seq), 0));
+		} catch (err) {
+			process.stderr.write(`[context-fold] seed-index seq floor skipped: ${err instanceof Error ? err.message : String(err)}\n`);
+		}
+
+		try {
 			const { gateEntries, unfoldedIds, layers } = restoreFoldState(ctx.sessionManager.getEntries() as unknown as { customType?: string; data?: unknown }[]);
 			if (gateEntries.length === 0 && unfoldedIds.size === 0 && layers.length === 0) return;
 			const { valid, dropped } = revalidateSpools(gateEntries);
@@ -324,13 +341,15 @@ export default function contextFold(pi: ExtensionAPI): void {
 			const prep = (event as { preparation: { messagesToSummarize: unknown[]; turnPrefixMessages: unknown[]; tokensBefore: number; firstKeptEntryId: string; previousSummary?: string } }).preparation;
 			const index = indexFor(ctx);
 			const blocks = linearize(prep.messagesToSummarize as unknown as CoreAgentMessage[]) as unknown as WireBlock[];
-			emitCompactIndex(blocks, {
+			const compactRecord = emitCompactIndex(blocks, {
 				registry,
 				index,
 				sessionId: ctx.sessionManager.getSessionId(),
 				tokensBefore: prep.tokensBefore,
 				contextWindow: lastContextWindow,
 			});
+			// The compact record claimed a seq; the next fold event must start past it.
+			engine.ensureLayerSeqAtLeast(compactRecord.seq);
 			const summary = renderDetCompactionSummary({
 				records: index.readAll(),
 				spoolDir: join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId()),

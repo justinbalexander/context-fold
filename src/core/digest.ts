@@ -27,11 +27,14 @@ export const FOLDABLE_KINDS: ReadonlySet<BlockKind> = new Set<BlockKind>(["text"
 
 /**
  * The ONE foldability predicate, shared by the view and the wire: a block may be folded iff its
- * KIND is foldable. KIND ONLY — deliberately content- and id-independent. The durable-id guard
- * (`isDurableId`) is a separate wire-emit concern, NOT part of foldability.
+ * KIND is foldable and linearize saw all of it. KIND plus the `opaque` flag ONLY — deliberately
+ * content- and id-independent. The durable-id guard (`isDurableId`) is a separate wire-emit
+ * concern, NOT part of foldability. `opaque` marks a result carrying non-text parts (an image):
+ * substitution would replace the whole content array and silently drop them from the view — the
+ * L0 gate already refuses these at ingestion, and the ladder must match it.
  */
 export function wireFoldable(b: DigestBlock): boolean {
-	return FOLDABLE_KINDS.has(b.kind);
+	return FOLDABLE_KINDS.has(b.kind) && !(b as { opaque?: boolean }).opaque;
 }
 
 /** Short, stable handle for a block, derived purely from its durable id (FNV-1a → base36, 6 chars). */
@@ -214,12 +217,15 @@ function toolSummary(text: string, meta: PointerMeta): string {
 	const input = (meta.input ?? {}) as Record<string, unknown>;
 	const errTag = meta.isError ? " [error]" : "";
 	switch (meta.tool) {
+		// Every interpolated input is clipped: the summary line is the one part of the pointer the
+		// budget-enforcement loops in pointerDigest never trim, so an unbounded path or pattern here
+		// would breach the ≤400-token contract with no recourse.
 		case "read": {
-			const path = typeof input.path === "string" ? input.path : "";
+			const path = typeof input.path === "string" ? clip(input.path, 120) : "";
 			return `read ${path}${errTag} — ${size}`.trim();
 		}
 		case "grep": {
-			const pat = typeof input.pattern === "string" ? input.pattern : "";
+			const pat = typeof input.pattern === "string" ? clip(input.pattern, 80) : "";
 			return `grep ${JSON.stringify(pat)}${errTag} — ${size}`;
 		}
 		case "bash": {
@@ -250,7 +256,10 @@ export function pointerDigest(text: string, meta: PointerMeta): string {
 	const summary = toolSummary(text, meta);
 
 	const head = lines.slice(0, POINTER_HEAD_LINES).map(clipLine);
-	const tail = lines.length > POINTER_HEAD_LINES + POINTER_TAIL_LINES ? lines.slice(-POINTER_TAIL_LINES).map(clipLine) : [];
+	// When head+tail would overlap (9–16 lines), the tail is the remainder — every line renders,
+	// and the "…" elision marker appears only when lines actually went missing between the two.
+	const elided = lines.length > POINTER_HEAD_LINES + POINTER_TAIL_LINES;
+	const tail = (elided ? lines.slice(-POINTER_TAIL_LINES) : lines.slice(POINTER_HEAD_LINES)).map(clipLine);
 
 	const totalRisk = countRiskLines(text);
 	let risk = collectRiskLines(text, { maxLines: POINTER_RISK_LINES, maxChars: 1200 });
@@ -261,7 +270,7 @@ export function pointerDigest(text: string, meta: PointerMeta): string {
 	const build = (riskLines: string[]): string => {
 		const parts: string[] = [`${tag} ${summary}${dedupNote}`];
 		if (head.length) parts.push("head:", ...head);
-		if (tail.length) parts.push("…", "tail:", ...tail);
+		if (tail.length) parts.push(...(elided ? ["…"] : []), "tail:", ...tail);
 		if (riskLines.length) {
 			parts.push(`risk lines (${totalRisk}):`, ...riskLines);
 			if (totalRisk > riskLines.length) parts.push(`[+${totalRisk - riskLines.length} more — recall #${meta.code} grep=<term>]`);

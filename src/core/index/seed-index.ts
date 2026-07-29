@@ -11,7 +11,7 @@
  * Pure core: no disk, no Date (the caller supplies `at`), no harness imports.
  */
 import { ERROR_MARKER_SOURCE, errorMarkerRe } from "../policy/ledger";
-import { firstLine } from "../tokens";
+import { firstLine, safeSlice } from "../tokens";
 
 /** The structural block surface the extractor reads (WireBlock satisfies it). */
 export interface IndexBlock {
@@ -120,7 +120,7 @@ export function extractIndex(input: ExtractInput): ExtractedIndex {
 	for (const b of masked) {
 		for (const line of b.text.split("\n")) {
 			const t = line.trim();
-			if (t && marker.test(t)) errors.add(t.slice(0, ERROR_CLIP));
+			if (t && marker.test(t)) errors.add(safeSlice(t, ERROR_CLIP));
 		}
 	}
 	out.errors = errors.values();
@@ -189,8 +189,8 @@ const TOOL_CMD_RE =
 	/\b(?:npm|npx|pnpm|yarn|bun|node|git|docker|kubectl|make|cargo|zig|go|python3?|pytest|deno|uv|gh|rg|fd|curl)\s+\S[^\n]{0,120}/g;
 
 function harvestCommands(text: string, into: Dedup): void {
-	for (const m of text.matchAll(DOLLAR_LINE_RE)) into.add(m[1].slice(0, COMMAND_CLIP));
-	for (const m of text.matchAll(TOOL_CMD_RE)) into.add(m[0].trim().slice(0, COMMAND_CLIP));
+	for (const m of text.matchAll(DOLLAR_LINE_RE)) into.add(safeSlice(m[1], COMMAND_CLIP));
+	for (const m of text.matchAll(TOOL_CMD_RE)) into.add(safeSlice(m[0].trim(), COMMAND_CLIP));
 }
 
 // Identifier shapes for lexical recovery: code symbols with an interior capital/underscore/digit,

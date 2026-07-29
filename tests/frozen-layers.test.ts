@@ -44,6 +44,17 @@ function resultText(messages: AgentMessage[], callId: string): string {
 }
 
 describe("frozen layers", () => {
+	it("ensureLayerSeqAtLeast floors the next layer's seq (compact-record continuity)", () => {
+		// A det compaction appends an index record at max(seq)+1; the next fold event must start
+		// past it or the JSONL's latest-per-seq rule shadows the compaction recovery map.
+		const { e, committed } = engine();
+		e.ensureLayerSeqAtLeast(5);
+		const { messages } = session(3);
+		e.process(messages, 16_000);
+		expect(committed.length).toBe(1);
+		expect(committed[0].seq).toBe(6);
+	});
+
 	it("commits a fold event as a layer and re-emits byte-identical substitutions", () => {
 		const { e, committed } = engine();
 		const { messages, callIds } = session(3);

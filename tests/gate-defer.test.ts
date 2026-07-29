@@ -115,6 +115,26 @@ describe("deferred L0 substitution", () => {
 		expect(held.viewFor(msgs, 400_000).liveTokens).toBeGreaterThan(born.viewFor(msgs, 400_000).liveTokens);
 	});
 
+	it("a fold event never freezes a held block — the deferred pointer can still arrive", () => {
+		// Once the ladder freezes a block, computeGatePointers skips it forever; a held block that
+		// got frozen would therefore NEVER receive its L0 pointer. The held set must read as `held`
+		// to the policy, exactly like an agent unfold.
+		const gate = new MapGateRegistry();
+		for (const id of ["c1", "c2"]) register(gate, id, CONTENT);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100, gateKeepRecent: 1 }, gate);
+		// Trailing user turn pushes c2 out of the protected tail; the small window puts usage past
+		// the 45 % fold threshold, so without the held guard the ladder would freeze c2 here.
+		const msgs = [...session(["c1", "c2"], CONTENT), user("follow-up question")];
+		const first = results(engine.process(msgs, 8_000));
+		expect(first[1]).toBe(CONTENT); // still warm — neither det-frozen nor pointer
+
+		// Rotation: a newer registration displaces c2 from the hold-out set, and what arrives must
+		// be the L0 POINTER (spool-backed recall usage), not a frozen ladder digest.
+		register(gate, "c3", CONTENT);
+		const second = results(engine.process([...session(["c1", "c2", "c3"], CONTENT), user("next")], 8_000));
+		expect(second[1]).toContain("recall #code-c2");
+	});
+
 	it("excludes a held block from the span-recall sweep (its content is already warm)", () => {
 		const gate = new MapGateRegistry();
 		for (const id of ["c1", "c2"]) register(gate, id, CONTENT);

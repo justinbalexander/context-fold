@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { applyPlan } from "../src/core/apply";
-import { foldCode, foldTag, digest } from "../src/core/digest";
+import { foldCode, foldTag, digest, wireFoldable } from "../src/core/digest";
 import { linearize } from "../src/core/block";
 import type { FoldOp } from "../src/core/block";
 import { protectedFromIndex } from "../src/adapters/pi/store";
@@ -91,6 +91,25 @@ describe("applyPlan — in-place folds keep tool pairs", () => {
 });
 
 describe("applyPlan — defense in depth", () => {
+	it("refuses an op whose id resolves to more than one message (timestamp-anchor collision)", () => {
+		// Two assistant messages with no responseId and the same millisecond timestamp compute the
+		// same durable id; applying one op to both would overwrite A's conclusion with B's digest.
+		const twin = (text: string) =>
+			({ role: "assistant", timestamp: 777, content: [{ type: "text", text }] }) as unknown as ReturnType<typeof user>;
+		const messages = [user("x"), twin("conclusion A"), twin("conclusion B"), assistantText("unique", "resp9")];
+		const out = applyPlan(messages, [{ id: "a:t777:p0", digestText: "{#zzzzzz FOLDED} collided" }]);
+		expect(out).toBe(messages); // ambiguous → untouched, same array by reference
+
+		// A non-ambiguous op in the same plan still applies.
+		const out2 = applyPlan(messages, [
+			{ id: "a:t777:p0", digestText: "{#zzzzzz FOLDED} collided" },
+			{ id: "a:resp9:p0", digestText: "{#yyyyyy FOLDED} unique folded" },
+		]);
+		expect((out2[1].content as any)[0].text).toBe("conclusion A");
+		expect((out2[2].content as any)[0].text).toBe("conclusion B");
+		expect((out2[3].content as any)[0].text).toContain("unique folded");
+	});
+
 	it("ignores non-durable ids and empty digests", () => {
 		const messages = [user("x"), assistantText("hi")];
 		const before = JSON.stringify(messages);
@@ -104,5 +123,32 @@ describe("applyPlan — defense in depth", () => {
 		const snapshot = JSON.stringify(messages);
 		applyPlan(messages, [{ id: "r:c1", digestText: "{#aaa111 FOLDED} read → folded" }]);
 		expect(JSON.stringify(messages)).toBe(snapshot);
+	});
+});
+
+describe("opaque tool results (non-text parts)", () => {
+	it("linearize marks a mixed image+text result opaque, and wireFoldable refuses it", () => {
+		// Folding replaces the whole content array with one text block, so an image inside a mixed
+		// result would silently vanish from the view. The gate refuses these at ingestion; the
+		// ladder path must match it.
+		const messages = [
+			user("look at the page"),
+			assistantWithCalls([{ id: "c1", name: "browser" }]),
+			{
+				role: "toolResult",
+				toolCallId: "c1",
+				content: [
+					{ type: "text", text: "dom text ".repeat(300) },
+					{ type: "image", data: "iVBORw0KGgo=" },
+				],
+			} as unknown as ReturnType<typeof user>,
+		];
+		const blocks = linearize(messages);
+		const tr = blocks.find((b) => b.kind === "tool_result")!;
+		expect(tr.opaque).toBe(true);
+		expect(wireFoldable(tr)).toBe(false);
+		// A text-only result stays foldable.
+		const plain = linearize([user("x"), assistantWithCalls([{ id: "c2", name: "read" }]), toolResult("c2", "plain text")]);
+		expect(plain.find((b) => b.kind === "tool_result")!.opaque).toBeUndefined();
 	});
 });

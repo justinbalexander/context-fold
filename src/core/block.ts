@@ -61,6 +61,9 @@ export interface WireBlock {
 	callId?: string;
 	model?: string;
 	isError?: boolean;
+	/** The block's message carries non-text parts (e.g. an image) that linearize cannot see —
+	 *  folding it would silently drop them from the view, so it is never foldable. */
+	opaque?: boolean;
 }
 
 /** One fold instruction: replace block `id`'s content with `digestText` (carries the {#code} tag). */
@@ -166,7 +169,7 @@ export function linearize(messages: AgentMessage[]): WireBlock[] {
 		id: string,
 		kind: WireBlock["kind"],
 		text: string,
-		extra: Partial<Pick<WireBlock, "toolName" | "callId" | "model" | "isError">> = {},
+		extra: Partial<Pick<WireBlock, "toolName" | "callId" | "model" | "isError" | "opaque">> = {},
 	) => {
 		if (!text && kind !== "tool_result") return; // drop empty non-results
 		out.push({ id, kind, turn, order: order++, text, tokens: tokensFor(text), ...extra });
@@ -196,10 +199,12 @@ export function linearize(messages: AgentMessage[]): WireBlock[] {
 				break;
 			}
 			case "toolResult": {
+				const hasNonText = Array.isArray(m.content) && (m.content as any[]).some((b) => b && (b as any).type !== "text");
 				push(blockId(m, i), "tool_result", textOf(m.content), {
 					toolName: m.toolName || "tool",
 					callId: m.toolCallId,
 					isError: !!m.isError,
+					...(hasNonText ? { opaque: true } : {}),
 				});
 				break;
 			}

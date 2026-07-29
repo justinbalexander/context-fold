@@ -52,6 +52,30 @@ describe("L0 pointer digest", () => {
 		expect(p).toContain(IMPORT_ERROR);
 	});
 
+	it("keeps the budget even when the grep pattern or read path is enormous", () => {
+		// The summary line is the one pointer part the budget loops never trim, so unclipped
+		// interpolation here is a budget breach with no recourse (it then freezes permanently).
+		const text = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
+		const hugePattern = "alternation|".repeat(700); // ~8.4k chars
+		const g = pointerDigest(text, metaFor(text, { tool: "grep", input: { pattern: hugePattern } }));
+		expect(estTokens(g)).toBeLessThanOrEqual(POINTER_TOKEN_BUDGET);
+		const hugePath = "/deep".repeat(1200); // 6k chars
+		const r = pointerDigest(text, metaFor(text, { tool: "read", input: { path: hugePath } }));
+		expect(estTokens(r)).toBeLessThanOrEqual(POINTER_TOKEN_BUDGET);
+	});
+
+	it("shows every line of a short-but-wide result, with no elision marker", () => {
+		// 9-16 lines: head+tail would overlap, so the tail is the remainder — nothing may vanish
+		// silently between head and tail, and no "…" may claim something did.
+		const text = Array.from({ length: 12 }, (_, i) => `entry ${i + 1}: value_${i + 1}`).join("\n");
+		const p = pointerDigest(text, metaFor(text));
+		for (const probe of ["entry 9", "entry 10", "entry 11", "entry 12"]) expect(p).toContain(probe);
+		expect(p).not.toContain("\n…\n");
+		// A genuinely long result still elides, with the marker present.
+		const flood = pytestFlood();
+		expect(pointerDigest(flood, metaFor(flood))).toContain("\n…\n");
+	});
+
 	it("respects the ≤400 est-token budget even on a huge flood", () => {
 		const text = pytestFlood();
 		const p = pointerDigest(text, metaFor(text));

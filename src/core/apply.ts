@@ -51,6 +51,13 @@ function foldOne(m: AgentMessage, i: number, byId: Map<string, FoldOp>, mark: ()
 	return m; // user / other: never folded
 }
 
+/** The foldable positions' ids for one message — the exact set foldOne would look up. */
+function foldableIdsOf(m: AgentMessage, i: number): string[] {
+	if (m.role === "assistant" && Array.isArray(m.content)) return (m.content as any[]).map((_, j) => blockId(m, i, j));
+	if (m.role === "toolResult") return [blockId(m, i)];
+	return [];
+}
+
 /**
  * Apply a fold plan to the messages and return a NEW array. Every op is an in-place content
  * substitution, kind-guarded. On ANY doubt a message passes through untouched; the output is
@@ -64,7 +71,22 @@ export function applyPlan(messages: AgentMessage[], ops: FoldOp[]): AgentMessage
 	);
 	if (!safeOps.length) return messages;
 
-	const byId = new Map(safeOps.map((o) => [o.id, o] as const));
+	// Refuse any op whose id resolves to MORE than one position. Timestamp-fallback anchors can
+	// collide (two messages, no responseId, same millisecond), and an op applied by id would then
+	// rewrite every collider with one block's digest. An ambiguous id is not durably re-identifiable,
+	// so it is never folded — the blocks render raw, which is the fail-open direction.
+	const seen = new Set<string>();
+	const ambiguous = new Set<string>();
+	messages.forEach((m, i) => {
+		for (const id of foldableIdsOf(m, i)) {
+			if (seen.has(id)) ambiguous.add(id);
+			else seen.add(id);
+		}
+	});
+	const applicable = ambiguous.size ? safeOps.filter((o) => !ambiguous.has(o.id)) : safeOps;
+	if (!applicable.length) return messages;
+
+	const byId = new Map(applicable.map((o) => [o.id, o] as const));
 
 	let changed = false;
 	const mark = () => {

@@ -230,6 +230,15 @@ export class ContextFoldEngine {
 		this.detCache.clear();
 		this.frozenById = new Map();
 		this.lastLayerSeq = 0;
+		this.lastStatus = null; // stale metrics would feed the new session's advisor
+	}
+
+	/** Raise the fold-event seq floor. The compact index record claims max(index)+1, and neither
+	 *  commitLayer nor a resume's restoreLayers knows about it — without this floor the next fold
+	 *  event reuses that seq, and under the seed-index "latest record per seq wins" contract the
+	 *  shadowed record is the compaction recovery map. */
+	ensureLayerSeqAtLeast(seq: number): void {
+		if (Number.isFinite(seq) && seq > this.lastLayerSeq) this.lastLayerSeq = seq;
 	}
 
 	/** Restore committed layers on session resume (event-sourced; bytes verbatim). */
@@ -268,16 +277,17 @@ export class ContextFoldEngine {
 		// Registered blocks enter the view already folded to a pointer digest (unless the agent has
 		// unfolded them). These ops apply EVERY turn regardless of budget pressure — the whole point of
 		// the gate is that a flood never reaches full-fidelity context in the first place.
-		const gatePointers = this.computeGatePointers(blocks);
+		const held = this.heldGateIds(blocks);
+		const gatePointers = this.computeGatePointers(blocks, held);
 		const frame = normalizeContextFrame(context);
 
 		const frozenOps = this.computeFrozenOps(blocks);
 		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers, frozenOps);
-		const view = this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens);
+		const view = this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens, held);
 
 		const cmds = this.policy.conduct(view);
 
-		const ops: FoldOp[] = cmds != null && cmds.length > 0 ? this.lower(cmds, blocks, protectFrom) : [];
+		const ops: FoldOp[] = cmds != null && cmds.length > 0 ? this.lower(cmds, blocks, protectFrom, held) : [];
 
 		// Commit this fold event's substitutions as a new frozen layer.
 		if (ops.length > 0) {
@@ -353,10 +363,9 @@ export class ContextFoldEngine {
 		return held;
 	}
 
-	private computeGatePointers(blocks: WireBlock[]): Map<string, string> {
+	private computeGatePointers(blocks: WireBlock[], held: ReadonlySet<string>): Map<string, string> {
 		const out = new Map<string, string>();
 		if (!this.gateActive || this.gate.size === 0) return out;
-		const held = this.heldGateIds(blocks);
 		for (const b of blocks) {
 			const e = this.gate.get(b.id);
 			if (!e || this.unfolded.has(b.id)) continue;
@@ -373,11 +382,12 @@ export class ContextFoldEngine {
 	/** Inspection seam (tests/debug): the PolicyView this turn, incl. born-folded accounting. */
 	viewFor(messages: AgentMessage[], context: ContextFrameInput): PolicyView {
 		const blocks = linearize(messages);
-		const gatePointers = this.computeGatePointers(blocks);
+		const held = this.heldGateIds(blocks);
+		const gatePointers = this.computeGatePointers(blocks, held);
 		const frozenOps = this.computeFrozenOps(blocks);
 		const frame = normalizeContextFrame(context);
 		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers, frozenOps);
-		return this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens);
+		return this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens, held);
 	}
 
 	/**
@@ -494,18 +504,10 @@ export class ContextFoldEngine {
 		let tokens = 0;
 		let truncated = false;
 
-		const blocks = [...this.snapshot.values()].sort((a, b) => a.order - b.order);
-		// A held (deferred) block is registered but still rendered warm, so sweeping it here would
-		// hand back lines the model can already read — inflating the reply and the scanned count.
-		const held = this.heldGateIds(blocks);
-		for (const b of blocks) {
-			const gateEntry = this.gate.get(b.id);
-			const folded = (gateEntry !== undefined && this.gateActive) || this.frozenById.has(b.id);
-			if (!folded || this.unfolded.has(b.id) || held.has(b.id)) continue;
+		const sweep = (code: string, label: string, content: string): void => {
 			scanned++;
-			const code = gateEntry?.code ?? foldCode(b.id);
 			const lines: string[] = [];
-			const all = b.text.split("\n");
+			const all = content.split("\n");
 			for (let i = 0; i < all.length; i++) {
 				const idx = all[i].toLowerCase().indexOf(needle);
 				if (idx === -1) continue;
@@ -518,8 +520,38 @@ export class ContextFoldEngine {
 				}
 				lines.push(numbered);
 			}
-			if (lines.length) hits.push({ code, label: labelFor([b]), lines });
+			if (lines.length) hits.push({ code, label, lines });
+		};
+
+		const blocks = [...this.snapshot.values()].sort((a, b) => a.order - b.order);
+		// A held (deferred) block is registered but still rendered warm, so sweeping it here would
+		// hand back lines the model can already read — inflating the reply and the scanned count.
+		const held = this.heldGateIds(blocks);
+		for (const b of blocks) {
+			const gateEntry = this.gate.get(b.id);
+			const folded = (gateEntry !== undefined && this.gateActive) || this.frozenById.has(b.id);
+			if (!folded || this.unfolded.has(b.id) || held.has(b.id)) continue;
+			sweep(gateEntry?.code ?? foldCode(b.id), labelFor([b]), b.text);
 			if (truncated) break;
+		}
+
+		// Compacted-away folds: once hard compaction removes a raw message from history the block
+		// leaves the snapshot, but the det compaction summary points the agent at exactly this sweep.
+		// Serve those from the spool — the registry survives compaction for precisely this reason.
+		// Dedup aliases are skipped (their bytes are the target's), and an unreadable spool skips the
+		// entry (recalling that code surfaces the typed error).
+		if (this.gateActive && !truncated) {
+			for (const e of this.gate.entries()) {
+				if (this.snapshot.has(e.blockId) || this.unfolded.has(e.blockId) || e.dedupOf) continue;
+				let content: string;
+				try {
+					content = readEnvelopeAt(e.spoolPath).content;
+				} catch {
+					continue;
+				}
+				sweep(e.code, `${e.tool} · L0 spool (compacted out of view)`, content);
+				if (truncated) break;
+			}
 		}
 		const total = hits.reduce((n, h) => n + h.lines.length, 0);
 		const note = truncated
@@ -590,6 +622,7 @@ export class ContextFoldEngine {
 		gatePointers: Map<string, string>,
 		frozenOps: Map<string, string>,
 		reportedTokens: number | null,
+		heldGate: ReadonlySet<string> = new Set(),
 	): PolicyView {
 		let liveTokens = 0;
 		const viewBlocks: ViewBlock[] = blocks.map((b, i) => {
@@ -619,7 +652,10 @@ export class ContextFoldEngine {
 				toolName: b.toolName,
 				callId: b.callId,
 				isError: b.isError,
-				held: this.unfolded.has(b.id),
+				// Agent unfolds AND deferral-held gate blocks both render warm and must not be masked:
+				// a ladder fold of a held block would freeze it at det-digest bytes, and the deferred
+				// pointer could then never arrive (computeGatePointers skips frozen ids forever).
+				held: this.unfolded.has(b.id) || heldGate.has(b.id),
 				folded: born || frozen, // born-folded/frozen render folded from turn 1; others cleared to baseline
 				bornFolded: born,
 				frozen,
@@ -661,7 +697,7 @@ export class ContextFoldEngine {
 	 * frozen or already-emitted id is dropped. Defense in depth — the policy already enforces
 	 * these, but the wire re-checks so a bad command can never corrupt context.
 	 */
-	private lower(commands: FoldCommand[], blocks: WireBlock[], protectFrom: number): FoldOp[] {
+	private lower(commands: FoldCommand[], blocks: WireBlock[], protectFrom: number, heldGate: ReadonlySet<string> = new Set()): FoldOp[] {
 		const byId = new Map(blocks.map((b) => [b.id, b] as const));
 		const protectedAt = (id: string): boolean => {
 			const b = byId.get(id);
@@ -669,7 +705,15 @@ export class ContextFoldEngine {
 		};
 		const canFold = (id: string): boolean => {
 			const b = byId.get(id);
-			return !!b && isDurableId(id) && wireFoldable(b) && !protectedAt(id) && !this.unfolded.has(id) && !this.frozenById.has(id);
+			return (
+				!!b &&
+				isDurableId(id) &&
+				wireFoldable(b) &&
+				!protectedAt(id) &&
+				!this.unfolded.has(id) &&
+				!heldGate.has(id) &&
+				!this.frozenById.has(id)
+			);
 		};
 
 		const ops: FoldOp[] = [];

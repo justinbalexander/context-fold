@@ -173,3 +173,36 @@ describe("prior spool stays recallable with the gate off", () => {
 		expect(matches[0].text).toContain("row 0:");
 	});
 });
+
+describe("L0 search — compacted-away folds stay searchable", () => {
+	it("searchFolded serves a registered fold whose block has left the snapshot", () => {
+		// After hard compaction the raw message is gone from history (empty snapshot here), but the
+		// det compaction summary points the agent at exactly this sweep — the registry + spool must
+		// keep serving it.
+		const content = floodWith("BURIED: the compacted needle is 4242");
+		const { reg, code } = foldOne(content);
+		const engine = engineWith(reg);
+		const res = engine.searchFolded("compacted needle");
+		expect(res.scanned).toBe(1);
+		expect(res.hits).toHaveLength(1);
+		expect(res.hits[0].code).toBe(code);
+		expect(res.hits[0].lines[0]).toContain("4242");
+		expect(res.hits[0].label).toContain("compacted");
+	});
+
+	it("does not double-scan a fold still present in the snapshot", () => {
+		const content = floodWith("BURIED: the live needle is 5151");
+		const { reg } = foldOne(content);
+		const engine = engineWith(reg);
+		const messages: AgentMessage[] = [
+			user("read it"),
+			assistantWithCalls([{ id: "c1", name: "read" }]),
+			toolResult("c1", content),
+			user("tail"),
+		];
+		engine.process(messages, 400_000);
+		const res = engine.searchFolded("live needle");
+		expect(res.scanned).toBe(1);
+		expect(res.hits).toHaveLength(1);
+	});
+});

@@ -11,6 +11,8 @@
  * No Date, no Math.random, no global state — same input ⇒ byte-identical output.
  */
 
+import { safeSlice } from "../tokens";
+
 const VALUE_STOPWORDS = new Set([
 	"the", "and", "for", "this", "that", "with", "from", "true", "false", "null",
 	"const", "let", "var", "type", "return", "import", "export", "function",
@@ -55,7 +57,7 @@ export function categorize(text: string): CategorizedMarkers {
 	if (typeof text !== "string" || text.length === 0) return result;
 	const seen = new Set<string>(); // global dedup across all categories
 	const add = (bucket: string[], val: string): void => {
-		const t = val.trim().slice(0, 80);
+		const t = safeSlice(val.trim(), 80);
 		if (!t || seen.has(t) || bucket.length >= PER_BLOCK_CAP) return;
 		seen.add(t);
 		bucket.push(t);
@@ -70,7 +72,7 @@ export function categorize(text: string): CategorizedMarkers {
 		add(result.paths, m[1]);
 	}
 
-	for (const m of text.matchAll(/^\s*\$\s+(.+)/gm)) add(result.commands, m[1].slice(0, 80));
+	for (const m of text.matchAll(/^\s*\$\s+(.+)/gm)) add(result.commands, m[1]);
 	for (const m of text.matchAll(
 		/\b(?:npm|npx|pnpm|yarn|bun|node|git|docker|kubectl|make|cargo|go|python3?|pytest|deno|uv|gh)\s+\S[^\n.!?;]{0,60}/g,
 	)) {
@@ -78,7 +80,7 @@ export function categorize(text: string): CategorizedMarkers {
 	}
 
 	for (const m of text.matchAll(errorSnippetRe())) {
-		add(result.errors, m[0].slice(0, 60));
+		add(result.errors, safeSlice(m[0], 60));
 	}
 	if (/\s+at\s+\S+\s*\(/.test(text)) add(result.errors, "stack trace");
 
@@ -93,7 +95,7 @@ export function categorize(text: string): CategorizedMarkers {
 	for (const m of text.matchAll(
 		/[^.!?\n]{0,200}\b(?:decided|chose|standardized on|going with|will use|selected|picked)\b[^.!?\n]{0,200}/gi,
 	)) {
-		add(result.decisions, m[0].trim().slice(0, 80));
+		add(result.decisions, m[0].trim());
 	}
 
 	return result;
