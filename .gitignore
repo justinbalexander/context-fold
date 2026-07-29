@@ -1,5 +1,8 @@
 node_modules/
 dist/
 *.tsbuildinfo
+*.tgz
 .scratch/
 *.log
+coverage/
+.DS_Store

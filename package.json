@@ -1,28 +1,63 @@
 {
   "name": "context-fold",
   "version": "0.1.0",
-  "description": "Reversible in-session context compaction for CLI coding agents (Pi/Willow adapter).",
-  "type": "module",
-  "private": true,
+  "description": "Deterministic, reversible in-session context compaction for the Pi coding agent — folds stale tool output out of the model's view, never out of the session.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agent",
+    "context",
+    "context-window",
+    "compaction",
+    "prompt-cache"
+  ],
   "license": "MIT",
-  "scripts": {
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+  "author": "Jake Gardner",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jakegard74/context-fold.git"
   },
+  "homepage": "https://github.com/jakegard74/context-fold#readme",
+  "bugs": {
+    "url": "https://github.com/jakegard74/context-fold/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "src",
+    "docs",
+    "DESIGN.md",
+    "CHANGELOG.md"
+  ],
   "pi": {
     "extensions": [
       "./src/adapters/pi/index.ts"
     ]
   },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test"
+  },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.80 <1.0"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@types/node": "^26.0.1",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
-  },
-  "dependencies": {
-    "@types/node": "^26.0.1"
   }
 }

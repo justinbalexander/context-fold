@@ -178,8 +178,11 @@ npm test
 
 The core (`src/core/*`) has zero harness dependencies; the Pi adapter (`src/adapters/pi/*`) owns
 all I/O and hook wiring. Architecture notes are in `DESIGN.md`, the index format in
-`docs/SEED_INDEX_SPEC.md`, the Pi APIs this leans on in `docs/pi-api-surface.md`, and the record
-of what shipped and why in `CHANGELOG.md`.
+`docs/SEED_INDEX_SPEC.md`, the Pi APIs this leans on in `docs/pi-api-surface.md`, the record of
+what shipped and why in `CHANGELOG.md`, and the publish checklist in `RELEASING.md`.
+
+There is no build step: Pi loads the TypeScript source directly through jiti, so the package
+ships `src/` as-is and installs no dependencies of its own.
 
 `typebox` and the `@earendil-works/*` packages are peer dependencies that Pi injects at runtime —
 never bundle a copy.
