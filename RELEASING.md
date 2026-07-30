@@ -6,12 +6,12 @@ they are a checklist rather than a script.
 ## Before the first publish
 
 1. **Create the public repository.** `package.json` declares
-   `https://github.com/jakegard74/context-fold` in `repository`, `homepage` and `bugs`. That
+   `https://github.com/Middlewatch/context-fold` in `repository`, `homepage` and `bugs`. That
    repository does not exist yet. Either create it under that name and push this history, or change
    all three fields first — a package whose repository link 404s is worse than one with no link.
 
    ```bash
-   gh repo create jakegard74/context-fold --public --source=. --remote=origin --push
+   gh repo create Middlewatch/context-fold --public --source=. --remote=origin --push
    ```
 
 2. **Check the name is still free.** It was unclaimed when this was prepared, but names go fast.

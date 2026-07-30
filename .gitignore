@@ -6,3 +6,7 @@ dist/
 *.log
 coverage/
 .DS_Store
+.env
+.env.*
+.vscode/
+.idea/
