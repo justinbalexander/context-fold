@@ -15,7 +15,14 @@ array genuinely replaces what is sent. Confirmed in the engine, not just the doc
   `const result = await emitHook({type:"context", messages:[...messages]}); return result?.messages ?? messages;`
 - `pi-agent-core/dist/agent-loop.js` calls `transformContext` immediately before `convertToLlm`
   and the stream. It runs every assistant turn, on a copy, and never mutates persisted entries.
-- Multiple `context` handlers chain, each seeing the previous handler's output.
+- **Handlers do NOT chain** (verified in `emitHook`, identical across Pi 0.80.2/0.82.1/0.83.0,
+  contrary to an earlier revision of this document): every handler receives the *original* event,
+  and the last non-`undefined` return wins. Handler order is `Set` insertion order = extension
+  load order. Practical rule: this extension must be listed *after* any other context-rewriting
+  extension in `settings.json` `packages`, or its folds are silently discarded. The same
+  last-wins dispatch applies to every hook, including `session_before_compact` and
+  `before_agent_start`. (Upstream composition of `context` hooks — folding each handler's
+  returned messages into the next handler's event — would remove this constraint; not filed yet.)
 
 ```ts
 interface ContextEvent       { type: "context"; messages: AgentMessage[]; }
@@ -36,6 +43,7 @@ All of these fire headless.
 | Inject teaching text | `pi.on("before_agent_start", …) → { systemPrompt }` |
 | Agent-facing tool | `pi.registerTool({ name, label, description, promptSnippet, promptGuidelines, parameters: Type.Object({…}), execute })` |
 | Slash command | `pi.registerCommand(name, { description, handler })` |
+| Footer status line (TUI) | `ctx.ui.setStatus(key, text)` — keyed slot on the footer's extension-status line; `undefined` clears. No-op stub in print/json modes, forwarded as an event in RPC mode. |
 | Persist custom entry (NOT in LLM context) | `pi.appendEntry(type, data)` |
 | Read entries back | `ctx.sessionManager.getEntries()`, filtered on `entry.type === "custom" && entry.customType === …` |
 | Session paths | `ctx.sessionManager.getSessionDir()` / `.getSessionId()` |
@@ -58,7 +66,8 @@ All of these fire headless.
 
 Every hook, tool and command above fires in `pi -p --mode json`. But `ctx.hasUI === false` and
 `ctx.mode ∈ {"print","json"}`, so **guard every `ctx.ui.*` call** — this extension only ever
-touches `ctx.ui` through optional chaining, in the display-only status command. `ctx.shutdown()`
+touches `ctx.ui` through optional chaining, in the display-only status command and the footer
+status updater (both inert headless). `ctx.shutdown()`
 is a no-op in print mode. Compaction still auto-fires on threshold and overflow headless, so
 `session_before_compact` is reachable without an interactive `/compact`.
 

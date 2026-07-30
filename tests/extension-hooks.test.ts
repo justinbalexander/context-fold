@@ -66,8 +66,10 @@ afterEach(() => {
 /** A ctx shaped like Pi's, backed by a real on-disk session dir. */
 function ctxFor(opts: { sessionId?: string; entries?: unknown[]; usage?: { contextWindow: number; tokens: number | null } | null } = {}) {
 	const notices: string[] = [];
+	const statuses: Record<string, string | undefined> = {};
 	return {
 		notices,
+		statuses,
 		ctx: {
 			model: { id: "test-model", provider: "test" },
 			sessionManager: {
@@ -76,7 +78,12 @@ function ctxFor(opts: { sessionId?: string; entries?: unknown[]; usage?: { conte
 				getEntries: () => opts.entries ?? [],
 			},
 			getContextUsage: () => opts.usage ?? { contextWindow: 200_000, tokens: null },
-			ui: { notify: (m: string) => notices.push(m) },
+			ui: {
+				notify: (m: string) => notices.push(m),
+				setStatus: (key: string, text: string | undefined) => {
+					statuses[key] = text;
+				},
+			},
 		},
 	};
 }
@@ -332,5 +339,93 @@ describe.skipIf(!PI_PRESENT)("message_end hook and the status command", () => {
 		await s.commands.get("context-fold")!.handler("", ctx);
 
 		expect(notices.join("\n")).toContain("no usage yet");
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("footer status line", () => {
+	it("shows idle at session start and a fold summary after a fold event", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		const s = await load();
+		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+
+		await s.hooks.get("session_start")!({}, ctx);
+		expect(statuses["context-fold"]).toContain("idle");
+
+		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
+		expect(statuses["context-fold"]).toContain("×1");
+		expect(statuses["context-fold"]).toContain("tok masked");
+	});
+
+	it("survives a ctx whose ui has no setStatus (headless stubs, older hosts)", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		const s = await load();
+		const bare = ctxFor({ usage: { contextWindow: 80_000, tokens: null } }).ctx as { ui?: unknown };
+		bare.ui = undefined;
+
+		await expect(Promise.resolve(s.hooks.get("context")!({ messages: heavySession() }, bare))).resolves.toBeTruthy();
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("wire watchdog (folds that never reach the provider)", () => {
+	/** Turn usage where the next turn reads the whole pre-fold prompt back from cache. */
+	async function foldThenDeferredTurn(s: Awaited<ReturnType<typeof load>>, ctx: unknown) {
+		await s.hooks.get("message_end")!(
+			{ message: { role: "assistant", usage: { input: 10_000, cacheRead: 30_000, cacheWrite: 0, output: 50 } } },
+			ctx,
+		);
+		await s.hooks.get("context")!({ messages: heavySession() }, ctx); // fold event fires here
+		await s.hooks.get("message_end")!(
+			{ message: { role: "assistant", usage: { input: 5_000, cacheRead: 41_000, cacheWrite: 0, output: 50 } } },
+			ctx,
+		);
+	}
+
+	it("warns on stderr once per session and raises the status flag", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		const s = await load();
+		const { ctx, notices } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+
+		const writes: string[] = [];
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await foldThenDeferredTurn(s, ctx);
+			// A second deferred turn must not warn again.
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 5_000, cacheRead: 46_000, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+
+		const warnings = writes.filter((w) => w.includes("not observed on the wire"));
+		expect(warnings.length).toBe(1);
+
+		await s.commands.get("context-fold")!.handler("", ctx);
+		expect(notices.join("\n")).toContain("not observed on the wire");
+	});
+
+	it("a fold whose next turn shows the prefix rewrite stays quiet", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		const s = await load();
+		const { ctx, notices } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+
+		await s.hooks.get("message_end")!(
+			{ message: { role: "assistant", usage: { input: 10_000, cacheRead: 30_000, cacheWrite: 0, output: 50 } } },
+			ctx,
+		);
+		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
+		// Cache read collapses below the pre-fold prompt: the rewrite reached the wire.
+		await s.hooks.get("message_end")!(
+			{ message: { role: "assistant", usage: { input: 3_000, cacheRead: 12_000, cacheWrite: 25_000, output: 50 } } },
+			ctx,
+		);
+
+		await s.commands.get("context-fold")!.handler("", ctx);
+		expect(notices.join("\n")).not.toContain("not observed on the wire");
 	});
 });

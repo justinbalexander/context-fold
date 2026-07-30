@@ -173,3 +173,59 @@ describe("CacheTelemetry", () => {
 		expect(t.foldCostLine()).toBeNull();
 	});
 });
+
+describe("wire watchdog", () => {
+	it("flags a fold whose next turn read the whole pre-fold prompt from cache", () => {
+		const t = new CacheTelemetry();
+		// Turn N: prompt was 100k (90k cached + 10k fresh).
+		t.record({ input: 10_000, output: 100, cacheRead: 90_000, cacheWrite: 10_000, totalTokens: 100_100 });
+		t.noteFoldEvent(40_000);
+		// Turn N+1 reads ≥ the full pre-fold prompt — impossible if the prefix changed on the wire.
+		t.record({ input: 5_000, output: 100, cacheRead: 100_000, cacheWrite: 5_000, totalTokens: 105_100 });
+		expect(t.snapshot().wireDeferredFolds).toBe(1);
+	});
+
+	it("a fold that landed (cache read drops below the fold point) is clean", () => {
+		const t = new CacheTelemetry();
+		t.record({ input: 10_000, output: 100, cacheRead: 90_000, cacheWrite: 10_000, totalTokens: 100_100 });
+		t.noteFoldEvent(40_000);
+		// Rewrite reached the wire: only the prefix before the earliest masked block is still cached.
+		t.record({ input: 2_000, output: 100, cacheRead: 55_000, cacheWrite: 7_000, totalTokens: 64_100 });
+		expect(t.snapshot().wireDeferredFolds).toBe(0);
+	});
+
+	it("never false-positives on a provider that reports no cache reads at all", () => {
+		const t = new CacheTelemetry();
+		t.record({ input: 100_000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 100_100 });
+		t.noteFoldEvent(40_000);
+		t.record({ input: 65_000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 65_100 });
+		expect(t.snapshot().wireDeferredFolds).toBe(0);
+	});
+
+	it("judges only the first turn after the fold, and disarms after judging", () => {
+		const t = new CacheTelemetry();
+		t.record({ input: 10_000, output: 100, cacheRead: 90_000, cacheWrite: 10_000, totalTokens: 100_100 });
+		t.noteFoldEvent(40_000);
+		t.record({ input: 2_000, output: 100, cacheRead: 55_000, cacheWrite: 7_000, totalTokens: 64_100 });
+		// Later warm turns re-reading the (new, folded) full prompt must not retro-flag the fold.
+		t.record({ input: 1_000, output: 100, cacheRead: 120_000, cacheWrite: 0, totalTokens: 121_100 });
+		expect(t.snapshot().wireDeferredFolds).toBe(0);
+	});
+
+	it("a first-turn fold (no prior usage to baseline against) never arms", () => {
+		const t = new CacheTelemetry();
+		t.noteFoldEvent(40_000);
+		t.record({ input: 60_000, output: 100, cacheRead: 0, cacheWrite: 60_000, totalTokens: 120_100 });
+		expect(t.snapshot().wireDeferredFolds).toBe(0);
+	});
+
+	it("reset clears the watchdog", () => {
+		const t = new CacheTelemetry();
+		t.record({ input: 10_000, output: 100, cacheRead: 90_000, cacheWrite: 0, totalTokens: 100_100 });
+		t.noteFoldEvent(40_000);
+		t.record({ input: 5_000, output: 100, cacheRead: 100_000, cacheWrite: 0, totalTokens: 105_100 });
+		expect(t.snapshot().wireDeferredFolds).toBe(1);
+		t.reset();
+		expect(t.snapshot().wireDeferredFolds).toBe(0);
+	});
+});

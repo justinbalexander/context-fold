@@ -11,46 +11,29 @@ non-`undefined` return wins, so two extensions rewriting the same hook are mutua
 by load order. Evidence: `~/memory/inbox/2026-07-30_033517_willow_context-fold-delayed-by-codex-
 websocket-continuation.md` and `…_035434_willow_pi-context-hook-handlers-do-not-chain.md`.
 
-## 1. Runtime watchdog: detect folds that never reach the wire (highest value)
+Done 2026-07-30 (see git history for the full original text of each item):
 
-The one defense that covers every downstream discard mechanism — hook clobbering, transport
-deferral, future Pi changes — because it measures the outcome instead of guessing at causes.
-We already have the ingredients: `CacheTelemetry` records per-turn `cacheRead`/`input`, and the
-engine knows when a layer committed. If a fold event committed on turn N and turn N+1 reports
-`cacheRead` at or above turn N's total input, the prefix was provably not rewritten on the wire.
-Emit one stderr warning + a `/context-fold` status flag ("folds committed but not observed on the
-wire — another extension or the transport is bypassing them"). Debounce: warn once per session.
+1. **Runtime wire watchdog** — `CacheTelemetry` arms a baseline at each masking fold and flags
+   the fold if the next turn's `cacheRead` reads the whole pre-fold prompt back; once-per-session
+   stderr warning, `/context-fold` flag, footer warning. Tests in `cache-telemetry.test.ts`,
+   `advisor.test.ts`, `extension-hooks.test.ts`.
+2. **README "Known integrations" section** — codex continuation deferral, last-wins load-order
+   rule, double-load failure mode.
+3. **e2e wire assertion** — `e2e-ladder.sh` check (e) parses the session JSONL and asserts the
+   first layer commit is followed by a shrunken provider-reported prompt.
+4. **`docs/pi-api-surface.md` corrected** — chaining claim replaced with the real last-wins
+   contract and the load-last rule.
 
-## 2. README "known integrations" section (ships the truth to users)
+## 5. pi-codex-conversion: evaluate and extract, not fix upstream (owner ruling 2026-07-30)
 
-The package is published; anyone running it beside pi-codex-conversion gets silently deferred
-folds. Document: (a) the codex continuation deferral and its user-turn-boundary behavior,
-(b) Pi's last-wins hook semantics and the load-order consequence (context-fold should be listed
-*after* any other context-rewriting extension in `settings.json` `packages`), (c) the
-double-load failure mode (`pi install` + `-e` → recall/unfold tool-name conflict).
-
-## 3. e2e: assert the wire, not just the dump
-
-`e2e-ladder.sh` check (c) reads `CONTEXTFOLD_DUMP` — the extension's own output — which is why
-this was invisible. Add a check that parses the session JSONL after the run and asserts the
-first fold event is followed by a turn whose `cacheRead` drops and whose total input shrinks.
-That is the assertion the probe had to do by hand.
-
-## 4. Correct `docs/pi-api-surface.md`
-
-The "multiple context handlers chain" claim was never true in any inspected Pi version. Replace
-with the real contract (same event to every handler, last non-`undefined` result wins, Set
-insertion order = load order) and the practical rule: this extension must load last among
-context rewriters until upstream composes hooks.
-
-## 5. Upstream issues (owner decision on tone/venue before filing)
-
-- **Pi (`pi-agent-core`)**: propose composing `context` hooks — fold each handler's returned
-  messages into the next handler's event, matching what `emitBeforeProviderRequest` already
-  does for stream options. Cite the doc/behavior mismatch.
-- **pi-codex-conversion**: report the deferral with the probe evidence; propose a fold-aware
-  continuation (full resend when the prefix changed, rather than pending-tool-output delta),
-  or an opt-out.
+Direction change: rather than filing for a fold-aware continuation, functionally evaluate what
+pi-codex-conversion actually earns its place with, and pull only the features that prove out
+into an owned extension. Skepticism is the prior: the package's headline optimization (cached
+WebSocket continuation) is precisely what deferred our folds, and its other hooks collide with
+ours (see item 6). Sketch: A/B the same real workload with and without it (the wire watchdog
+now makes deferral visible, so reinstalling for testing is safe), measure per-feature value
+(latency, tokens, behavior), then extract keepers. Upstream filing for Pi's non-composing
+`context` hooks remains worth doing eventually, but is not the path for the codex conflict.
 
 ## 6. Hook-collision audit (done 2026-07-30 — keep current as extensions are added)
 
@@ -72,5 +55,6 @@ needed beyond the README note.
 
 ## Local (willow, not repo work)
 
-- Decide whether to reinstall `pi-codex-conversion` for daily codex sessions (its adapter
-  features vs. deferred folding) once items 1–2 land or upstream moves.
+- Run the item-5 evaluation: reinstall `pi-codex-conversion` beside context-fold 0.2.0 (the
+  watchdog will surface any deferral), A/B a real workload, and record per-feature findings
+  before extracting anything.

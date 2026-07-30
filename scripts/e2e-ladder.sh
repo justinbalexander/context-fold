@@ -6,7 +6,8 @@
 #   (b) the seed index is emitted: seed-index.jsonl exists in the session spool dir, parses,
 #       and carries the planted mid-output identifier + a span whose spool file is readable;
 #   (c) the folded head is byte-identical after another turn (prefix-stable layers);
-#   (d) recall works from the masked pointer (agent answers a buried-line question).
+#   (d) recall works from the masked pointer (agent answers a buried-line question);
+#   (e) the fold is visible in provider-reported usage — the wire, not just our own dump.
 #
 # The pressure comes from CONTEXTFOLD_BUDGET_CAP (the cap trigger) so the check is independent
 # of the live model's real context-window size. The L0 gate is disabled to isolate the ladder.
@@ -139,6 +140,50 @@ if grep -q "73114" "$WORK/stdout2.json"; then
   echo "PASS (d) agent recovered the buried value from the masked pointer"
 else
   echo "FAIL (d) buried value not recovered"; fail=1
+fi
+
+# (e) the fold reached the WIRE, not just the dump: in the session JSONL, the provider-reported
+# prompt (input + cacheRead) of the first assistant turn after the first layer commit must be
+# smaller than the last one before it. Checks (a)-(c) read CONTEXTFOLD_DUMP — the extension's own
+# output — which is exactly why a transport deferring the rewrite (the 2026-07-30
+# pi-codex-conversion continuation finding) was invisible to them. This is the assertion the
+# probe had to make by hand.
+if ! python3 - "$SESSIONS" <<'PY'
+import json, sys
+from pathlib import Path
+
+events = []  # ("usage", promptTokens, cacheRead) | ("layer",)
+for f in sorted(Path(sys.argv[1]).glob("*.jsonl")):
+    for line in f.open():
+        if not line.strip():
+            continue
+        e = json.loads(line)
+        if e.get("type") == "custom" and e.get("customType") == "contextfold.fold":
+            if isinstance(e.get("data"), dict) and e["data"].get("kind") == "layer":
+                events.append(("layer", 0, 0))
+        elif e.get("type") == "message":
+            m = e.get("message") or {}
+            u = m.get("usage") or {}
+            if m.get("role") == "assistant" and u:
+                cr = u.get("cacheRead") or 0
+                events.append(("usage", (u.get("input") or 0) + cr, cr))
+
+try:
+    first_layer = next(i for i, ev in enumerate(events) if ev[0] == "layer")
+    before = next(ev for ev in reversed(events[:first_layer]) if ev[0] == "usage")
+    after = next(ev for ev in events[first_layer + 1:] if ev[0] == "usage")
+except StopIteration:
+    print("FAIL (e) session JSONL lacks a layer entry with assistant usage on both sides")
+    sys.exit(3)
+
+if after[1] < before[1]:
+    print(f"PASS (e) fold observed on the wire: prompt {before[1]} -> {after[1]} tok (cacheRead {before[2]} -> {after[2]})")
+    sys.exit(0)
+print(f"FAIL (e) fold NOT observed on the wire: prompt {before[1]} -> {after[1]} tok (cacheRead {before[2]} -> {after[2]}) — the transport or another extension is deferring the rewrite")
+sys.exit(3)
+PY
+then
+  fail=1
 fi
 
 if [[ $fail -eq 0 ]]; then echo "== e2e-ladder: ALL PASS =="; exit 0; else echo "== e2e-ladder: FAIL =="; exit 1; fi

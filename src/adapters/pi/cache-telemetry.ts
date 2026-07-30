@@ -50,6 +50,15 @@ export interface CacheTelemetrySnapshot {
 	 * cost would be a guess wearing a number's clothes.
 	 */
 	foldNetTokens: number | null;
+	/**
+	 * Fold events whose rewrite provably never reached the provider: the next turn read the whole
+	 * pre-fold prompt back from cache, which is impossible if the prefix actually changed on the
+	 * wire. Non-zero means something downstream — another extension's last-wins hook, or a
+	 * transport-level continuation such as pi-codex-conversion's — is discarding or deferring the
+	 * folded view. Detection measures the outcome, so it covers discard mechanisms that don't
+	 * exist yet.
+	 */
+	wireDeferredFolds: number;
 }
 
 const RING_LIMIT = 50;
@@ -60,7 +69,7 @@ function ratio(cacheRead: number, input: number): number | null {
 }
 
 /** Compact token count for status lines: 1234 → `1.2k`, negatives keep their sign. */
-function k(n: number): string {
+export function k(n: number): string {
 	return Math.abs(n) >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
@@ -77,6 +86,9 @@ export class CacheTelemetry {
 	 *  raises the per-turn rate without erasing what earlier folds already earned. */
 	private foldAccruedSavedTokens = 0;
 	private pendingFold = false;
+	/** Wire watchdog: the last pre-fold prompt size (cacheRead+input), armed by a masking fold. */
+	private pendingWireBaseline: number | null = null;
+	private wireDeferredFolds = 0;
 
 	/**
 	 * A fold event committed. The *next* recorded turn is the first request carrying the new bytes,
@@ -90,6 +102,14 @@ export class CacheTelemetry {
 		this.foldEvents += 1;
 		if (Number.isFinite(savedTokens) && savedTokens > 0) this.foldSavedTokens += savedTokens;
 		this.pendingFold = true;
+		// Arm the wire watchdog. A fold that masked tokens strictly shrinks the prompt somewhere
+		// BEFORE its end, so the next turn can never read the full pre-fold prompt from cache —
+		// observing cacheRead ≥ that size proves the rewrite was dropped or deferred downstream.
+		// Only armed when the fold masked something and a prior turn gives a non-zero baseline
+		// (a no-cache provider reports cacheRead 0 and can never false-positive against > 0).
+		const last = this.ring.length ? this.ring[this.ring.length - 1] : null;
+		const promptSize = last ? last.cacheRead + last.input : 0;
+		if (Number.isFinite(savedTokens) && savedTokens > 0 && promptSize > 0) this.pendingWireBaseline = promptSize;
 	}
 
 	/** Record one finalized assistant message's usage. Non-finite fields count as 0. */
@@ -116,6 +136,10 @@ export class CacheTelemetry {
 		} else if (this.foldEvents > 0) {
 			this.foldAccruedSavedTokens += this.foldSavedTokens;
 		}
+		if (this.pendingWireBaseline !== null) {
+			if (turn.cacheRead >= this.pendingWireBaseline) this.wireDeferredFolds += 1;
+			this.pendingWireBaseline = null;
+		}
 	}
 
 	reset(): void {
@@ -127,6 +151,8 @@ export class CacheTelemetry {
 		this.foldReprefillTokens = 0;
 		this.foldAccruedSavedTokens = 0;
 		this.pendingFold = false;
+		this.pendingWireBaseline = null;
+		this.wireDeferredFolds = 0;
 	}
 
 	snapshot(): CacheTelemetrySnapshot {
@@ -147,6 +173,7 @@ export class CacheTelemetry {
 				this.foldEvents > 0 && this.totals.cacheWrite > 0
 					? this.foldAccruedSavedTokens - this.foldReprefillTokens
 					: null,
+			wireDeferredFolds: this.wireDeferredFolds,
 		};
 	}
 

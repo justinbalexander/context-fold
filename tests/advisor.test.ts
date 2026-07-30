@@ -18,6 +18,7 @@ const base: AdvisorInput = {
 	recallCalls: 2,
 	maxRecallsPerCode: 1,
 	compactions: 0,
+	wireDeferredFolds: 0,
 };
 
 describe("cold detection", () => {
@@ -71,6 +72,11 @@ describe("yellow flags", () => {
 	it("recall churn by volume or by repeated code", () => {
 		expect(advise({ ...base, recallCalls: 12 }).flags.some((f) => f.includes("churn"))).toBe(true);
 		expect(advise({ ...base, maxRecallsPerCode: 4 }).flags.some((f) => f.includes("churn"))).toBe(true);
+	});
+
+	it("folds not observed on the wire → first flag, ahead of everything else", () => {
+		const a = advise({ ...base, wireDeferredFolds: 2, compactions: 2 });
+		expect(a.flags[0]).toContain("not observed on the wire");
 	});
 });
 
