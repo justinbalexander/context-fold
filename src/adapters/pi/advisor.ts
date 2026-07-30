@@ -33,6 +33,8 @@ export interface AdvisorInput {
 	maxRecallsPerCode: number;
 	/** Hard compaction events observed this session. */
 	compactions: number;
+	/** Fold events whose rewrite provably never reached the provider (see CacheTelemetry). */
+	wireDeferredFolds: number;
 }
 
 export interface Advisory {
@@ -64,6 +66,11 @@ export function advise(i: AdvisorInput): Advisory {
 			: null;
 
 	const flags: string[] = [];
+	if (i.wireDeferredFolds > 0) {
+		flags.push(
+			`${i.wireDeferredFolds} fold${i.wireDeferredFolds === 1 ? "" : "s"} committed but not observed on the wire — another extension or the transport is bypassing them (with pi-codex-conversion, folds land only at the next user turn)`,
+		);
+	}
 	if (i.compactions >= 2) {
 		flags.push(`second forced compaction this session — strongly recommend a fresh session (reconstruction ≈ ${k(i.reconTokens)} tok via the seed index)`);
 	}

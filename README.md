@@ -141,8 +141,12 @@ price-agnostic input-token equivalents (fee *ratios* are near-constant across ve
 - **Cold detection** — an expected-warm turn that read zero cached tokens gets one stderr notice
   with the re-billed size and a `/new` suggestion.
 - **`/context-fold` status** — fold position (usage %, next fold threshold), cache hit ratios, and
-  flags: a second forced compaction, irreducible context past half the window, cold with a large
-  carry, and recall churn. Advisory only; nothing blocks.
+  flags: folds committed but not observed on the wire, a second forced compaction, irreducible
+  context past half the window, cold with a large carry, and recall churn. Advisory only; nothing
+  blocks.
+- **Footer status line (TUI)** — a persistent one-line summary in Pi's footer (`⧉ context-fold ×3
+  · ~41k tok masked · ctx 72% · cache 66%`), updated as fold events fire. Purely visual: nothing
+  is added to the transcript or the model's context, and headless modes are unaffected.
 - **Fold cost accounting** — once a fold event has fired, the status reports *both* sides: tokens
   masked per turn against tokens the provider re-prefilled because the fold moved the prefix, plus
   the running net. A fold rewrites history from the earliest masked block forward, so that
@@ -188,6 +192,34 @@ price-agnostic input-token equivalents (fee *ratios* are near-constant across ve
   in practice (the teaching text explains the contract), but if you see an agent confused by a
   `{#code FOLDED}` marker, `CONTEXTFOLD=0` turns everything off for a session.
 - **This is a 0.1.0.** The on-disk formats are versioned but not yet frozen.
+
+## Known integrations
+
+Findings from running context-fold beside other Pi extensions. The common theme: a fold can be
+committed and correct locally yet still be discarded or deferred downstream, which is why the
+extension now watches provider usage for exactly that (see the wire watchdog note below).
+
+- **`@howaboua/pi-codex-conversion` defers folds to user-turn boundaries.** Its cached WebSocket
+  continuation answers a mid-chain prefix change by sending only the pending tool output as a
+  delta against the server-held previous response, so a fold's rewrite of older history stays
+  local for the rest of that tool chain. At the next user message there is no pending tool
+  output, the changed prefix forces a full resend, and provider-reported input drops all at once.
+  Folding still works — recall, the spool, and compaction are unaffected — but a long autonomous
+  tool chain can approach the provider's context limit before any fold takes effect on the wire.
+- **Pi `context` hooks do not chain: load order decides.** Every handler receives the original
+  event and the last non-`undefined` return wins (verified in Pi 0.80–0.83). Two extensions
+  rewriting `context` are mutually destructive: list context-fold *after* any other
+  context-rewriting extension in `settings.json` `packages` so its folds are the surviving
+  rewrite. The same last-wins rule applies to `session_before_compact` and `before_agent_start`.
+- **Do not load the package twice.** `pi install npm:context-fold` plus a `-e npm:context-fold`
+  flag registers `recall`/`unfold` twice and fails loudly at load with a tool-name conflict.
+  Installed or `-e`, pick one.
+
+**The wire watchdog.** Because every one of these failure modes is invisible in the extension's
+own output, the telemetry checks the outcome instead: a fold that masked tokens strictly shrinks
+the outgoing prompt, so if the next turn's provider usage reads the whole pre-fold prompt back
+from cache, the rewrite provably never reached the wire. When that happens the extension warns
+once per session on stderr and raises a flag in `/context-fold` and the footer status line.
 
 ## Install
 

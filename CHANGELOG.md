@@ -3,6 +3,27 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
+## Unreleased
+
+- **Wire watchdog.** A fold that masked tokens strictly shrinks the outgoing prompt, so if the
+  next turn's provider usage reads the whole pre-fold prompt back from cache, the rewrite provably
+  never reached the provider. The telemetry now detects this (once-per-session stderr warning, a
+  `/context-fold` flag, a footer warning) — it measures the outcome, so it covers hook clobbering,
+  transport-level deferral, and discard mechanisms that don't exist yet. Motivated by the
+  2026-07-30 finding that `@howaboua/pi-codex-conversion`'s cached WebSocket continuation defers
+  fold rewrites to the next user-turn boundary.
+- **Persistent footer status (TUI).** One keyed line in Pi's footer (`ctx.ui.setStatus`) with fold
+  count, tokens masked, context usage, and cache hit ratio — a live fold notification with zero
+  transcript pollution. Headless modes are untouched (Pi stubs `setStatus` to a no-op there).
+- **e2e check (e): assert the wire, not just the dump.** `e2e-ladder.sh` now parses the session
+  JSONL and requires the first layer commit to be followed by a smaller provider-reported prompt.
+  The previous checks read `CONTEXTFOLD_DUMP` — the extension's own output — which is exactly why
+  the deferral above was invisible to them.
+- **Docs: known integrations + corrected hook contract.** README gained a "Known integrations"
+  section (codex deferral, load-order rule, double-load failure); `docs/pi-api-surface.md` no
+  longer claims `context` handlers chain — Pi dispatch is last-non-`undefined`-wins in load order,
+  so context-fold must be listed after any other context rewriter.
+
 ## 0.1.0
 
 First public release. context-fold was developed privately before this point, so this entry

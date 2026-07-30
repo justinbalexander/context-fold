@@ -27,7 +27,7 @@ import { Gate, gateConfigFromEnv, gateModelIdentity } from "./gate";
 import { SpoolStore } from "./spool";
 import { recordGateFold, recordLayer, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
 import { spoolRetainMsFromEnv, sweepSpools } from "./retention";
-import { CacheTelemetry } from "./cache-telemetry";
+import { CacheTelemetry, k } from "./cache-telemetry";
 import { advise } from "./advisor";
 
 // ≤6 lines. Teaches the L0 pointer contract; positive framing (says when to reach for recall).
@@ -67,6 +67,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 	let compactions = 0;
 	let lastContextWindow: number | null = null;
 	let wasCold = false;
+	let warnedWireDeferral = false;
 	const buildAdvisory = () => {
 		const t = telemetry.snapshot();
 		const m = engine.status?.metrics ?? {};
@@ -87,7 +88,25 @@ export default function contextFold(pi: ExtensionAPI): void {
 			recallCalls: engine.recallStats.calls,
 			maxRecallsPerCode: engine.recallStats.maxPerCode,
 			compactions,
+			wireDeferredFolds: t.wireDeferredFolds,
 		});
+	};
+
+	// Persistent footer status: one keyed line in Pi's footer (TUI renders it below the stats
+	// line; headless modes stub setStatus to a no-op). Updated per turn rather than flashed per
+	// event — the numbers ticking up ARE the fold notification, with no transcript pollution.
+	const updateFooter = (hctx: { ui?: { setStatus?: (key: string, text: string | undefined) => void } }) => {
+		const setStatus = hctx.ui?.setStatus?.bind(hctx.ui);
+		if (!setStatus) return;
+		const s = telemetry.snapshot();
+		const m = engine.status?.metrics ?? {};
+		const parts = [
+			s.foldEvents === 0 ? "⧉ context-fold idle" : `⧉ context-fold ×${s.foldEvents} · ~${k(s.foldSavedTokens)} tok masked`,
+		];
+		if (typeof m.usage_fraction === "number") parts.push(`ctx ${Math.round(m.usage_fraction * 100)}%`);
+		if (s.hitRatio !== null) parts.push(`cache ${Math.round(s.hitRatio * 100)}%`);
+		if (s.wireDeferredFolds > 0) parts.push("⚠ folds not on wire");
+		setStatus("context-fold", parts.join(" · "));
 	};
 
 	let spool: SpoolStore | null = null;
@@ -155,7 +174,9 @@ export default function contextFold(pi: ExtensionAPI): void {
 			compactions = 0;
 			wasCold = false;
 			lastContextWindow = null;
+			warnedWireDeferral = false;
 		}
+		updateFooter(ctx);
 
 		// Seq continuity across resume: a compact index record claims max(index)+1, and restoring
 		// layers alone would floor the engine below it — the next fold event would then reuse that
@@ -234,10 +255,19 @@ export default function contextFold(pi: ExtensionAPI): void {
 	// OBSERVE-ONLY cache telemetry: every finalized assistant message carries real provider
 	// usage (cacheRead/cacheWrite). The per-turn hit ratio is the measured signal for whether
 	// folding kept the prefix warm — it collapses on the turn after a head-rewriting fold.
-	pi.on("message_end", (event) => {
+	pi.on("message_end", (event, ctx) => {
 		const message = event.message as { role?: string; usage?: Record<string, number> };
 		if (message.role !== "assistant" || !message.usage) return;
 		telemetry.record(message.usage);
+		updateFooter(ctx);
+		// Wire watchdog: a fold committed, yet this turn read the whole pre-fold prompt back from
+		// cache — the rewrite never reached the provider. Once per session, not per turn.
+		if (!warnedWireDeferral && telemetry.snapshot().wireDeferredFolds > 0) {
+			warnedWireDeferral = true;
+			process.stderr.write(
+				"[context-fold] fold committed but not observed on the wire — another extension or the transport is bypassing it (pi-codex-conversion's continuation defers folds to the next user turn)\n",
+			);
+		}
 		if (debug) {
 			// The fold-cost half belongs on stderr too, not only in the interactive status command:
 			// headless `-p` runs are where fold cost actually gets measured, and there is no command
@@ -311,6 +341,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			});
 			// The cast is the documented harness seam (core/block.ts): the core's structural AgentMessage
 			// models exactly the fields the bridge reads, and Pi's real AgentMessage satisfies it.
+			updateFooter(ctx); // reflect a fold committed this turn (and the fresh usage fraction)
 			if (dumpPath) {
 				// e2e seam: dump the outgoing view so the harness can assert the pointer replaced the payload.
 				try {
