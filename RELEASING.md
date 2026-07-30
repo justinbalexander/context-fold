@@ -81,22 +81,14 @@ Override the provider and model with `E2E_PROVIDER` / `E2E_MODEL`. These scripts
 against a model with reliable tool use; a weaker model can fail a check for its own reasons rather
 than the extension's, so read a failure before believing it.
 
-### Open before the first publish: e2e-ladder check (c)
-
-`e2e-ladder.sh` was last run against a local model rather than the provider it was written for.
-Checks (a) fold event, (b) seed index, and (d) buried-value recall passed. Check (c) — the folded
-head is byte-identical on the next turn — reported `shared=0`, which is the script saying it found
-**no folded block present in both turns to compare**, not that any bytes moved.
-
-The likely cause is the agent choosing `unfold` over `recall` in turn 2, which deliberately renders
-that block raw and correctly removes it from turn 2's folded set. The underlying property is
-asserted deterministically in `tests/frozen-layers.test.ts` ("layers survive record → restore
-byte-exactly"), which folds in one engine, records the ledger, restores into a fresh engine, and
-requires the rendered bytes to match — and it passes.
-
-Re-run `e2e-ladder.sh` against a strong tool-using model before publishing. If (c) fails again,
-compare the two `CONTEXTFOLD_DUMP` views directly and check whether the agent called `unfold`
-before concluding the head is unstable.
+The full ladder, including check (c), passes against `openai-codex/gpt-5.6-sol` (last run
+2026-07-29, all four checks green). One known way (c) can fail spuriously: an earlier run against
+a local model reported `shared=0`, which is the script finding **no folded block present in both
+turns to compare**, not bytes moving — it happens when the agent chooses `unfold` over `recall` in
+turn 2, deliberately rendering the block raw and removing it from turn 2's folded set. If (c)
+fails that way, compare the two `CONTEXTFOLD_DUMP` views directly and check whether the agent
+called `unfold` before concluding the head is unstable. The underlying byte-stability property is
+also asserted deterministically in `tests/frozen-layers.test.ts`.
 
 ## Versioning
 
