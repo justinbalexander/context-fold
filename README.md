@@ -1,11 +1,12 @@
 # context-fold
+Note: I will be slowly cleaning up my documentation as I come across things I don't like; consider it half LLM written and half cleaned up and properly edited.
 
 Deterministic, reversible context compaction for the [Pi coding agent](https://github.com/earendil-works/pi).
-Long agentic sessions stay under budget by folding stale content out of the model's view — never
-out of the session. Every fold is reversible, every fold is indexed, and no model is ever called
-to do it.
+Long agentic sessions stay under budget by folding stale content (long chains of tool calls) out of the model's view. 
+Every fold is reversible, indexed, and done deterministically. The core product is intended to be harness agnostic
+and can be adapted to other coding harnesses with some work.
 
-**Requirements:** Node ≥ 22.19.0 and Pi ≥ 0.80. No build step and no runtime dependencies.
+**Requirements:** Node ≥ 22.19.0 and Pi ≥ 0.80.
 
 ```bash
 pi install npm:context-fold
@@ -13,14 +14,10 @@ pi install npm:context-fold
 
 ## The idea
 
-When a session runs long, something has to leave the model's context. The usual answer is to have
-an LLM summarize the old part. That trades a token problem for an accuracy problem: the summary is
-a paraphrase, and the details it drops are disproportionately the ones you needed.
-
-context-fold takes the other route. Stale tool output is replaced with a short, deterministic
-pointer, and the full text stays on disk. Nothing is rewritten, nothing is invented, and the agent
-can pull any of it back on demand with `recall`. The context gets smaller; the session does not
-get lossier.
+In short context management is annoying and I know plenty of people who are too lazy to summarize and handoff to new
+sessions and they let context grow unmanaged right up until they smash the /compact command at some point. This system was
+derived via iterative research over various compacting methodologies and represents an attempt at economically optimizing
+context over long sessions and eating as few cache read hits as possible until you decide to end the session or the work is complete. 
 
 ## Why deterministic
 
@@ -45,36 +42,37 @@ For precise recall, retrieval over raw stored history beats an in-context summar
 But grep only finds what lexically matches ([NoLiMa](https://arxiv.org/abs/2502.05167)) — which is
 why every fold emits a deterministic index of exact tokens rather than a paraphrase.
 
-## How the stages fit together
+## the system in short
 
-Compaction happens in stages, and it matters which one you are in. In the shipped default, none of
-them calls a model.
-
-**1. Ingestion — the L0 gate.** *(opt-in, `CONTEXTFOLD_L0`)* The moment a tool result lands, if it
+**1. Ingestion: the L0 gate.** *(opt-in, `CONTEXTFOLD_L0`)* The moment a tool result lands, if it
 is over ~2000 estimated tokens it is spooled to disk and enters the model's view already folded to
-a pointer. This is the only stage that can act on a result before the model ever reads it.
+a pointer. This is the only stage that can act on a result before the model ever reads it. (Note: this 
+is off by default until I can do more testing on what proper thresholds are for cutoff as of right now
+the results are mixed on how useful it actually is)
 
-**2. Per-turn — the fold ladder.** *(always on)* Once usage crosses ~45 % of the context window,
+**2. Per-turn: the fold ladder.** *(always on)* Once usage crosses ~45 % of the context window,
 a fold event masks stale `tool_result` and `thinking` blocks. User intent, assistant conclusions,
-and the record of every action are never touched.
+and the record of every action are never touched. (Note: this threshold is also a moving target and may
+be adjusted if I am able to determine a sane default that optimizes the initial cache write hit vs the amount of times
+you might compact over the course of a session.)
 
-**3. The floor.** When everything maskable is already masked, context-fold says so rather than
-churning. What remains — user turns, the protected tail, anything you deliberately unfolded — is
-the irreducible floor. context-fold cannot compress past it, and does not pretend to.
+**3. The floor.** Eventually you will reach a point where no more tool calls can be masked, at that 
+ point context-fold says so rather than churning. What remains is the irreducible floor, context-fold cannot compress past it.
 
-**4. Hard compaction.** *Pi* decides when this fires, not context-fold. By default
+**4. Hard compaction.** *Pi* default compaction decides when this fires. By default
 (`CONTEXTFOLD_COMPACT=det`) context-fold intercepts it and hands Pi a summary rendered verbatim
-from the seed index, so Pi's LLM summarization never runs. Set `CONTEXTFOLD_COMPACT=native` to
+from a session derived seed index, so Pi's LLM summarization never runs. Set `CONTEXTFOLD_COMPACT=native` to
 opt back into Pi's stock behaviour.
 
 At this stage the raw messages do leave live context — that is what compaction is. What survives
 is the index, the spool, and Pi's session file, all on disk and all reachable through `recall`. So
-the loss is bounded and reversible rather than lossy and final. There is no paraphrase step and
-nothing that can hallucinate.
+the loss is bounded and reversible rather than lossy and final. 
+
+There is no paraphrase step and nothing that can hallucinate. The tool should warn you after a hard compaction occurs 
+more than once and it's highly suggested to run a handoff long before this happens when you are at a definable task finish line.
 
 **5. Handoff.** *(manual, `/fold-handoff`)* Writes a seed file for starting a fresh session: the
-same verbatim index plus the goal you state. Nothing is injected into context; nothing fires on
-its own.
+same verbatim index plus the goal you state. 
 
 ## What it does
 
@@ -90,13 +88,13 @@ prompt-cache suffix, so mutations are batched at points where that cost is paid 
   whose bytes never change again. The context head stays byte-identical turn over turn, which is
   what keeps prefix caches warm.
 - Each further event needs at least a ladder step (~12 % of the window) of maskable mass. Crossing
-  the absolute budget cap (`min(200k, 0.75 × window)`) folds immediately.
+  the absolute budget cap (`min(200k, 0.75 × window)`) folds immediately. (Note: the threshold is a moving target just like previously flagged values.)
 
-### The L0 ingestion gate
+### The L0 ingestion gate (Note: I may change this term at some point, it was a random vibeslop term that I just didn't get rid of)
 
-With `CONTEXTFOLD_L0` enabled, every tool result is observed as it lands — observe-only, so the
+With `CONTEXTFOLD_L0` enabled, every tool result is observed as it lands, so the
 session file keeps the raw payload. A result over ~2000 estimated tokens is spooled to a
-sha256-verified envelope and born folded: the view shows a ≤400-token pointer carrying the
+verified envelope and born folded: the view shows a ≤400-token pointer carrying the
 `{#code FOLDED}` recovery tag, a tool-aware summary, head and tail, and every detected error or
 risk line verbatim. Error-shaped results get 4× threshold headroom, so a short error never folds
 away.
@@ -106,26 +104,14 @@ where a capable model already scopes its own reads, and decisive where a flood g
 buried-error task went from 26,750 to 4,793 input tokens, a web-fetch task from 14,380 to 3,225.
 It saves most of the cost where a flood lands and costs a few percent elsewhere. Turn it on if
 your sessions read large files, run chatty build or test commands, or fetch web pages. Leave it
-off if your agent already reads narrowly — you would be paying the pointer overhead for nothing.
+off if your agent already reads narrowly or you will be paying the pointer overhead for nothing.
 
-The ladder alone cannot cover this case: it fires only at 45 % of the window and never touches the
-protected tail, and a result that just landed is in that tail. The gate is the only stage that
-acts at ingestion.
-
-**Deferred substitution (`CONTEXTFOLD_L0_KEEP_RECENT`), and why it is still here.** The gate's known
-failure mode is recall churn: born-folding on arrival means a model that reads several files gets
+**Deferred substitution (`CONTEXTFOLD_L0_KEEP_RECENT`).** The gate's known failure mode is recall churn: born-folding on arrival means a model that reads several files gets 
 pointers back and must recall them, and the extra turns can out-cost the per-turn saving. Holding the
 newest N registered blocks warm is the obvious mitigation, and its first live A/B did **not** support
-it — on a task where every masked payload was needed again, the gate cost 141 % of the no-gate control
+it. On a task where every masked payload was needed again, the gate cost 141 % of the no-gate control
 and deferral did not recover that. Churn turned out to be driven by the model needing *all* the masked
-content, which an arrival-time policy cannot predict.
-
-It is retained deliberately rather than reverted. That A/B was one adversarial shape at one run per
-arm, and model recall-batching variance (three codes in one call in one arm, split across calls in
-another) swamped the arms. The open question is whether a larger hold-out earns its keep on genuinely
-chunky tool results, which is the next thing to test. Setting it to `0` is exactly the shipped
-behaviour, so the flag costs nothing unset — do not remove it as dead weight without re-running that
-comparison.
+content, which an arrival-time policy cannot predict. It is retained deliberately for more testing
 
 ### The seed index
 

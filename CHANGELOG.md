@@ -1,4 +1,5 @@
-# Changelog
+# Changelog 
+Note: This is largely LLM written, I won't hand write much in here unless I have to
 
 Notable changes to context-fold.
 
