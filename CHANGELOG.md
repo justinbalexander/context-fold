@@ -3,7 +3,7 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
-## Unreleased
+## 0.2.0 — 2026-07-30
 
 - **Wire watchdog.** A fold that masked tokens strictly shrinks the outgoing prompt, so if the
   next turn's provider usage reads the whole pre-fold prompt back from cache, the rewrite provably

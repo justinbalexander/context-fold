@@ -24,14 +24,16 @@ Done 2026-07-30 (see git history for the full original text of each item):
 4. **`docs/pi-api-surface.md` corrected** — chaining claim replaced with the real last-wins
    contract and the load-last rule.
 
-## 5. Upstream issues (owner decision on tone/venue before filing)
+## 5. pi-codex-conversion: evaluate and extract, not fix upstream (owner ruling 2026-07-30)
 
-- **Pi (`pi-agent-core`)**: propose composing `context` hooks — fold each handler's returned
-  messages into the next handler's event, matching what `emitBeforeProviderRequest` already
-  does for stream options. Cite the doc/behavior mismatch.
-- **pi-codex-conversion**: report the deferral with the probe evidence; propose a fold-aware
-  continuation (full resend when the prefix changed, rather than pending-tool-output delta),
-  or an opt-out.
+Direction change: rather than filing for a fold-aware continuation, functionally evaluate what
+pi-codex-conversion actually earns its place with, and pull only the features that prove out
+into an owned extension. Skepticism is the prior: the package's headline optimization (cached
+WebSocket continuation) is precisely what deferred our folds, and its other hooks collide with
+ours (see item 6). Sketch: A/B the same real workload with and without it (the wire watchdog
+now makes deferral visible, so reinstalling for testing is safe), measure per-feature value
+(latency, tokens, behavior), then extract keepers. Upstream filing for Pi's non-composing
+`context` hooks remains worth doing eventually, but is not the path for the codex conflict.
 
 ## 6. Hook-collision audit (done 2026-07-30 — keep current as extensions are added)
 
@@ -53,5 +55,6 @@ needed beyond the README note.
 
 ## Local (willow, not repo work)
 
-- Decide whether to reinstall `pi-codex-conversion` for daily codex sessions (its adapter
-  features vs. deferred folding) once items 1–2 land or upstream moves.
+- Run the item-5 evaluation: reinstall `pi-codex-conversion` beside context-fold 0.2.0 (the
+  watchdog will surface any deferral), A/B a real workload, and record per-feature findings
+  before extracting anything.

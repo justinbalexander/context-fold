@@ -81,8 +81,8 @@ Override the provider and model with `E2E_PROVIDER` / `E2E_MODEL`. These scripts
 against a model with reliable tool use; a weaker model can fail a check for its own reasons rather
 than the extension's, so read a failure before believing it.
 
-The full ladder, including check (c), passes against `openai-codex/gpt-5.6-sol` (last run
-2026-07-29, all four checks green). One known way (c) can fail spuriously: an earlier run against
+The full ladder, including check (c) and the wire-level check (e), passes against
+`openai-codex/gpt-5.6-sol` (last run 2026-07-30, all five checks green). One known way (c) can fail spuriously: an earlier run against
 a local model reported `shared=0`, which is the script finding **no folded block present in both
 turns to compare**, not bytes moving — it happens when the agent chooses `unfold` over `recall` in
 turn 2, deliberately rendering the block raw and removing it from turn 2's folded set. If (c)
