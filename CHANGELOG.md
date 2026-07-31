@@ -3,6 +3,23 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
+## 0.2.1 — 2026-07-30
+
+Display-only release: no change to fold timing, the seed-index record shape, or any wire behavior.
+
+- **Footer: the context number is now the fold gauge.** `ctx 72%` read as a second context meter
+  and invited comparison with Pi's own footer percentage (different rounding, one turn of update
+  lag). It is now `fold 72%/45%` — usage as the fold ladder sees it, against the configured
+  next-fold threshold. The threshold is read from the ladder's published `fold_at` metric each
+  turn (so `CONTEXTFOLD_FOLD_AT` and the cold-branch lowering both show up live), a `~` prefix
+  marks the post-compaction window where Pi reports no token count and the fraction is the
+  chars÷4 fallback estimate, and `at floor` replaces the gauge when nothing maskable remains.
+- **Footer: `cache 66%` → `cache avg 66%`.** The footer ratio is the whole-session aggregate
+  (cold first turns included), while Pi's `CH` stat is the last turn only; the label now says
+  which one it is.
+- The fold-event status metrics now publish `fold_at` alongside `usage_fraction`, as the idle
+  branch already did, so the threshold stays visible on the turn a fold fires.
+
 ## 0.2.0 — 2026-07-30
 
 - **Wire watchdog.** A fold that masked tokens strictly shrinks the outgoing prompt, so if the
