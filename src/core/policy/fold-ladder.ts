@@ -97,6 +97,7 @@ export class FoldLadderPolicy implements FoldPolicy {
 				budget: view.budget,
 				cap: view.budget,
 				usage_fraction: round3(fraction),
+				fold_at: round3(foldAt),
 				irreducible_floor: irreducibleFloor(view.blocks),
 				over_budget: projected > view.budget,
 			},

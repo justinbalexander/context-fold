@@ -145,8 +145,14 @@ price-agnostic input-token equivalents (fee *ratios* are near-constant across ve
   context past half the window, cold with a large carry, and recall churn. Advisory only; nothing
   blocks.
 - **Footer status line (TUI)** — a persistent one-line summary in Pi's footer (`⧉ context-fold ×3
-  · ~41k tok masked · ctx 72% · cache 66%`), updated as fold events fire. Purely visual: nothing
-  is added to the transcript or the model's context, and headless modes are unaffected.
+  · ~41k tok masked · fold 32%/45% · cache avg 66%`), updated as fold events fire. Purely visual:
+  nothing is added to the transcript or the model's context, and headless modes are unaffected.
+  `fold 32%/45%` is the ladder's trigger gauge — usage as the fold policy sees it against the
+  configured next-fold threshold — so it can drift slightly from Pi's own context percentage
+  (different rounding and update timing). `cache avg` is the whole-session cache hit ratio, unlike
+  Pi's `CH`, which is the last turn only. A `~` prefix marks the usage as a chars÷4 estimate for
+  the post-compaction window where Pi reports no token count; `at floor` replaces the gauge when
+  nothing maskable remains.
 - **Fold cost accounting** — once a fold event has fired, the status reports *both* sides: tokens
   masked per turn against tokens the provider re-prefilled because the fold moved the prefix, plus
   the running net. A fold rewrites history from the earliest masked block forward, so that

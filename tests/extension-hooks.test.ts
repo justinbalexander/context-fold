@@ -47,7 +47,7 @@ function stubPi() {
 
 let dir: string;
 const savedEnv: Record<string, string | undefined> = {};
-const ENV_KEYS = ["CONTEXTFOLD", "CONTEXTFOLD_L0", "CONTEXTFOLD_COMPACT", "CONTEXTFOLD_RETAIN_DAYS"];
+const ENV_KEYS = ["CONTEXTFOLD", "CONTEXTFOLD_L0", "CONTEXTFOLD_COMPACT", "CONTEXTFOLD_RETAIN_DAYS", "CONTEXTFOLD_FOLD_AT"];
 
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "cf-hooks-"));
@@ -354,6 +354,20 @@ describe.skipIf(!PI_PRESENT)("footer status line", () => {
 		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
 		expect(statuses["context-fold"]).toContain("×1");
 		expect(statuses["context-fold"]).toContain("tok masked");
+		// tokens: null → the ladder ran on its chars÷4 estimate, so the gauge is `~`-marked and
+		// shows the default threshold.
+		expect(statuses["context-fold"]).toMatch(/fold ~\d+%\/45%/);
+	});
+
+	it("renders the fold gauge against the configured threshold, unmarked when Pi reports tokens", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		process.env.CONTEXTFOLD_FOLD_AT = "0.6";
+		const s = await load();
+		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 60_000 } });
+
+		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
+		expect(statuses["context-fold"]).toContain("fold 75%/60%");
+		expect(statuses["context-fold"]).not.toContain("~75%");
 	});
 
 	it("survives a ctx whose ui has no setStatus (headless stubs, older hosts)", async () => {

@@ -68,6 +68,9 @@ export default function contextFold(pi: ExtensionAPI): void {
 	let lastContextWindow: number | null = null;
 	let wasCold = false;
 	let warnedWireDeferral = false;
+	// True when Pi couldn't report a token count this turn (post-compaction window) and the ladder
+	// fell back to its chars÷4 liveTokens estimate — the footer marks the fraction `~` there.
+	let ctxUsageIsEstimate = false;
 	const buildAdvisory = () => {
 		const t = telemetry.snapshot();
 		const m = engine.status?.metrics ?? {};
@@ -103,8 +106,17 @@ export default function contextFold(pi: ExtensionAPI): void {
 		const parts = [
 			s.foldEvents === 0 ? "⧉ context-fold idle" : `⧉ context-fold ×${s.foldEvents} · ~${k(s.foldSavedTokens)} tok masked`,
 		];
-		if (typeof m.usage_fraction === "number") parts.push(`ctx ${Math.round(m.usage_fraction * 100)}%`);
-		if (s.hitRatio !== null) parts.push(`cache ${Math.round(s.hitRatio * 100)}%`);
+		// The fraction is the fold ladder's trigger gauge, not a second context meter — labelled
+		// against the configured threshold (`fold 12%/45%`) so it reads as "next fold at 45%" and
+		// small drift from Pi's own footer percentage doesn't look like a bug. The threshold comes
+		// from the ladder's published metrics (env-configured, cold-branch aware), never a constant.
+		if (typeof m.usage_fraction === "number") {
+			const pct = `${ctxUsageIsEstimate ? "~" : ""}${Math.round(m.usage_fraction * 100)}%`;
+			parts.push(typeof m.fold_at === "number" ? `fold ${pct}/${Math.round(m.fold_at * 100)}%` : `fold ${pct}`);
+		} else if (m.over_budget === true) {
+			parts.push("at floor");
+		}
+		if (s.hitRatio !== null) parts.push(`cache avg ${Math.round(s.hitRatio * 100)}%`);
 		if (s.wireDeferredFolds > 0) parts.push("⚠ folds not on wire");
 		setStatus("context-fold", parts.join(" · "));
 	};
@@ -175,6 +187,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			wasCold = false;
 			lastContextWindow = null;
 			warnedWireDeferral = false;
+			ctxUsageIsEstimate = false;
 		}
 		updateFooter(ctx);
 
@@ -335,6 +348,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 				}
 			};
 			const usage = ctx.getContextUsage();
+			ctxUsageIsEstimate = usage?.tokens == null;
 			const messages = engine.process(event.messages as unknown as CoreAgentMessage[], {
 				contextWindow: usage?.contextWindow ?? null,
 				tokens: usage?.tokens ?? null,
