@@ -3,7 +3,7 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
-## Unreleased
+## 0.2.2 — 2026-08-03
 
 Display-only: no change to fold timing, the seed-index record shape, or any wire behavior.
 
