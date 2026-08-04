@@ -69,7 +69,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 	let wasCold = false;
 	let warnedWireDeferral = false;
 	// True when Pi couldn't report a token count this turn (post-compaction window) and the ladder
-	// fell back to its chars÷4 liveTokens estimate — the footer marks the fraction `~` there.
+	// fell back to its chars÷4 liveTokens estimate — /context-fold marks its usage % with `~` there.
 	let ctxUsageIsEstimate = false;
 	const buildAdvisory = () => {
 		const t = telemetry.snapshot();
@@ -95,6 +95,21 @@ export default function contextFold(pi: ExtensionAPI): void {
 		});
 	};
 
+	// The trigger gauge: render whichever ladder condition is actually binding, so the line stays
+	// meaningful in every state. Below the entry threshold that IS the threshold ("next fold at
+	// 45% ctx"); at or past it the usage gate is permanently satisfied and the real trigger is
+	// maskable mass reaching one ladder step, so the gauge tracks that instead; with nothing
+	// maskable left it says so plainly. Everything comes from the ladder's published metrics
+	// (env-configured, cold-branch aware) — never re-derived or hard-coded here.
+	const foldGauge = (m: Record<string, unknown>): string | null => {
+		if (m.over_budget === true) return "⚠ no more folds possible (over budget)";
+		if (typeof m.usage_fraction !== "number" || typeof m.fold_at !== "number") return null;
+		if (m.usage_fraction < m.fold_at) return `next fold at ${Math.round(m.fold_at * 100)}% ctx`;
+		if (typeof m.maskable_tokens !== "number" || typeof m.step_tokens !== "number") return null;
+		if (m.maskable_tokens > 0) return `next fold: ${k(m.maskable_tokens)}/${k(m.step_tokens)} maskable`;
+		return "no more folds possible";
+	};
+
 	// Persistent footer status: one keyed line in Pi's footer (TUI renders it below the stats
 	// line; headless modes stub setStatus to a no-op). Updated per turn rather than flashed per
 	// event — the numbers ticking up ARE the fold notification, with no transcript pollution.
@@ -102,20 +117,11 @@ export default function contextFold(pi: ExtensionAPI): void {
 		const setStatus = hctx.ui?.setStatus?.bind(hctx.ui);
 		if (!setStatus) return;
 		const s = telemetry.snapshot();
-		const m = engine.status?.metrics ?? {};
 		const parts = [
 			s.foldEvents === 0 ? "⧉ context-fold idle" : `⧉ context-fold ×${s.foldEvents} · ~${k(s.foldSavedTokens)} tok masked`,
 		];
-		// The fraction is the fold ladder's trigger gauge, not a second context meter — labelled
-		// against the configured threshold (`fold 12%/45%`) so it reads as "next fold at 45%" and
-		// small drift from Pi's own footer percentage doesn't look like a bug. The threshold comes
-		// from the ladder's published metrics (env-configured, cold-branch aware), never a constant.
-		if (typeof m.usage_fraction === "number") {
-			const pct = `${ctxUsageIsEstimate ? "~" : ""}${Math.round(m.usage_fraction * 100)}%`;
-			parts.push(typeof m.fold_at === "number" ? `fold ${pct}/${Math.round(m.fold_at * 100)}%` : `fold ${pct}`);
-		} else if (m.over_budget === true) {
-			parts.push("at floor");
-		}
+		const gauge = foldGauge(engine.status?.metrics ?? {});
+		if (gauge) parts.push(gauge);
 		if (s.hitRatio !== null) parts.push(`cache avg ${Math.round(s.hitRatio * 100)}%`);
 		if (s.wireDeferredFolds > 0) parts.push("⚠ folds not on wire");
 		setStatus("context-fold", parts.join(" · "));
@@ -355,7 +361,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			});
 			// The cast is the documented harness seam (core/block.ts): the core's structural AgentMessage
 			// models exactly the fields the bridge reads, and Pi's real AgentMessage satisfies it.
-			updateFooter(ctx); // reflect a fold committed this turn (and the fresh usage fraction)
+			updateFooter(ctx); // reflect a fold committed this turn (and the fresh trigger gauge)
 			if (dumpPath) {
 				// e2e seam: dump the outgoing view so the harness can assert the pointer replaced the payload.
 				try {
@@ -424,9 +430,10 @@ export default function contextFold(pi: ExtensionAPI): void {
 			const s = engine.status;
 			const m = s?.metrics ?? {};
 			const state = s?.text ? s.text : "idle (under budget)";
+			const gauge = foldGauge(m);
 			const pos =
 				typeof m.usage_fraction === "number"
-					? ` · usage ${Math.round((m.usage_fraction as number) * 100)}%${typeof m.fold_at === "number" ? ` (next fold ≥ ${Math.round((m.fold_at as number) * 100)}%)` : ""}`
+					? ` · usage ${ctxUsageIsEstimate ? "~" : ""}${Math.round((m.usage_fraction as number) * 100)}%${gauge ? ` (${gauge})` : ""}`
 					: "";
 			const adv = buildAdvisory();
 			const lines = [

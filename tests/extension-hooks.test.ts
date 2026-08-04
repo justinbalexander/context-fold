@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { user, assistantWithCalls, bigResult, toolResult } from "./helpers";
+import { user, assistantText, assistantWithCalls, bigResult, toolResult } from "./helpers";
 import type { AgentMessage } from "../src/core/block";
 
 const PI_PRESENT = existsSync(resolve(__dirname, "../node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"));
@@ -47,7 +47,7 @@ function stubPi() {
 
 let dir: string;
 const savedEnv: Record<string, string | undefined> = {};
-const ENV_KEYS = ["CONTEXTFOLD", "CONTEXTFOLD_L0", "CONTEXTFOLD_COMPACT", "CONTEXTFOLD_RETAIN_DAYS", "CONTEXTFOLD_FOLD_AT"];
+const ENV_KEYS = ["CONTEXTFOLD", "CONTEXTFOLD_L0", "CONTEXTFOLD_COMPACT", "CONTEXTFOLD_RETAIN_DAYS", "CONTEXTFOLD_FOLD_AT", "CONTEXTFOLD_TAIL"];
 
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "cf-hooks-"));
@@ -343,7 +343,7 @@ describe.skipIf(!PI_PRESENT)("message_end hook and the status command", () => {
 });
 
 describe.skipIf(!PI_PRESENT)("footer status line", () => {
-	it("shows idle at session start and a fold summary after a fold event", async () => {
+	it("shows idle at session start, then a fold summary with nothing left maskable after a fold event", async () => {
 		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
@@ -354,20 +354,52 @@ describe.skipIf(!PI_PRESENT)("footer status line", () => {
 		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
 		expect(statuses["context-fold"]).toContain("×1");
 		expect(statuses["context-fold"]).toContain("tok masked");
-		// tokens: null → the ladder ran on its chars÷4 estimate, so the gauge is `~`-marked and
-		// shows the default threshold.
-		expect(statuses["context-fold"]).toMatch(/fold ~\d+%\/45%/);
+		// The fold consumed every eligible block, so until new observations land the gauge says so.
+		expect(statuses["context-fold"]).toContain("no more folds possible");
 	});
 
-	it("renders the fold gauge against the configured threshold, unmarked when Pi reports tokens", async () => {
+	it("names the configured entry threshold while usage is still below it", async () => {
 		process.env.CONTEXTFOLD_L0 = "0";
 		process.env.CONTEXTFOLD_FOLD_AT = "0.6";
 		const s = await load();
-		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 60_000 } });
+		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 30_000 } });
 
 		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
-		expect(statuses["context-fold"]).toContain("fold 75%/60%");
-		expect(statuses["context-fold"]).not.toContain("~75%");
+		expect(statuses["context-fold"]).toContain("next fold at 60% ctx");
+		expect(statuses["context-fold"]).not.toContain("×");
+	});
+
+	it("tracks maskable mass toward the next step once usage is past the threshold", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		process.env.CONTEXTFOLD_TAIL = "1000"; // shrink the protected tail so one older result is maskable
+		const s = await load();
+		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 40_000 } });
+		const messages: AgentMessage[] = [
+			user("build the thing"),
+			assistantWithCalls([{ id: "c0", name: "read" }]),
+			bigResult("c0", 200),
+			assistantWithCalls([{ id: "c1", name: "read" }]),
+			bigResult("c1", 200),
+			user("now the newest question"),
+		];
+
+		// 40k/80k = 50% ≥ the 45% threshold, but only ~2.5k of maskable mass (< the 9.6k step):
+		// no fold fires, and the gauge shows progress toward the step instead of the usage gate.
+		await s.hooks.get("context")!({ messages }, ctx);
+		expect(statuses["context-fold"]).toMatch(/next fold: \S+\/\S+ maskable/);
+		expect(statuses["context-fold"]).not.toContain("×");
+	});
+
+	it("says no more folds are possible when past the threshold with nothing maskable", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		const s = await load();
+		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 40_000 } });
+
+		// Pure conversation: no tool results or thinking anywhere, so the ladder has nothing to work
+		// with even though usage (50%) is past the 45% threshold.
+		await s.hooks.get("context")!({ messages: [user("hi"), assistantText("a long answer"), user("more")] }, ctx);
+		expect(statuses["context-fold"]).toContain("no more folds possible");
+		expect(statuses["context-fold"]).not.toContain("×");
 	});
 
 	it("survives a ctx whose ui has no setStatus (headless stubs, older hosts)", async () => {

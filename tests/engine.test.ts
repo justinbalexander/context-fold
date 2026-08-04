@@ -65,6 +65,10 @@ describe("fold under budget", () => {
 		expect(JSON.stringify(out)).toContain("FOLDED");
 		expect(engine.status?.metrics?.fold_event).toBe(true);
 		expect(engine.status?.metrics?.usage_fraction).toBeCloseTo(7_900 / CW, 2);
+		// The fold consumes every eligible block, and the trigger gauge reads these fields on the
+		// fold turn too: nothing maskable remains until new observations land.
+		expect(engine.status?.metrics?.maskable_tokens).toBe(0);
+		expect(engine.status?.metrics?.step_tokens).toBeGreaterThan(0);
 	});
 
 	it("keeps the fold applied once reported usage falls back under the threshold", () => {

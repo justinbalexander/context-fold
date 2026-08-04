@@ -140,19 +140,20 @@ price-agnostic input-token equivalents (fee *ratios* are near-constant across ve
 
 - **Cold detection** — an expected-warm turn that read zero cached tokens gets one stderr notice
   with the re-billed size and a `/new` suggestion.
-- **`/context-fold` status** — fold position (usage %, next fold threshold), cache hit ratios, and
+- **`/context-fold` status** — fold position (usage %, the next-fold gauge), cache hit ratios, and
   flags: folds committed but not observed on the wire, a second forced compaction, irreducible
   context past half the window, cold with a large carry, and recall churn. Advisory only; nothing
   blocks.
 - **Footer status line (TUI)** — a persistent one-line summary in Pi's footer (`⧉ context-fold ×3
-  · ~41k tok masked · fold 32%/45% · cache avg 66%`), updated as fold events fire. Purely visual:
-  nothing is added to the transcript or the model's context, and headless modes are unaffected.
-  `fold 32%/45%` is the ladder's trigger gauge — usage as the fold policy sees it against the
-  configured next-fold threshold — so it can drift slightly from Pi's own context percentage
-  (different rounding and update timing). `cache avg` is the whole-session cache hit ratio, unlike
-  Pi's `CH`, which is the last turn only. A `~` prefix marks the usage as a chars÷4 estimate for
-  the post-compaction window where Pi reports no token count; `at floor` replaces the gauge when
-  nothing maskable remains.
+  · ~41k tok masked · next fold: 3.1k/9.6k maskable · cache avg 66%`), updated as fold events
+  fire. Purely visual: nothing is added to the transcript or the model's context, and headless
+  modes are unaffected. The middle segment is the ladder's trigger gauge, and it shows whichever
+  fold condition is actually binding: below the entry threshold it names it (`next fold at 45%
+  ctx`); once usage is past the threshold — permanently satisfied from then on — it tracks
+  maskable mass toward the next fold step (`next fold: 3.1k/9.6k maskable`); and when nothing
+  maskable remains it says `no more folds possible` (with an `(over budget)` warning variant when
+  the irreducible tail/roots exceed the budget). `cache avg` is the whole-session cache hit
+  ratio, unlike Pi's `CH`, which is the last turn only.
 - **Fold cost accounting** — once a fold event has fired, the status reports *both* sides: tokens
   masked per turn against tokens the provider re-prefilled because the fold moved the prefix, plus
   the running net. A fold rewrites history from the earliest masked block forward, so that

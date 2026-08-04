@@ -80,7 +80,7 @@ export class FoldLadderPolicy implements FoldPolicy {
 		}
 		if (eligible.length === 0 || savings <= 0) {
 			// Over cap with nothing left to mask: announce honestly (the tail/roots are the floor).
-			this.publishIrreducible(view, overCap);
+			this.publishIrreducible(view, overCap, fraction, foldAt, stepTokens);
 			return [];
 		}
 
@@ -98,6 +98,11 @@ export class FoldLadderPolicy implements FoldPolicy {
 				cap: view.budget,
 				usage_fraction: round3(fraction),
 				fold_at: round3(foldAt),
+				// Post-fold position: every eligible block is in this command, so nothing maskable
+				// remains until new observations land. Published so the trigger gauge stays renderable
+				// on the turn a fold fires without special-casing this branch.
+				maskable_tokens: 0,
+				step_tokens: stepTokens,
 				irreducible_floor: irreducibleFloor(view.blocks),
 				over_budget: projected > view.budget,
 			},
@@ -122,11 +127,15 @@ export class FoldLadderPolicy implements FoldPolicy {
 		});
 	}
 
-	private publishIrreducible(view: PolicyView, overCap: boolean): void {
+	private publishIrreducible(view: PolicyView, overCap: boolean, fraction: number, foldAt: number, stepTokens: number): void {
 		this.host?.setStatus(
 			overCap ? "OVER BUDGET: nothing left to mask (tail/roots are the floor)" : null,
 			{
 				fold_event: false,
+				usage_fraction: round3(fraction),
+				fold_at: round3(foldAt),
+				maskable_tokens: 0,
+				step_tokens: stepTokens,
 				live_tokens: view.liveTokens,
 				budget: view.budget,
 				cap: view.budget,
