@@ -150,10 +150,10 @@ price-agnostic input-token equivalents (fee *ratios* are near-constant across ve
   modes are unaffected. The middle segment is the ladder's trigger gauge, and it shows whichever
   fold condition is actually binding: below the entry threshold it names it (`next fold at 45%
   ctx`); once usage is past the threshold — permanently satisfied from then on — it tracks
-  maskable mass toward the next fold step (`next fold: 3.1k/9.6k maskable`); and when nothing
-  maskable remains it says `no more folds possible` (with an `(over budget)` warning variant when
-  the irreducible tail/roots exceed the budget). `cache avg` is the whole-session cache hit
-  ratio, unlike Pi's `CH`, which is the last turn only.
+  maskable mass toward the next fold step (`next fold: 3.1k/9.6k maskable`, counting up from 0
+  right after a fold as new observations land). `⚠ no more folds possible (over budget)` appears
+  only in the terminal state where the irreducible tail/roots exceed the budget. `cache avg` is
+  the whole-session cache hit ratio, unlike Pi's `CH`, which is the last turn only.
 - **Fold cost accounting** — once a fold event has fired, the status reports *both* sides: tokens
   masked per turn against tokens the provider re-prefilled because the fold moved the prefix, plus
   the running net. A fold rewrites history from the earliest masked block forward, so that

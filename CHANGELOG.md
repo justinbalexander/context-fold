@@ -12,11 +12,12 @@ Display-only: no change to fold timing, the seed-index record shape, or any wire
   permanently from then on, the 45% never changes again in a warm session, and the real trigger
   for the next fold is maskable mass reaching one ladder step — which the gauge never showed. The
   gauge now renders whichever condition is actually unmet: `next fold at 45% ctx` below the entry
-  threshold, `next fold: 3.1k/9.6k maskable` above it, and `no more folds possible` when nothing
-  maskable remains (`⚠ no more folds possible (over budget)` replaces the old `at floor` when the
-  irreducible tail/roots exceed the budget). The usage percentage is gone from the footer — Pi's
-  own footer already shows one; `/context-fold` still reports it, now with the `~` chars÷4
-  estimate marker the old footer gauge carried.
+  threshold, and `next fold: 3.1k/9.6k maskable` above it — counting up from 0 right after a fold,
+  since an empty gauge is an interim state that refills as new observations land. The terminal
+  message `⚠ no more folds possible (over budget)` replaces the old `at floor`, and appears only
+  when the irreducible tail/roots exceed the budget. The usage percentage is gone from the
+  footer — Pi's own footer already shows one; `/context-fold` still reports it, now with the `~`
+  chars÷4 estimate marker the old footer gauge carried.
 - **`/context-fold` shows the same gauge** in place of the former static `(next fold ≥ 45%)`.
 - The ladder's fold-event and irreducible-floor metrics now publish `maskable_tokens` and
   `step_tokens` (the idle branch already did), so the gauge renders from published metrics in

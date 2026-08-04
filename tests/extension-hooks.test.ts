@@ -354,8 +354,9 @@ describe.skipIf(!PI_PRESENT)("footer status line", () => {
 		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
 		expect(statuses["context-fold"]).toContain("×1");
 		expect(statuses["context-fold"]).toContain("tok masked");
-		// The fold consumed every eligible block, so until new observations land the gauge says so.
-		expect(statuses["context-fold"]).toContain("no more folds possible");
+		// The fold consumed every eligible block, so the gauge restarts counting toward the next
+		// step — an interim state that refills as new observations land, not a terminal one.
+		expect(statuses["context-fold"]).toMatch(/next fold: 0\/\S+ maskable/);
 	});
 
 	it("names the configured entry threshold while usage is still below it", async () => {
@@ -390,16 +391,29 @@ describe.skipIf(!PI_PRESENT)("footer status line", () => {
 		expect(statuses["context-fold"]).not.toContain("×");
 	});
 
-	it("says no more folds are possible when past the threshold with nothing maskable", async () => {
+	it("shows an empty step gauge past the threshold with nothing maskable yet", async () => {
 		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 40_000 } });
 
 		// Pure conversation: no tool results or thinking anywhere, so the ladder has nothing to work
-		// with even though usage (50%) is past the 45% threshold.
+		// with even though usage (50%) is past the 45% threshold. Still interim — a big tool result
+		// next turn would start filling the gauge — so it counts from zero rather than declaring
+		// folding impossible.
 		await s.hooks.get("context")!({ messages: [user("hi"), assistantText("a long answer"), user("more")] }, ctx);
-		expect(statuses["context-fold"]).toContain("no more folds possible");
+		expect(statuses["context-fold"]).toMatch(/next fold: 0\/\S+ maskable/);
 		expect(statuses["context-fold"]).not.toContain("×");
+	});
+
+	it("declares no more folds possible only when the irreducible floor is over budget", async () => {
+		process.env.CONTEXTFOLD_L0 = "0";
+		const s = await load();
+		// 70k reported of an 80k window is past the 60k budget (0.75 × window), and a pure-text
+		// conversation leaves nothing maskable: the terminal state, not an interim one.
+		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 70_000 } });
+
+		await s.hooks.get("context")!({ messages: [user("hi"), assistantText("x".repeat(280_000)), user("more")] }, ctx);
+		expect(statuses["context-fold"]).toContain("⚠ no more folds possible (over budget)");
 	});
 
 	it("survives a ctx whose ui has no setStatus (headless stubs, older hosts)", async () => {

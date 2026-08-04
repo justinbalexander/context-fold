@@ -98,16 +98,17 @@ export default function contextFold(pi: ExtensionAPI): void {
 	// The trigger gauge: render whichever ladder condition is actually binding, so the line stays
 	// meaningful in every state. Below the entry threshold that IS the threshold ("next fold at
 	// 45% ctx"); at or past it the usage gate is permanently satisfied and the real trigger is
-	// maskable mass reaching one ladder step, so the gauge tracks that instead; with nothing
-	// maskable left it says so plainly. Everything comes from the ladder's published metrics
-	// (env-configured, cold-branch aware) — never re-derived or hard-coded here.
+	// maskable mass reaching one ladder step, so the gauge tracks that instead — counting up from
+	// 0 right after a fold, since interim emptiness refills as new observations land. "No more
+	// folds possible" is reserved for the terminal state where the irreducible floor is over
+	// budget. Everything comes from the ladder's published metrics (env-configured, cold-branch
+	// aware) — never re-derived or hard-coded here.
 	const foldGauge = (m: Record<string, unknown>): string | null => {
 		if (m.over_budget === true) return "⚠ no more folds possible (over budget)";
 		if (typeof m.usage_fraction !== "number" || typeof m.fold_at !== "number") return null;
 		if (m.usage_fraction < m.fold_at) return `next fold at ${Math.round(m.fold_at * 100)}% ctx`;
 		if (typeof m.maskable_tokens !== "number" || typeof m.step_tokens !== "number") return null;
-		if (m.maskable_tokens > 0) return `next fold: ${k(m.maskable_tokens)}/${k(m.step_tokens)} maskable`;
-		return "no more folds possible";
+		return `next fold: ${k(m.maskable_tokens)}/${k(m.step_tokens)} maskable`;
 	};
 
 	// Persistent footer status: one keyed line in Pi's footer (TUI renders it below the stats
