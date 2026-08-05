@@ -209,9 +209,10 @@ cache read ≈ 0.1× input.
   heartbeat file each turn, so an idle-but-running session is safe; a session whose process is
   suspended for longer than the window can still lose its spool to a freshly started sibling.
   `CONTEXTFOLD_SPOOL_RETAIN_DAYS=0` disables the sweep.
-- **Narrowly exercised.** Pi 0.80.10 and 0.82.1, primarily with `gpt-5.6-sol` via the openai-codex
-  provider. Other providers should work — the extension only reads Pi's usage numbers and message
-  shapes — but this has not been broadly tested, and the numbers quoted in this README come from
+- **Primarily exercised against one model family.** Development and testing have mostly used
+  `gpt-5.6-sol` via the openai-codex provider. Folding only reads Pi's usage numbers and message
+  shapes, so other providers should work; fold cost accounting is the one feature with a known
+  provider dependency, since it needs reported cache writes. The figures quoted above come from
   individual runs rather than a repeatable harness.
 - **Folding changes what the model sees.** A pointer is not the payload. Agents handle this well in
   practice, since the teaching text explains the contract, but if you see an agent confused by a

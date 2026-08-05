@@ -2,7 +2,7 @@
 
 The exact Pi APIs this extension depends on, verified against the engine source rather than taken
 from the docs. Written for contributors: if one of these moves, this is the list to re-check.
-Verified against Pi 0.80.x; the authoritative reference is `docs/extensions.md`,
+Verified against Pi 0.80–0.83; the authoritative reference is `docs/extensions.md`,
 `docs/compaction.md` and `examples/extensions/*` inside an installed
 `@earendil-works/pi-coding-agent`.
 
