@@ -26,7 +26,7 @@ import { MapGateRegistry } from "../../core/gate-registry";
 import { Gate, gateConfigFromEnv, gateModelIdentity } from "./gate";
 import { SpoolStore } from "./spool";
 import { recordGateFold, recordLayer, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
-import { spoolRetainMsFromEnv, sweepSpools } from "./retention";
+import { spoolRetainMsFromEnv, sweepSpools, touchHeartbeat } from "./retention";
 import { CacheTelemetry, k } from "./cache-telemetry";
 import { advise } from "./advisor";
 
@@ -320,6 +320,10 @@ export default function contextFold(pi: ExtensionAPI): void {
 	// The make-or-break hook: rewrite the outgoing context before each model call.
 	pi.on("context", (event, ctx) => {
 		try {
+			// Liveness for the GC sweep: mark this session's spool as belonging to a running session,
+			// so a quiet-but-live session is not reaped by a sibling's session_start sweep. Throttled
+			// internally to once an hour and inert until this session has actually spooled something.
+			touchHeartbeat(join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId()));
 			// Re-resolve the L0 kill switch per turn against the ACTIVE model: an allowlist change or
 			// a mid-session model switch takes effect immediately, and a resumed session with the gate
 			// off renders prior folds raw instead of substituting pointers.

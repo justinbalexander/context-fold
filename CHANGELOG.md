@@ -3,6 +3,27 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
+## 0.2.3 — 2026-08-05
+
+- **Spool GC no longer reaps a live session that has been quiet.** The sweep dated a sibling
+  session's spool by its newest file, which measures when that session last *folded*, not whether
+  it is still running — so a session that folded early and then ran past the retention window could
+  have its spool deleted out from under it by a freshly started sibling. Each session now refreshes
+  a `.alive` heartbeat in its own spool directory from the `context` hook, throttled to once an
+  hour and inert until the session has actually spooled something, so liveness is recorded
+  independently of fold activity. The residual edge is a stopped process, which stops heartbeating
+  and can still be reaped. Tests in `retention.test.ts`.
+- **Documentation pass.** The README no longer describes the project as 0.1.0; `RELEASING.md` is a
+  release checklist rather than a first-publish guide; the ingestion gate is named and defined in
+  prose (`L0` is documented as the historical name that survives in the `CONTEXTFOLD_L0*`
+  variables, which are unchanged); notes-to-self and local filesystem paths are gone from published
+  docs; the hook-collision table moved into `docs/pi-api-surface.md`; and `TODO.md`, which was
+  internal working state, was removed. Gate measurements are now labeled as single observed runs
+  rather than a benchmark, because there is no public harness behind them.
+- **`DESIGN.md` §2 had the policy/mechanism split backwards** — `policy/fold-ladder.ts` is the
+  policy and `apply.ts` is the mechanism, not the reverse. Documentation only; the code was always
+  correct.
+
 ## 0.2.2 — 2026-08-03
 
 Display-only: no change to fold timing, the seed-index record shape, or any wire behavior.

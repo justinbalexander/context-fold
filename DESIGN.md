@@ -1,11 +1,14 @@
 # context-fold — architecture
 
+As built, describing the shipped 0.2.x behavior. `README.md` is the user-facing
+document; this file is for contributors and covers structure, invariants, and the reasoning
+behind them.
+
 ## 1. Core idea
 
-Context-fold as a design was independently derived, but it very closely mirrors native
-Claude-code compaction. I have not been able to stress test anthropic models extensively
-within Pi, but measured results indicate this works as well if not better in certain instances
-than the claude-code microcompaction system.
+The design was derived independently but ends up close to native Claude Code compaction. I have
+not stress-tested Anthropic models extensively inside Pi, so treat any comparison between the two
+as untested.
 
 1. **Avoid Destructive Editing.** A folded block stays in the outgoing
    message array and keeps its `callId`; only its rendered content is swapped, and the message
@@ -26,7 +29,7 @@ The session file is never modified.
 
 ```
 src/
-  core/                    # No Pi dependencies, is intended to be adaptible to any harness
+  core/                    # No Pi dependencies; adaptable to any harness
     tokens.ts              # estTokens = ceil(len/4), BLOCK_OVERHEAD, clip, firstLine, safeSlice
     digest.ts              # the {#code FOLDED} tag, foldCode (FNV-1a), per-kind and pointer digests
     contract.ts            # PolicyView / FoldCommand / ViewBlock 
@@ -40,7 +43,7 @@ src/
   adapters/pi/             # every Pi API call and all disk I/O 
     index.ts               # the extension entry point: hooks, tools, commands
     store.ts               # the engine 
-    gate.ts                # the L0 ingestion gate 
+    gate.ts                # the ingestion gate (L0)
     spool.ts               # sha256-verified fold envelopes on disk
     index-store.ts         # seed-index.jsonl emission
     persistence.ts         # event-sourced fold state
@@ -58,8 +61,9 @@ The core speaks only its own `AgentMessage`-shaped block model and a
 to and from core blocks and owns every Pi API call. An adapter for another harness implements the
 same conversion against that tool's hooks; the core is untouched.
 
-**Policy/mechanism split:** `apply.ts` describes the folding policy.  `/fold-ladder.ts` is the
-folding mechanism. Keeping them apart is what lets the fold timing change without touching the rewrite.
+**Policy/mechanism split:** `policy/fold-ladder.ts` decides *what and when* to fold — it is the
+policy. `apply.ts` performs the rewrite — it is the mechanism, and it has no opinion about timing.
+Keeping them apart is what lets fold timing change without touching the rewrite.
 
 ---
 
@@ -106,12 +110,16 @@ merge them.
 
 ---
 
-## 5. The L0 ingestion gate (I might change the name of this idk why this term got vibe slopped everywhere)
+## 5. The ingestion gate
 
-The ladder folds blocks once they age past a threshold. The **L0 gate** folds one class of block
-*at ingestion*, before it is ever sent warm: a tool result larger than `CONTEXTFOLD_L0_THRESHOLD`
-est-tokens. A verbose flood (think a 12k+ token file ingest) has near-zero marginal
-value warm, yet costs its full weight on every subsequent turn.
+The ladder folds blocks once they age past a threshold. The **ingestion gate** folds one class of
+block *at ingestion*, before it is ever sent warm: a tool result larger than
+`CONTEXTFOLD_L0_THRESHOLD` est-tokens. A verbose flood (think a 12k+ token file ingest) has
+near-zero marginal value warm, yet costs its full weight on every subsequent turn.
+
+The gate was originally called *L0* — level zero, the stage below the ladder's numbered fold
+layers. The prose name is now "the ingestion gate"; `L0` survives in the `CONTEXTFOLD_L0*`
+environment variables and in `gate.ts` identifiers, because those are published surface.
 
 - **Observe-only seam.** The `tool_result` hook spools the raw payload and registers a born-fold,
   but never mutates the result. The session file keeps raw ground truth. Substitution is view-only,
@@ -143,16 +151,22 @@ a dead pointer.
 Retention: at session start, sibling session spools whose newest file is older than
 `CONTEXTFOLD_SPOOL_RETAIN_DAYS` are removed whole-directory. Dedup aliases only ever point at
 siblings in the same directory, so nothing dangles, and the current session's spool is never
-touched. One accepted edge: siblings are protected only by mtime, so a *concurrently running*
-session that has not folded anything in over the retention window can lose its spool to a
-freshly-started sibling (Note: Im planning to fix this relatively soon if anyone ever even reads this).
+touched.
+
+Freshness is measured by the newest file mtime in the directory, which on its own would judge a
+*live* session by when it last folded. A session that folded early and then ran quietly for longer
+than the retention window would be reaped by a freshly started sibling. Each session therefore
+refreshes a `.alive` heartbeat file in its own spool directory from the `context` hook, throttled
+to at most once an hour, so liveness is recorded independently of folding activity. The remaining
+edge is a session whose process is stopped (SIGSTOP, a suspended terminal) for longer than the
+window — it stops heartbeating and can still be reaped.
 
 ---
 
 ## 7. Failure posture
 
 Every hook is fail-open with a bounded blast radius, and every degradation is announced on stderr
-rather than swallowed. I am attempting to ensure that Pi lets you know when something is going wrong.
+rather than swallowed. A failure should be visible, never silent.
 
 | failure | cost |
 |---|---|
@@ -163,7 +177,8 @@ rather than swallowed. I am attempting to ensure that Pi lets you know when some
 | resume restore throws | prior folds render raw this session |
 | spool missing or corrupt | that fold drops; recall returns a typed error naming the path |
 
-`CONTEXTFOLD=0` disables the extension entirely for a session if needed for testing
+`CONTEXTFOLD=0` disables the extension entirely for one session — the escape hatch for testing or
+for isolating a suspected fold-related problem.
 
 ---
 
@@ -195,5 +210,5 @@ rather than swallowed. I am attempting to ensure that Pi lets you know when some
 The pure core is derived from [Accordion](https://github.com/a-Fig/Accordion) (pinned commit
 `0c22434`) — `digest.ts` and `tokens.ts` close to verbatim, `applyPlan` and the block model
 adapted — stripped of all Svelte/Tauri/browser coupling and hardened since. The discrete fold
-ladder, the L0 ingestion gate, the seed index, the spool, and the advisor layers are original to
+ladder, the ingestion gate, the seed index, the spool, and the advisor layers are original to
 this project.

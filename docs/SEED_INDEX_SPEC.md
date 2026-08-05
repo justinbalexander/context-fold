@@ -30,6 +30,13 @@ Location is emitter-owned; the Pi extension writes
 `<sessionDir>/spool/<sessionId>/seed-index.jsonl`. Consumers must tolerate
 unknown extra fields and records with a higher `v` they do not understand.
 
+A spool directory is not exclusively envelopes. Resolve artifacts by the paths
+records actually name (`log.path`, and one `aliasOf` hop) rather than by
+enumerating the directory — emitters may keep bookkeeping files alongside the
+data. The Pi extension writes one such file, `.alive`, a liveness heartbeat its
+own garbage collector reads; consumers should ignore anything they do not
+recognize.
+
 ## Record shape
 
 ```json

@@ -4,10 +4,18 @@
  * freshness is judged by the newest FILE inside (not the dir), and everything fails open.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spoolRetainMsFromEnv, sweepSpools, SPOOL_RETAIN_DAYS_DEFAULT } from "../src/adapters/pi/retention";
+import {
+	spoolRetainMsFromEnv,
+	sweepSpools,
+	touchHeartbeat,
+	resetHeartbeatThrottle,
+	SPOOL_RETAIN_DAYS_DEFAULT,
+	HEARTBEAT_FILE,
+	HEARTBEAT_THROTTLE_MS,
+} from "../src/adapters/pi/retention";
 
 const DAY = 86_400_000;
 const NOW = 1_800_000_000_000; // fixed clock for every sweep
@@ -30,6 +38,7 @@ function sessionDir(name: string, ageDays: number, files: string[] = ["abc123.js
 
 beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "cf-retention-"));
+	resetHeartbeatThrottle();
 });
 afterEach(() => {
 	rmSync(root, { recursive: true, force: true });
@@ -103,6 +112,57 @@ describe("sweepSpools", () => {
 		const res = sweepSpools(root, "current", 14 * DAY, NOW);
 		expect(res.reaped).toEqual([]);
 		expect(res.kept).toBe(1);
+	});
+});
+
+describe("touchHeartbeat", () => {
+	it("keeps a quiet but live session's spool from being reaped", () => {
+		// The bug this fixes: the dir and every envelope in it are 30 days old because the session
+		// folded early and then ran quietly. Without a heartbeat a sibling's sweep reaps it.
+		const dir = sessionDir("live-but-quiet", 30);
+		expect(sweepSpools(root, "current", 14 * DAY, NOW)).toMatchObject({ reaped: ["live-but-quiet"] });
+
+		// Same setup, but the live session beat recently.
+		resetHeartbeatThrottle();
+		const dir2 = sessionDir("live-but-quiet", 30);
+		expect(touchHeartbeat(dir2, NOW)).toBe(true);
+		const res = sweepSpools(root, "current", 14 * DAY, NOW);
+		expect(res.reaped).toEqual([]);
+		expect(existsSync(dir2)).toBe(true);
+		expect(existsSync(join(dir2, HEARTBEAT_FILE))).toBe(true);
+		expect(dir).toBe(dir2); // same path, rebuilt
+	});
+
+	it("no-ops when the session has never spooled, rather than creating an empty dir", () => {
+		const dir = join(root, "never-folded");
+		expect(touchHeartbeat(dir, NOW)).toBe(false);
+		expect(existsSync(dir)).toBe(false);
+	});
+
+	it("throttles to at most one write per window, then beats again after it", () => {
+		const dir = sessionDir("s", 1);
+		expect(touchHeartbeat(dir, NOW)).toBe(true);
+		expect(touchHeartbeat(dir, NOW + 1000)).toBe(false);
+		expect(touchHeartbeat(dir, NOW + HEARTBEAT_THROTTLE_MS - 1)).toBe(false);
+		expect(touchHeartbeat(dir, NOW + HEARTBEAT_THROTTLE_MS)).toBe(true);
+	});
+
+	it("refreshes the mtime of an existing heartbeat instead of rewriting it", () => {
+		const dir = sessionDir("s", 30);
+		touchHeartbeat(dir, NOW - 20 * DAY);
+		const file = join(dir, HEARTBEAT_FILE);
+		const before = statSync(file).mtimeMs;
+		resetHeartbeatThrottle();
+		expect(touchHeartbeat(dir, NOW)).toBe(true);
+		expect(statSync(file).mtimeMs).toBeGreaterThan(before);
+	});
+
+	it("a stale heartbeat does not save a dead session", () => {
+		const dir = sessionDir("dead", 30);
+		touchHeartbeat(dir, NOW - 30 * DAY); // last beat 30 days ago
+		const res = sweepSpools(root, "current", 14 * DAY, NOW);
+		expect(res.reaped).toEqual(["dead"]);
+		expect(existsSync(dir)).toBe(false);
 	});
 });
 

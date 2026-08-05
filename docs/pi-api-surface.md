@@ -15,20 +15,36 @@ array genuinely replaces what is sent. Confirmed in the engine, not just the doc
   `const result = await emitHook({type:"context", messages:[...messages]}); return result?.messages ?? messages;`
 - `pi-agent-core/dist/agent-loop.js` calls `transformContext` immediately before `convertToLlm`
   and the stream. It runs every assistant turn, on a copy, and never mutates persisted entries.
-- **Handlers do NOT chain** (verified in `emitHook`, identical across Pi 0.80.2/0.82.1/0.83.0,
-  contrary to an earlier revision of this document): every handler receives the *original* event,
-  and the last non-`undefined` return wins. Handler order is `Set` insertion order = extension
-  load order. Practical rule: this extension must be listed *after* any other context-rewriting
-  extension in `settings.json` `packages`, or its folds are silently discarded. The same
-  last-wins dispatch applies to every hook, including `session_before_compact` and
-  `before_agent_start`. (Upstream composition of `context` hooks — folding each handler's
-  returned messages into the next handler's event — would remove this constraint; not filed yet.)
+- **Handlers do NOT chain** (verified in `emitHook`, identical across Pi 0.80.2 / 0.82.1 / 0.83.0):
+  every handler receives the *original* event, and the last non-`undefined` return wins. Handler
+  order is `Set` insertion order, which is extension load order. Practical rule: this extension
+  must be listed *after* any other context-rewriting extension in `settings.json` `packages`, or
+  its folds are silently discarded. The same last-wins dispatch applies to every hook, including
+  `session_before_compact` and `before_agent_start`. Composing `context` hooks upstream — folding
+  each handler's returned messages into the next handler's event — would remove this constraint.
 
 ```ts
 interface ContextEvent       { type: "context"; messages: AgentMessage[]; }
 interface ContextEventResult { messages?: AgentMessage[]; }
 pi.on("context", async (e, ctx) => ({ messages: rewritten }));
 ```
+
+### Collision surface
+
+Because dispatch is last-wins, every hook this extension *returns a value from* is a place where
+another extension can silently erase its work, or have its own erased. Keep this table current as
+hooks are added:
+
+| Hook | context-fold returns | Collision risk |
+|---|---|---|
+| `context` | rewritten messages, every turn | **High** — any other context rewriter |
+| `session_before_compact` | deterministic compaction summary | **High** — the loser's compaction strategy is silently ignored |
+| `before_agent_start` | appended `systemPrompt` (gate on) | Medium — one prompt-appender's text is dropped |
+| `tool_call` | nothing | None — observe-only |
+| `tool_result` | nothing | Low — another extension returning a *patch* could make the spooled payload diverge from what history keeps |
+
+Tool-name and command-name conflicts (`recall`, `unfold`, `/context-fold`) are different: they fail
+loudly at load rather than silently, so they need no mitigation beyond knowing to expect them.
 
 ## Everything else this extension uses
 

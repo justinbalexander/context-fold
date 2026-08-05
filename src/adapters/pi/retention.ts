@@ -15,13 +15,62 @@
  * The CURRENT session's dir is never touched, whatever its age. Everything here is fail-open:
  * an unreadable entry is kept, a failed delete is skipped — the sweep must never break a session
  * over housekeeping.
+ *
+ * Liveness vs. fold activity: file mtime alone dates a directory by when it last FOLDED, so a
+ * session that folded early and then ran quietly past the retention window would be reaped by a
+ * freshly started sibling while still live. Each session therefore refreshes a `.alive` heartbeat
+ * in its own dir (see `touchHeartbeat`), which the sweep reads like any other file. The residual
+ * edge is a stopped process: it stops heartbeating and can still be reaped.
  */
-import { readdirSync, rmSync, statSync, type Dirent } from "node:fs";
+import { existsSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync, type Dirent } from "node:fs";
 import { join } from "node:path";
 
 /** Default retention window: two weeks of resumability, bounded disk on a 24/7 box. */
 export const SPOOL_RETAIN_DAYS_DEFAULT = 14;
 const DAY_MS = 86_400_000;
+
+/** Liveness marker refreshed by a running session; counts as a normal file to the sweep. */
+export const HEARTBEAT_FILE = ".alive";
+/** Refresh at most this often — the sweep's resolution is days, so an hour is ample. */
+export const HEARTBEAT_THROTTLE_MS = 3_600_000;
+
+/** Per-directory last-write times, so the per-turn call is a Map lookup in the common case. */
+const lastBeat = new Map<string, number>();
+
+/**
+ * Refresh `<spoolDir>/.alive` so the GC sweep can tell a quiet live session from an abandoned one.
+ *
+ * No-ops when the directory does not exist: a session that has never folded has nothing to
+ * protect, and creating the dir here would litter one empty spool per session. Throttled to
+ * `HEARTBEAT_THROTTLE_MS`, and fail-open — a read-only spool must not break the turn.
+ *
+ * @returns true when the heartbeat was written on this call.
+ */
+export function touchHeartbeat(spoolDir: string, now = Date.now(), throttleMs = HEARTBEAT_THROTTLE_MS): boolean {
+	const prev = lastBeat.get(spoolDir);
+	if (prev !== undefined && now - prev < throttleMs) return false;
+	try {
+		if (!existsSync(spoolDir)) return false;
+		const file = join(spoolDir, HEARTBEAT_FILE);
+		// Create once, then stamp. The stamp is always applied explicitly from `now` rather than
+		// left to the filesystem clock, so the sweep and the heartbeat read the same time source
+		// (and a fixed-clock test is possible at all).
+		if (!existsSync(file)) writeFileSync(file, "context-fold session heartbeat\n");
+		const t = new Date(now);
+		utimesSync(file, t, t);
+		lastBeat.set(spoolDir, now);
+		return true;
+	} catch {
+		// Unwritable spool: the sweep may reap this dir early, which is the pre-existing behavior.
+		lastBeat.set(spoolDir, now); // do not retry every turn
+		return false;
+	}
+}
+
+/** Test seam: forget throttle state so a test can beat twice without waiting an hour. */
+export function resetHeartbeatThrottle(): void {
+	lastBeat.clear();
+}
 
 /**
  * Resolve CONTEXTFOLD_SPOOL_RETAIN_DAYS to a retention window in ms. `0`/`off`/`false` disables

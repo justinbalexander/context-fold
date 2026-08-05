@@ -1,10 +1,10 @@
 # context-fold
-Note: I will be slowly cleaning up my documentation as I come across things I don't like; consider it half LLM written and half cleaned up and properly edited.
 
 Deterministic, reversible context compaction for the [Pi coding agent](https://github.com/earendil-works/pi).
-Long agentic sessions stay under budget by folding stale content (long chains of tool calls) out of the model's view. 
-Every fold is reversible, indexed, and done deterministically. The core product is intended to be harness agnostic
-and can be adapted to other coding harnesses with some work.
+Long agentic sessions stay under budget by folding stale content — mostly long chains of tool
+calls — out of the model's view. Every fold is reversible, indexed, and computed without a model
+call. The core is written to be harness-agnostic and can be adapted to other coding harnesses with
+some work.
 
 **Requirements:** Node ≥ 22.19.0 and Pi ≥ 0.80.
 
@@ -14,10 +14,11 @@ pi install npm:context-fold
 
 ## The idea
 
-In short context management is annoying and I know plenty of people who are too lazy to summarize and handoff to new
-sessions and they let context grow unmanaged right up until they smash the /compact command at some point. This system was
-derived via iterative research over various compacting methodologies and represents an attempt at economically optimizing
-context over long sessions and eating as few cache read hits as possible until you decide to end the session or the work is complete. 
+Context management is annoying, and I know plenty of people who are too lazy to summarize and hand
+off to a new session. They let context grow unmanaged right up until they smash `/compact`. This
+system came out of iterative research over various compaction methods, and it is an attempt at
+economically optimizing context over a long session — eating as few cache-read hits as possible
+until you decide to end the session or the work is done.
 
 ## Why deterministic
 
@@ -31,7 +32,7 @@ tasks, at equal or lower cost ([The Complexity Trap](https://arxiv.org/abs/2508.
 LLM summaries lose exactly what matters. File and identifier trails are the weakest-preserved
 category even in good production summarizers
 ([Factory.ai](https://factory.ai/news/evaluating-compression)). In one fixed-interval math
-experiment, 40.4 % of post-summary answer-state transitions went from correct to wrong—even
+experiment, 40.4 % of post-summary answer-state transitions went from correct to wrong — even
 though summarization was net positive overall
 ([Self-Compacting Agents](https://arxiv.org/abs/2606.23525)). A summary can also fabricate
 instructions that then become post-compaction "ground truth"
@@ -42,37 +43,37 @@ For precise recall, retrieval over raw stored history beats an in-context summar
 But grep only finds what lexically matches ([NoLiMa](https://arxiv.org/abs/2502.05167)) — which is
 why every fold emits a deterministic index of exact tokens rather than a paraphrase.
 
-## the system in short
+## The system in short
 
-**1. Ingestion: the L0 gate.** *(opt-in, `CONTEXTFOLD_L0`)* The moment a tool result lands, if it
-is over ~2000 estimated tokens it is spooled to disk and enters the model's view already folded to
-a pointer. This is the only stage that can act on a result before the model ever reads it. (Note: this 
-is off by default until I can do more testing on what proper thresholds are for cutoff as of right now
-the results are mixed on how useful it actually is)
+**1. Ingestion: the gate.** *(opt-in, `CONTEXTFOLD_L0`)* The moment a tool result lands, if it is
+over ~2000 estimated tokens it is spooled to disk and enters the model's view already folded to a
+pointer. This is the only stage that can act on a result before the model ever reads it.
 
-**2. Per-turn: the fold ladder.** *(always on)* Once usage crosses ~45 % of the context window,
-a fold event masks stale `tool_result` and `thinking` blocks. User intent, assistant conclusions,
-and the record of every action are never touched. (Note: this threshold is also a moving target and may
-be adjusted if I am able to determine a sane default that optimizes the initial cache write hit vs the amount of times
-you might compact over the course of a session.)
+**2. Per-turn: the fold ladder.** *(always on)* Once usage crosses ~45 % of the context window, a
+fold event masks stale `tool_result` and `thinking` blocks. User intent, assistant conclusions, and
+the record of every action are never touched.
 
-**3. The floor.** Eventually you will reach a point where no more tool calls can be masked, at that 
- point context-fold says so rather than churning. What remains is the irreducible floor, context-fold cannot compress past it.
+**3. The floor.** Eventually no more tool calls can be masked. At that point context-fold says so
+rather than churning. What remains is the irreducible floor, and it cannot compress past it.
 
-**4. Hard compaction.** *Pi* default compaction decides when this fires. By default
-(`CONTEXTFOLD_COMPACT=det`) context-fold intercepts it and hands Pi a summary rendered verbatim
-from a session derived seed index, so Pi's LLM summarization never runs. Set `CONTEXTFOLD_COMPACT=native` to
-opt back into Pi's stock behaviour.
+**4. Hard compaction.** *Pi* decides when this fires. By default (`CONTEXTFOLD_COMPACT=det`)
+context-fold intercepts it and hands Pi a summary rendered verbatim from the session's seed index,
+so Pi's LLM summarization never runs. `CONTEXTFOLD_COMPACT=native` opts back into Pi's stock
+behavior.
 
-At this stage the raw messages do leave live context — that is what compaction is. What survives
-is the index, the spool, and Pi's session file, all on disk and all reachable through `recall`. So
-the loss is bounded and reversible rather than lossy and final. 
-
-There is no paraphrase step and nothing that can hallucinate. The tool should warn you after a hard compaction occurs 
-more than once and it's highly suggested to run a handoff long before this happens when you are at a definable task finish line.
+At this stage the raw messages do leave live context — that is what compaction is. What survives is
+the index, the spool, and Pi's session file, all on disk and all reachable through `recall`. The
+loss is bounded and reversible rather than lossy and final. There is no paraphrase step and nothing
+that can hallucinate. The extension warns you after a second forced compaction; it is worth running
+a handoff well before that, at a definable task finish line.
 
 **5. Handoff.** *(manual, `/fold-handoff`)* Writes a seed file for starting a fresh session: the
-same verbatim index plus the goal you state. 
+same verbatim index plus the goal you state.
+
+> **On the thresholds.** Every percentage above is a default, not a tuned constant. The right
+> first-fold point trades the initial cache write against how many times you compact over a
+> session, and I have not settled it. All of them are environment variables (see
+> [Configuration](#configuration)) and all of them may move in a future minor release.
 
 ## What it does
 
@@ -88,30 +89,41 @@ prompt-cache suffix, so mutations are batched at points where that cost is paid 
   whose bytes never change again. The context head stays byte-identical turn over turn, which is
   what keeps prefix caches warm.
 - Each further event needs at least a ladder step (~12 % of the window) of maskable mass. Crossing
-  the absolute budget cap (`min(200k, 0.75 × window)`) folds immediately. (Note: the threshold is a moving target just like previously flagged values.)
+  the absolute budget cap (`min(200k, 0.75 × window)`) folds immediately.
 
-### The L0 ingestion gate (Note: I may change this term at some point, it was a random vibeslop term that I just didn't get rid of)
+### The ingestion gate
 
-With `CONTEXTFOLD_L0` enabled, every tool result is observed as it lands, so the
-session file keeps the raw payload. A result over ~2000 estimated tokens is spooled to a
-verified envelope and born folded: the view shows a ≤400-token pointer carrying the
-`{#code FOLDED}` recovery tag, a tool-aware summary, head and tail, and every detected error or
-risk line verbatim. Error-shaped results get 4× threshold headroom, so a short error never folds
-away.
+The ladder folds blocks once they have aged past a threshold. The **ingestion gate** folds one
+class of block at *arrival*, before the model ever reads it: a tool result larger than
+`CONTEXTFOLD_L0_THRESHOLD` estimated tokens. A verbose flood — a 12k-token file ingest, say — has
+near-zero marginal value warm, yet costs its full weight on every subsequent turn.
 
-**Why it ships off, and when to turn it on.** A three-arm evaluation found the gate near-inert
-where a capable model already scopes its own reads, and decisive where a flood genuinely lands: a
-buried-error task went from 26,750 to 4,793 input tokens, a web-fetch task from 14,380 to 3,225.
-It saves most of the cost where a flood lands and costs a few percent elsewhere. Turn it on if
-your sessions read large files, run chatty build or test commands, or fetch web pages. Leave it
-off if your agent already reads narrowly or you will be paying the pointer overhead for nothing.
+(The gate's original name was *L0*, meaning level zero: the stage that sits below the ladder's
+numbered fold layers. That name survives in the `CONTEXTFOLD_L0*` variable names, which are part of
+the published configuration surface and are not being renamed.)
 
-**Deferred substitution (`CONTEXTFOLD_L0_KEEP_RECENT`).** The gate's known failure mode is recall churn: born-folding on arrival means a model that reads several files gets 
-pointers back and must recall them, and the extra turns can out-cost the per-turn saving. Holding the
-newest N registered blocks warm is the obvious mitigation, and its first live A/B did **not** support
-it. On a task where every masked payload was needed again, the gate cost 141 % of the no-gate control
-and deferral did not recover that. Churn turned out to be driven by the model needing *all* the masked
-content, which an arrival-time policy cannot predict. It is retained deliberately for more testing
+With the gate enabled, every tool result is observed as it lands, so the session file keeps the raw
+payload. A qualifying result is spooled to a verified envelope and born folded: the view shows a
+≤400-token pointer carrying the `{#code FOLDED}` recovery tag, a tool-aware summary, head and tail,
+and every detected error or risk line verbatim. Error-shaped results get 4× threshold headroom, so
+a short error never folds away.
+
+**Why it ships off, and when to turn it on.** I have run the gate against real tasks, not a
+benchmark suite, and the pattern was consistent: near-inert where a capable model already scopes
+its own reads, decisive where a flood genuinely lands. On the two flood-shaped tasks I measured,
+input dropped by roughly 5× and 4×. Read those as single observed runs — there is no published
+harness behind them, no dataset, and I have no plans to build one. Turn the gate on if your
+sessions read large files, run chatty build or test commands, or fetch web pages. Leave it off if
+your agent already reads narrowly, or you will pay pointer overhead for nothing.
+
+**Deferred substitution (`CONTEXTFOLD_L0_KEEP_RECENT`).** The gate's known failure mode is recall
+churn: born-folding on arrival means a model that reads several files gets pointers back and must
+recall them, and the extra turns can out-cost the per-turn saving. Holding the newest N registered
+blocks warm is the obvious mitigation, and one live comparison did **not** support it — on a task
+where every masked payload was needed again, the gate came out meaningfully *more* expensive than
+the no-gate control, and deferral did not recover the difference. The churn was driven by the model
+needing *all* of the masked content, which an arrival-time policy cannot predict. The flag is
+retained as an experiment rather than a recommendation.
 
 ### The seed index
 
@@ -132,11 +144,11 @@ spool. Extraction is pure regex — same input, byte-identical output.
 Recall works live, after resume, and after hard compaction: masked content resolves from the spool
 even once the raw message has left history.
 
-### Cold sessions and the reset flag
+### Status and advisories
 
-Measured prompt-cache telemetry (per-message `cacheRead`/`cacheWrite`) drives two advisories, in
-price-agnostic input-token equivalents (fee *ratios* are near-constant across vendors: cache read
-≈ 0.1× input).
+Measured prompt-cache telemetry (per-message `cacheRead`/`cacheWrite`) drives the advisories below,
+in price-agnostic input-token equivalents — fee *ratios* are near-constant across vendors, with
+cache read ≈ 0.1× input.
 
 - **Cold detection** — an expected-warm turn that read zero cached tokens gets one stderr notice
   with the re-billed size and a `/new` suggestion.
@@ -145,29 +157,29 @@ price-agnostic input-token equivalents (fee *ratios* are near-constant across ve
   context past half the window, cold with a large carry, and recall churn. Advisory only; nothing
   blocks.
 - **Footer status line (TUI)** — a persistent one-line summary in Pi's footer (`⧉ context-fold ×3
-  · ~41k tok masked · next fold: 3.1k/9.6k maskable · cache avg 66%`), updated as fold events
-  fire. Purely visual: nothing is added to the transcript or the model's context, and headless
-  modes are unaffected. The middle segment is the ladder's trigger gauge, and it shows whichever
-  fold condition is actually binding: below the entry threshold it names it (`next fold at 45%
-  ctx`); once usage is past the threshold — permanently satisfied from then on — it tracks
-  maskable mass toward the next fold step (`next fold: 3.1k/9.6k maskable`, counting up from 0
-  right after a fold as new observations land). `⚠ no more folds possible (over budget)` appears
-  only in the terminal state where the irreducible tail/roots exceed the budget. `cache avg` is
-  the whole-session cache hit ratio, unlike Pi's `CH`, which is the last turn only.
+  · ~41k tok masked · next fold: 3.1k/9.6k maskable · cache avg 66%`), updated as fold events fire.
+  Purely visual: nothing is added to the transcript or the model's context, and headless modes are
+  unaffected. The middle segment is the ladder's trigger gauge, showing whichever fold condition is
+  actually binding — below the entry threshold it names it (`next fold at 45% ctx`); once usage is
+  past the threshold, which is permanent from then on, it tracks maskable mass toward the next fold
+  step (`next fold: 3.1k/9.6k maskable`, counting up from 0 right after a fold as new observations
+  land). `⚠ no more folds possible (over budget)` appears only in the terminal state where the
+  irreducible tail and roots exceed the budget. `cache avg` is the whole-session cache hit ratio,
+  unlike Pi's `CH`, which is the last turn only.
 - **Fold cost accounting** — once a fold event has fired, the status reports *both* sides: tokens
   masked per turn against tokens the provider re-prefilled because the fold moved the prefix, plus
   the running net. A fold rewrites history from the earliest masked block forward, so that
   re-prefill is a real cost this extension causes, and reporting only the savings would be
   dishonest accounting. It is charged to the single turn carrying the new bytes, because every
-  later turn reads them back from cache. The cost side needs a provider that reports cache *writes*:
-  Anthropic and Bedrock Converse do, while the Codex route reports cached reads only and Pi
-  hardcodes Google's write to zero. Where writes are unreported the line says so instead of showing
-  a zero — "nothing was rewritten" and "this provider never says" are different facts.
+  later turn reads them back from cache. The cost side needs a provider that reports cache
+  *writes*: Anthropic and Bedrock Converse do, while the Codex route reports cached reads only and
+  Pi hardcodes Google's write to zero. Where writes are unreported the line says so instead of
+  showing a zero — "nothing was rewritten" and "this provider never says" are different facts.
 
 ## Guarantees
 
-- **History is never mutated.** Folding exists only in the per-call outgoing copy; the session
-  file keeps every raw payload.
+- **History is never mutated.** Folding exists only in the per-call outgoing copy; the session file
+  keeps every raw payload.
 - **Nothing is destroyed.** Ground truth lives in the session file and the spool. Every `{#code}`
   handle resolves through `recall`/`unfold` until spool GC ages it out (default 14 days).
 - **Tool pairs cannot orphan.** Folding is in-place content substitution and never changes the
@@ -178,55 +190,64 @@ price-agnostic input-token equivalents (fee *ratios* are near-constant across ve
   deterministic. Nothing this extension produces is a paraphrase.
 - **Fail-open, bounded blast radius.** A defect costs one result's folding, one block's fidelity,
   or one turn's folding — never the turn itself. `CONTEXTFOLD=0` disables everything per session.
-- **Deterministic core.** The pure core has no clock, no randomness, and no I/O; all disk I/O
-  lives in the adapter.
+- **Deterministic core.** The pure core has no clock, no randomness, and no I/O; all disk I/O lives
+  in the adapter.
 
 ## Limitations
 
 - **Token counts are estimates.** The estimator is a uniform ~4-characters-per-token heuristic, not
-  a per-model tokenizer, so every threshold in the table below is approximate. It drives budget
+  a per-model tokenizer, so every threshold in this document is approximate. It drives budget
   decisions well enough; do not read it as billing truth.
 - **Images are invisible to the budget math.** A tool result carrying non-text parts (screenshots,
   rendered pages) is never folded — neither by the gate nor the ladder, so nothing is ever lost —
   but its real token cost is not counted either. Image-heavy sessions read as further from the fold
   threshold than they are, so folding starts later than it should.
-- **The tool names are generic.** The extension registers `recall` and `unfold` as global tools.
-  If another extension registers the same names, one will shadow the other.
-- **Tested against two Pi minors and one model family.** Pi 0.80.10 and 0.82.1, primarily with
-  `gpt-5.6-sol` via the openai-codex provider. Other providers should work — the extension only
-  reads Pi's usage numbers and message shapes — but this has not been broadly exercised.
-- **Folding changes what the model sees.** A pointer is not the payload. Agents handle this well
-  in practice (the teaching text explains the contract), but if you see an agent confused by a
+- **The tool names are generic.** The extension registers `recall` and `unfold` as global tools. If
+  another extension registers the same names, one will shadow the other.
+- **Spool GC judges other sessions by file age.** The sweep at session start deletes sibling spool
+  directories whose newest file is older than the retention window. Live sessions refresh a
+  heartbeat file each turn, so an idle-but-running session is safe; a session whose process is
+  suspended for longer than the window can still lose its spool to a freshly started sibling.
+  `CONTEXTFOLD_SPOOL_RETAIN_DAYS=0` disables the sweep.
+- **Narrowly exercised.** Pi 0.80.10 and 0.82.1, primarily with `gpt-5.6-sol` via the openai-codex
+  provider. Other providers should work — the extension only reads Pi's usage numbers and message
+  shapes — but this has not been broadly tested, and the numbers quoted in this README come from
+  individual runs rather than a repeatable harness.
+- **Folding changes what the model sees.** A pointer is not the payload. Agents handle this well in
+  practice, since the teaching text explains the contract, but if you see an agent confused by a
   `{#code FOLDED}` marker, `CONTEXTFOLD=0` turns everything off for a session.
-- **This is a 0.1.0.** The on-disk formats are versioned but not yet frozen.
+- **Pre-1.0.** The on-disk formats are versioned but not frozen. While the major version is `0`, a
+  change to fold timing or to the seed-index record shape is a minor bump, documented in
+  `CHANGELOG.md`.
 
 ## Known integrations
 
 Findings from running context-fold beside other Pi extensions. The common theme: a fold can be
 committed and correct locally yet still be discarded or deferred downstream, which is why the
-extension now watches provider usage for exactly that (see the wire watchdog note below).
+extension watches provider usage for exactly that.
 
 - **`@howaboua/pi-codex-conversion` defers folds to user-turn boundaries.** Its cached WebSocket
-  continuation answers a mid-chain prefix change by sending only the pending tool output as a
-  delta against the server-held previous response, so a fold's rewrite of older history stays
-  local for the rest of that tool chain. At the next user message there is no pending tool
-  output, the changed prefix forces a full resend, and provider-reported input drops all at once.
-  Folding still works — recall, the spool, and compaction are unaffected — but a long autonomous
-  tool chain can approach the provider's context limit before any fold takes effect on the wire.
-- **Pi `context` hooks do not chain: load order decides.** Every handler receives the original
-  event and the last non-`undefined` return wins (verified in Pi 0.80–0.83). Two extensions
-  rewriting `context` are mutually destructive: list context-fold *after* any other
-  context-rewriting extension in `settings.json` `packages` so its folds are the surviving
-  rewrite. The same last-wins rule applies to `session_before_compact` and `before_agent_start`.
+  continuation answers a mid-chain prefix change by sending only the pending tool output as a delta
+  against the server-held previous response, so a fold's rewrite of older history stays local for
+  the rest of that tool chain. At the next user message there is no pending tool output, the
+  changed prefix forces a full resend, and provider-reported input drops all at once. Folding still
+  works — recall, the spool, and compaction are unaffected — but a long autonomous tool chain can
+  approach the provider's context limit before any fold takes effect on the wire.
+- **Pi `context` hooks do not chain: load order decides.** Every handler receives the original event
+  and the last non-`undefined` return wins (verified in Pi 0.80–0.83). Two extensions rewriting
+  `context` are mutually destructive: list context-fold *after* any other context-rewriting
+  extension in `settings.json` `packages` so its folds are the surviving rewrite. The same
+  last-wins rule applies to `session_before_compact` and `before_agent_start`. Full hook-by-hook
+  collision table in `docs/pi-api-surface.md`.
 - **Do not load the package twice.** `pi install npm:context-fold` plus a `-e npm:context-fold`
   flag registers `recall`/`unfold` twice and fails loudly at load with a tool-name conflict.
   Installed or `-e`, pick one.
 
-**The wire watchdog.** Because every one of these failure modes is invisible in the extension's
-own output, the telemetry checks the outcome instead: a fold that masked tokens strictly shrinks
-the outgoing prompt, so if the next turn's provider usage reads the whole pre-fold prompt back
-from cache, the rewrite provably never reached the wire. When that happens the extension warns
-once per session on stderr and raises a flag in `/context-fold` and the footer status line.
+**The wire watchdog.** Because every one of these failure modes is invisible in the extension's own
+output, the telemetry checks the outcome instead: a fold that masked tokens strictly shrinks the
+outgoing prompt, so if the next turn's provider usage reads the whole pre-fold prompt back from
+cache, the rewrite provably never reached the wire. When that happens the extension warns once per
+session on stderr and raises a flag in `/context-fold` and the footer status line.
 
 ## Install
 
@@ -257,27 +278,34 @@ From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 | `CONTEXTFOLD_COMPACT` | `det` | Hard-compaction answer: `det` = deterministic seed-index summary; `native` = Pi stock. |
 | `CONTEXTFOLD_RECON_TOKENS` | `18000` | Reconstruction estimate used by the reset flag (input-token equivalents). |
 | `CONTEXTFOLD_L0` | _(off)_ | Ingestion gate: `1` = all models; comma-separated substrings = per-model allowlist; unset/`0` = inert. |
-| `CONTEXTFOLD_L0_THRESHOLD` | `2000` | est-token size above which a result is spooled + born-folded. |
+| `CONTEXTFOLD_L0_THRESHOLD` | `2000` | Estimated-token size above which a result is spooled and born folded. |
 | `CONTEXTFOLD_L0_MINSAVE` | `0.5` | Minimum fraction the pointer must save to bother folding. |
-| `CONTEXTFOLD_L0_KEEP_RECENT` | `0` | Deferred substitution: hold the newest N gate-registered blocks at full fidelity and fold them only once stale. `0` = born-folded (cheapest per turn); non-zero trades those tokens against recall round trips. Spooling is unaffected, so held blocks stay recallable. Retained as an experiment — see the deferred-substitution note under *The L0 ingestion gate* before removing it. |
+| `CONTEXTFOLD_L0_KEEP_RECENT` | `0` | Deferred substitution: hold the newest N gate-registered blocks at full fidelity, folding them only once stale. `0` = born folded (cheapest per turn); non-zero trades those tokens against recall round trips. Spooling is unaffected, so held blocks stay recallable. Experimental — see *The ingestion gate*. |
 | `CONTEXTFOLD_L0_ERRCAP` | `4` | Threshold multiplier for error-shaped results. |
 | `CONTEXTFOLD_SPOOL_RETAIN_DAYS` | `14` | Spool GC window at session start. `0`/`off` = never delete. |
-| `CONTEXTFOLD_DEBUG` | off | One-line fold/cache summary to stderr each turn. |
+| `CONTEXTFOLD_DEBUG` | _(off)_ | One-line fold/cache summary to stderr each turn. |
 | `CONTEXTFOLD_DUMP` | _(unset)_ | Debug/e2e seam: write each turn's outgoing (folded) view to this JSON path. |
+
+The `CONTEXTFOLD_L0*` prefix is the ingestion gate's historical name; see
+[The ingestion gate](#the-ingestion-gate).
 
 ## Verification
 
 ```bash
 npm install && npm run typecheck && npm test   # unit + integration suite
+```
 
+```bash
 scripts/e2e-ladder.sh   # live: fold event fires, index emitted, head byte-stable, buried value recalled
-scripts/e2e-gate.sh     # live: L0 gate folds a real flood; agent recovers a buried line via recall
+scripts/e2e-gate.sh     # live: the gate folds a real flood; agent recovers a buried line via recall
 scripts/e2e-resume.sh   # live: folds survive a session restart
 ```
 
-The live scripts drive real Pi sessions and need provider auth plus `python3`. They load the
-working copy explicitly, so they test the checkout rather than an installed build. Override the
-model with `E2E_PROVIDER` / `E2E_MODEL`.
+The live scripts drive real Pi sessions against a real provider, so they cost money and need
+provider auth plus `python3`. They load the working copy explicitly, so they test the checkout
+rather than an installed build. Override the model with `E2E_PROVIDER` / `E2E_MODEL`. These are
+liveness checks, not benchmarks — they assert that folding happens and survives, not how much it
+saves.
 
 ## Develop
 
@@ -300,5 +328,8 @@ injects them at runtime — never bundle a copy.
 ## Provenance & license
 
 MIT. The pure core is ported from [Accordion](https://github.com/a-Fig/Accordion) (pinned commit
-`0c22434`), stripped of UI coupling and hardened since; the discrete fold ladder, the L0 ingestion
+`0c22434`), stripped of UI coupling and hardened since; the discrete fold ladder, the ingestion
 gate, the seed index, and the advisor layers are original to this project.
+
+Much of this documentation was drafted with an LLM and edited by hand. The design decisions,
+thresholds, and measurements are mine.
