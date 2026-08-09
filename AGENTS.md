@@ -9,7 +9,7 @@ does for a user; `DESIGN.md` is the behavioral authority for how it does it.
 These are frozen. A change that weakens one is a redesign, not a patch:
 
 1. **Every fold is deterministic, reversible, and indexed.** Same input, byte-identical output; a
-   `{#code}` handle always resolves through `recall`/`unfold`; every fold event appends a record to
+   `{#code}` handle always resolves through `recall_folded`/`unfold`; every fold event appends a record to
    the seed index.
 2. **No model call on any path.** Folding, digests, compaction, and the handoff seed are all
    mechanical. Nothing this extension emits may be a paraphrase — that is the entire premise.
@@ -40,7 +40,7 @@ npm test
 There is no build step — Pi loads the TypeScript directly through jiti, so `src/` ships as-is.
 
 To run your working copy inside a real Pi session: `pi -e /path/to/context-fold`. Do not also
-install the package; loading it twice registers `recall`/`unfold` twice and fails at load.
+install the package; loading it twice registers `recall_folded`/`unfold` twice and fails at load.
 
 `scripts/e2e-*.sh` drive real Pi sessions against a real provider and **cost money**. They are
 deliberately outside `npm test`. Run them only when the folding path itself changed.
