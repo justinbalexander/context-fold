@@ -3,6 +3,22 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
+## Unreleased
+
+Documentation and comment cleanup; no behavior changes.
+
+- **Docs re-verified against the source.** Every operational claim in `README.md` and `DESIGN.md`
+  — configuration defaults, ladder constants, the tool surface, footer status strings, seed-index
+  spec constants — was checked against the code. One stale claim fixed: `DESIGN.md` described
+  itself as covering 0.2.x behavior.
+- **Code comments no longer lean on pre-release design vocabulary.** Level taxonomy from before
+  the discrete fold ladder ("C-layer", "L3" — the `L3_RISK_*` constants are now `DIGEST_RISK_*`),
+  a component name that never shipped, and references to development-machine tooling are replaced
+  with descriptions of current behavior. A spool dedup doc comment that contradicted its own scope
+  note now states the real boundary: dedup spans one process, not one session.
+- **The obsolete-`L0` guard test explains itself.** It now says the `CONTEXTFOLD_L0*` settings it
+  sets were removed in 0.3.0 and must stay inert.
+
 ## 0.3.1 — 2026-08-09
 
 Fixes from an adversarial functionality audit of 0.3.0, plus a deliberate narrowing of the
