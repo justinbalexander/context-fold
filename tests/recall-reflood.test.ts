@@ -1,5 +1,5 @@
 /*
- * recall-reflood.test.ts — regression for a live recall failure (2026-07-28): a spooled
+ * recall-reflood.test.ts — regression for a live recall failure: a spooled
  * payload whose content is ONE enormous line (shell wrappers echoing a file as a single string,
  * minified JS, JSONL, base64) must not ride through any recall cap on an "always keep at least
  * one line" rule. Measured live: `recall {code} lines=2-2` returned a 40KB line and re-flooded

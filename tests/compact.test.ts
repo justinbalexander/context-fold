@@ -1,5 +1,5 @@
 /*
- * compact.test.ts — the deterministic hard-compaction summary (A never automatic): rendering,
+ * compact.test.ts — the deterministic hard-compaction summary (Pi decides when it fires): rendering,
  * the final "compact" index record, and the guarantee that ladder-masked content stays
  * recallable AFTER compaction removes the raw messages from live history.
  */

@@ -1,8 +1,8 @@
 /*
  * cache-telemetry.ts — observe-only prompt-cache accounting from real provider usage.
  *
- * Pi hands every finalized assistant message a `usage` object carrying cacheRead/cacheWrite;
- * nothing in the extension consumed it before. This is the measured signal for whether the
+ * Pi hands every finalized assistant message a `usage` object carrying cacheRead/cacheWrite.
+ * This is the measured signal for whether the
  * fold layout is actually keeping the prefix warm: `input` here is the tokens the provider
  * re-prefilled this turn (Pi normalizes it exclusive of cached tokens), so the per-turn hit
  * ratio cacheRead / (cacheRead + input) collapsing right after a fold is the cost of a

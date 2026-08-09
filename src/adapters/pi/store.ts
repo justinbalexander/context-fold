@@ -392,8 +392,8 @@ export class ContextFoldEngine {
 			const entry = spoolByCode.get(code);
 			// Recall serves FOLDED content only: a snapshot hit counts only when the block is frozen.
 			// Every live block's id hashes to a code, but a block that was never folded is already in
-			// view — resolving it would make recall a general history reader, which is autojournal's
-			// job, not this tool's.
+			// view — resolving it would make recall a general history reader, which this tool is
+			// deliberately not.
 			const hits = (snapByCode.get(code) ?? []).filter((b) => this.frozenById.has(b.id));
 			if (entry) {
 				try {

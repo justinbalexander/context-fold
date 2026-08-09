@@ -94,10 +94,10 @@ function digestBody(b: DigestBlock): string {
 			const tag = b.isError ? "error" : `${lines} line${lines === 1 ? "" : "s"}`;
 			const peek = firstLine(b.text, 60);
 			const head = `${name} → ${tag}, ~${b.tokens} tok${peek ? " · " + peek : ""}`;
-			// L3 risk-line retention: a folded result never reduces a load-bearing error/risk line to a
+			// Risk-line retention: a folded result never reduces a load-bearing error/risk line to a
 			// one-line summary. Keep the detected risk lines verbatim, tightly
-			// capped and errors-first, so a buried ImportError survives the aging fold.
-			const risk = collectRiskLines(b.text, { maxLines: L3_RISK_LINES, maxChars: L3_RISK_CHARS });
+			// capped and errors-first, so a buried ImportError survives the fold.
+			const risk = collectRiskLines(b.text, { maxLines: DIGEST_RISK_LINES, maxChars: DIGEST_RISK_CHARS });
 			return risk.length ? `${head}\n${risk.join("\n")}` : head;
 		}
 		default:
@@ -115,9 +115,9 @@ export function substTokens(content: string): number {
 
 // ── Risk-line retention ────────────────────────────────────────────────────────
 
-/** L3 (aging) risk-line caps — tight, so a routine result grows only a little. */
-const L3_RISK_LINES = 6;
-const L3_RISK_CHARS = 400;
+/** Risk-line caps for a folded digest — tight, so a routine result grows only a little. */
+const DIGEST_RISK_LINES = 6;
+const DIGEST_RISK_CHARS = 400;
 /** Per-line clip for retained risk lines (bounds one pathological line). */
 const RISK_LINE_CLIP = 200;
 

@@ -1,6 +1,6 @@
 # context-fold — architecture
 
-As built, describing the shipped 0.2.x behavior. `README.md` is the user-facing
+As built, describing the shipped 0.3.x behavior. `README.md` is the user-facing
 document; this file is for contributors and covers structure, invariants, and the reasoning
 behind them.
 
@@ -12,16 +12,16 @@ as untested.
 
 1. **Avoid Destructive Editing.** A folded block stays in the outgoing
    message array and keeps its `callId`; only its rendered content is swapped, and the message
-   count never moves. A `tool_call`/`tool_result` pair therefore *cannot* orphan. This both 
+   count never moves. A `tool_call`/`tool_result` pair therefore *cannot* orphan. This both
    preserves the stable prefix and retains proper history.
 
 2. **Reversible by default.** Every folded block carries a deterministic `{#<code> FOLDED}` tag.
-   The agent reads the code and calls `recall_folded`/`unfold` to get the original back. 
+   The agent reads the code and calls `recall_folded`/`unfold` to get the original back.
 
 3. **Protected working tail.** The newest ~N tokens never fold, so recent reasoning stays at full
    fidelity. The tail is never empty — the newest block is always protected.
 
-The session file is never modified. 
+The session file is never modified.
 
 ---
 
@@ -32,17 +32,17 @@ src/
   core/                    # No Pi dependencies; adaptable to any harness
     tokens.ts              # estTokens = ceil(len/4), BLOCK_OVERHEAD, clip, firstLine, safeSlice
     digest.ts              # the {#code FOLDED} tag, foldCode (FNV-1a), per-kind digests
-    contract.ts            # PolicyView / FoldCommand / ViewBlock 
+    contract.ts            # PolicyView / FoldCommand / ViewBlock
     block.ts               # the WireBlock model, linearize(), blockId(), isDurableId()
-    apply.ts               # applyPlan(messages, ops) 
+    apply.ts               # applyPlan(messages, ops)
     spool-registry.ts      # folded block id → exact-content spool location
     index/seed-index.ts    # deterministic extraction of the seed index record
     policy/
       fold-ladder.ts       # the shipped fold policy
-      ledger.ts            # the error/risk lexicon 
-  adapters/pi/             # every Pi API call and all disk I/O 
+      ledger.ts            # the error/risk lexicon
+  adapters/pi/             # every Pi API call and all disk I/O
     index.ts               # the extension entry point: hooks, tools, commands
-    store.ts               # the engine 
+    store.ts               # the engine
     spool.ts               # sha256-verified fold envelopes on disk
     index-store.ts         # seed-index.jsonl emission
     persistence.ts         # event-sourced fold state
@@ -66,7 +66,7 @@ Keeping them apart is what lets fold timing change without touching the rewrite.
 
 ---
 
-## 3. The per-turn pipeline 
+## 3. The per-turn pipeline
 
 Pi's `context` hook fires before every model call, hands over a deep copy of the outgoing
 `AgentMessage[]`, and the array returned is what actually gets sent. Per turn:

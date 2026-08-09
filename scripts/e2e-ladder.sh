@@ -145,9 +145,8 @@ fi
 # (e) the fold reached the WIRE, not just the dump: in the session JSONL, the provider-reported
 # prompt (input + cacheRead) of the first assistant turn after the first layer commit must be
 # smaller than the last one before it. Checks (a)-(c) read CONTEXTFOLD_DUMP — the extension's own
-# output — which is exactly why a transport deferring the rewrite (the 2026-07-30
-# pi-codex-conversion continuation finding) was invisible to them. This is the assertion the
-# probe had to make by hand.
+# output — so they cannot see a transport that defers the rewrite downstream (README, "Known
+# integrations", documents one). Only provider-reported usage proves the fold left the machine.
 if ! python3 - "$SESSIONS" <<'PY'
 import json, sys
 from pathlib import Path

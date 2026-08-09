@@ -121,8 +121,8 @@ export class SpoolStore {
 	}
 
 	/**
-	 * Spool a payload. If an identical payload (same sha256) was already spooled this session, write
-	 * a tiny alias file instead of duplicating the content and report the dedup via `dedupOf`.
+	 * Spool a payload. If an identical payload (same sha256) was already spooled by this process,
+	 * write a tiny alias file instead of duplicating the content and report the dedup via `dedupOf`.
 	 */
 	write(p: SpoolWriteParams): SpoolWriteResult {
 		this.ensureDir();

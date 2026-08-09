@@ -116,6 +116,8 @@ function heavySession(): AgentMessage[] {
 
 describe.skipIf(!PI_PRESENT)("context hook", () => {
 	it("ignores obsolete L0 settings and delivers a large fresh result unchanged", async () => {
+		// CONTEXTFOLD_L0* configured the arrival-time ingestion gate removed in 0.3.0 (see
+		// CHANGELOG.md). Stale settings from an older install must stay inert, never resurrect it.
 		process.env.CONTEXTFOLD_L0 = "1";
 		process.env.CONTEXTFOLD_L0_THRESHOLD = "1";
 		const s = await load();

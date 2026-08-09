@@ -29,7 +29,7 @@ interface CategorizedMarkers {
 }
 
 /**
- * The one error-marker lexicon, shared by the fact ledger and the seed index. Compound names
+ * The one error-marker lexicon, shared by the fold digests and the seed index. Compound names
  * (ImportError, ModuleNotFoundError, ValueError, RuntimeException, …) have no word boundary
  * before "Error", so `\bError` misses them — match the whole PascalCase name instead. The
  * plain-word list is deliberately broad and any-case: test runners say "3 failed", tools print

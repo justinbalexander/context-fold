@@ -1,8 +1,8 @@
 /*
  * index-store.ts — seed-index emission at fold events (docs/SEED_INDEX_SPEC.md).
  *
- * On every fold event the adapter (1) spools each masked block's full text — the C-layer
- * durability floor for exact recall after hard compaction — and (2) appends one deterministic
+ * On every fold event the adapter (1) spools each masked block's full text — the durability
+ * floor for exact recall after hard compaction — and (2) appends one deterministic
  * index record to
  * `<spoolDir>/seed-index.jsonl`. The JSONL is append-only and IS the persistence: resume just
  * keeps appending under later seqs, and `latest record per seq wins` is the consumer contract.
@@ -59,8 +59,9 @@ export class SeedIndexStore {
 
 /**
  * Handle one engine fold event: spool the masked blocks, build spans, extract index fields, and
- * append the record. A legacy arrival-gate entry may already own a spool; reuse it during resumed
- * sessions rather than duplicating the payload. A per-block SpoolError (fold-code collision)
+ * append the record. A block may already own a spool entry (restored at resume, written at
+ * compaction, or by an earlier event); reuse it rather than duplicating the payload. A
+ * per-block SpoolError (fold-code collision)
  * drops only that block, reported via `droppedIds` so the engine leaves it raw and holds it.
  * Deterministic except for `now`.
  */

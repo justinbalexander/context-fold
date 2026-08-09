@@ -1,5 +1,5 @@
 /*
- * retention.ts — spool GC: the retention policy the extension never had.
+ * retention.ts — spool GC: bounded on-disk retention for session spools.
  *
  * The spool grows without bound on a 24/7 box (one dir per session, one envelope per fold;
  * nothing ever deletes). This sweep runs once per session at `session_start` and removes WHOLE
@@ -64,7 +64,8 @@ export function touchHeartbeat(spoolDir: string, now = Date.now(), throttleMs = 
 		lastBeat.set(spoolDir, now);
 		return true;
 	} catch {
-		// Unwritable spool: the sweep may reap this dir early, which is the pre-existing behavior.
+		// Unwritable spool: without a heartbeat the sweep judges this dir by fold mtimes alone,
+		// so a long-quiet session may be reaped early.
 		lastBeat.set(spoolDir, now); // do not retry every turn
 		return false;
 	}

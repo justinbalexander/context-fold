@@ -6,7 +6,8 @@
  * at any price level and tracks rate-limit consumption under subscription quota:
  *
  *   warm carry per turn ≈ 0.1 × carried      cold carry per turn ≈ carried
- *   reconstruction ≈ handoff + index + a few re-reads ≈ reconTokens (default 18k — measure it)
+ *   reconstruction ≈ handoff + index + a few re-reads ≈ reconTokens (default 18k; set
+ *   CONTEXTFOLD_RECON_TOKENS to a measured cost where one is known)
  *   payback(reset) ≈ recon / (0.1 × (carried − recon)) warm turns
  *
  * ADVISORY ONLY: flags surface in the status command and as one stderr line; nothing here blocks

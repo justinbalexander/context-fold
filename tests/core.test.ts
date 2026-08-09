@@ -72,9 +72,9 @@ describe("applyPlan — in-place folds keep tool pairs", () => {
 	});
 
 	it("keeps parallel tool pairs balanced when only some results fold", () => {
-		// The historically dangerous shape: ONE assistant message with two parallel calls. Folding
-		// content in place can never strand a partner, because the message count never moves — this
-		// asserts that structural property on the shape that used to need an orphan fixpoint.
+		// The dangerous shape: ONE assistant message with two parallel calls. Folding content in
+		// place can never strand a partner, because the message count never moves — this asserts
+		// that structural property on the worst-case shape.
 		const messages = [
 			user("parallel work"),
 			assistantWithCalls([{ id: "c1", name: "read" }, { id: "c2", name: "grep" }], { text: "doing both" }),
