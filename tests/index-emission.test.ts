@@ -9,18 +9,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapGateRegistry } from "../src/core/gate-registry";
+import { MapSpoolRegistry } from "../src/core/spool-registry";
 import { SpoolStore, readEnvelopeAt } from "../src/adapters/pi/spool";
 import { SeedIndexStore, emitFoldIndex } from "../src/adapters/pi/index-store";
 import type { AgentMessage } from "../src/core/block";
-import { user, assistantWithCalls, bigResult, toolResult } from "./helpers";
+import { user, assistantText, assistantWithCalls, bigResult, toolResult } from "./helpers";
 
 let dir: string;
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 function setup() {
 	dir = mkdtempSync(join(tmpdir(), "contextfold-index-"));
-	const registry = new MapGateRegistry();
+	const registry = new MapSpoolRegistry();
 	const spool = new SpoolStore(dir);
 	const index = new SeedIndexStore(dir);
 	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
@@ -40,6 +40,7 @@ function bigSession(): AgentMessage[] {
 	lines[150] = "    CAP_X9_LIMIT=52418 assigned to shard 3f9a2c7e11d04b22";
 	lines[171] = "  2 passed, 1 failed";
 	messages.push(toolResult("cx", lines.join("\n"), "bash"));
+	messages.push(assistantText("finished reading", "after-cx"));
 	messages.push(user("now the newest question"));
 	return messages;
 }
@@ -101,5 +102,53 @@ describe("seed-index emission at fold events", () => {
 		const records = index.readAll();
 		expect(records.length).toBeGreaterThan(afterFirst);
 		expect(records[0].seq).toBe(1); // first record intact
+	});
+
+	it("publishes registry entries only after index and spool-ledger persistence succeed", () => {
+		dir = mkdtempSync(join(tmpdir(), "contextfold-index-"));
+		const registry = new MapSpoolRegistry();
+		const spool = new SpoolStore(dir);
+		const index = new SeedIndexStore(dir);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
+		let event: Parameters<typeof emitFoldIndex>[0] | undefined;
+		engine.onFoldEvent = (candidate) => {
+			event = candidate;
+			return false;
+		};
+		engine.process(bigSession(), { contextWindow: 80_000, tokens: null });
+		expect(event).toBeDefined();
+
+		const unavailableIndex = new SeedIndexStore(join(dir, "unavailable-index"));
+		unavailableIndex.append = () => {
+			throw new Error("index unavailable");
+		};
+		expect(() =>
+			emitFoldIndex(event!, { spool, registry, index: unavailableIndex, sessionId: "s-test" }),
+		).toThrow("index unavailable");
+		expect(registry.size).toBe(0);
+
+		expect(() =>
+			emitFoldIndex(event!, {
+				spool,
+				registry,
+				index,
+				sessionId: "s-test",
+				persistEntry: () => {
+					throw new Error("ledger unavailable");
+				},
+			}),
+		).toThrow("ledger unavailable");
+		expect(registry.size).toBe(0);
+
+		const persisted: string[] = [];
+		emitFoldIndex(event!, {
+			spool,
+			registry,
+			index,
+			sessionId: "s-test",
+			persistEntry: (entry) => persisted.push(entry.blockId),
+		});
+		expect(registry.size).toBeGreaterThan(0);
+		expect(persisted.length).toBe(registry.size);
 	});
 });

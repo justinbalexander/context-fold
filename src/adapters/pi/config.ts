@@ -33,9 +33,6 @@ export function configFromEnv(): Partial<FoldConfig> {
 	const tail = Number(process.env.CONTEXTFOLD_TAIL);
 	if (Number.isFinite(tail) && tail >= 0) cfg.tailTarget = tail;
 	if (process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true") cfg.debug = true;
-	// Deferred L0 substitution — 0 keeps the born-folded default (see FoldConfig.gateKeepRecent).
-	const keep = Number(process.env.CONTEXTFOLD_L0_KEEP_RECENT);
-	if (Number.isFinite(keep) && keep >= 0) cfg.gateKeepRecent = Math.floor(keep);
 	return cfg;
 }
 

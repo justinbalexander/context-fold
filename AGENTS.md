@@ -49,10 +49,9 @@ deliberately outside `npm test`. Run them only when the folding path itself chan
 
 - **`typebox` and `@earendil-works/*` are peer dependencies, never vendored.** Pi injects bundled
   virtual modules at runtime; a separately installed copy is not the one the engine uses.
-- **Pi hooks do not chain — the last non-`undefined` return wins.** Two extensions rewriting
-  `context` are mutually destructive. See the collision table in `docs/pi-api-surface.md`.
-- **`CONTEXTFOLD_L0*` is the ingestion gate.** `L0` is the historical name, kept because those
-  variables are published configuration surface. The prose name is "the ingestion gate".
+- **Hook composition is Pi-version-sensitive.** Current Pi 0.83+ chains `context` transforms as
+  middleware; older builds used last-wins dispatch. `session_before_compact` still selects one
+  result. See the versioned collision table in `docs/pi-api-surface.md`.
 - **Every hook is fail-open.** A defect should cost one result's folding or one turn's folding —
   never the turn itself. Preserve that when adding code to a hook.
 

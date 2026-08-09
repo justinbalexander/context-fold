@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # e2e-resume.sh — fold state survives a restart.
 #
-# Run 1 reads a large file (born-folded → spooled, ledger entry appended). Run 2 RESUMES the same
-# session id and asks a question about a buried line. We assert:
-#   (a) the resume restored the fold state — stderr shows `resume: restored N L0 folds`;
+# Run 1 reads a large file under a low deterministic budget cap, causing a ladder fold. Run 2
+# RESUMES the same session id and asks a question about a buried line. We assert:
+#   (a) the resume restored spool entries and frozen layers;
 #   (b) the prior read still renders as a pointer in run 2's outgoing view (restore worked — without
-#       it the result would come back raw, since the tool_result hook does not re-fire on resume);
+#       it the result would come back raw);
 #   (c) the pointer resolves — the agent recovers the buried phrase via recall.
 #
 # Model defaults to gpt-5.6-sol (openai-codex). Override with E2E_PROVIDER / E2E_MODEL.
@@ -36,16 +36,16 @@ TOKEN="FINDME_RS9"; PHRASE="marmalade-outrigger-5"
 } > "$BIGFILE"
 
 echo "== run 1: read + fold ($PROVIDER/$MODEL), session=$SID =="
-CONTEXTFOLD_L0="${CONTEXTFOLD_L0:-1}" CONTEXTFOLD_DEBUG=1 \
+CONTEXTFOLD_BUDGET_CAP="${E2E_CAP:-3000}" CONTEXTFOLD_DEBUG=1 \
   "$PI" -p --mode json -ne -e "$EXT" --session-dir "$SESS" --session-id "$SID" --provider "$PROVIDER" --model "$MODEL" \
-  "Use the read tool to read the entire file at $BIGFILE in one call, then reply with ONLY the total number of lines in it." \
+  "Use the read tool to read the entire file at $BIGFILE in one call. After reading it, make a SEPARATE bash tool call that runs printf context-fold-checkpoint. Then reply with ONLY the total number of lines in the file." \
   >"$WORK/stdout1.json" 2>"$WORK/stderr1.txt"
 RUN1_RC=$? # capture immediately: any later command (including an assignment) overwrites $?
-FOLDLINE="$(grep -oE 'l0-fold #[0-9a-z]{6} tool=(read|exec_command|exec|bash) [0-9]+→[0-9]+' "$WORK/stderr1.txt" | head -1)"
+FOLDLINE="$(grep -oE 'layer [0-9]+ committed \([0-9]+ blocks frozen\)' "$WORK/stderr1.txt" | head -1)"
 echo "   run 1 exit=$RUN1_RC — ${FOLDLINE:-NO FOLD}"
 [[ $RUN1_RC -eq 0 ]] || echo "   NOTE: run 1 exited $RUN1_RC"
 if [[ -z "$FOLDLINE" ]]; then
-  echo "FAIL (pre) gate never fired in run 1 — the agent likely routed around the read (wc/grep); nothing to restore"
+  echo "FAIL (pre) ladder never folded in run 1 — the agent may have routed around the requested full read"
   echo "== e2e-resume: FAIL =="; exit 1
 fi
 
@@ -53,7 +53,7 @@ fi
 rm -f "$BIGFILE"
 
 echo "== run 2: resume same session, recall a buried line =="
-CONTEXTFOLD_L0="${CONTEXTFOLD_L0:-1}" CONTEXTFOLD_DEBUG=1 CONTEXTFOLD_DUMP="$DUMP" \
+CONTEXTFOLD_BUDGET_CAP="${E2E_CAP:-3000}" CONTEXTFOLD_DEBUG=1 CONTEXTFOLD_DUMP="$DUMP" \
   "$PI" -p --mode json -ne -e "$EXT" --session-dir "$SESS" --session-id "$SID" --provider "$PROVIDER" --model "$MODEL" \
   "Earlier you read a file. Tell me the single phrase that appears immediately after the token $TOKEN on its line. Reply with ONLY that phrase." \
   >"$WORK/stdout2.json" 2>"$WORK/stderr2.txt"
@@ -62,10 +62,10 @@ echo "   run 2 exit=$?"
 fail=0
 
 # (a) restore happened
-if grep -qE 'resume: restored [1-9][0-9]* L0 folds' "$WORK/stderr2.txt"; then
-  echo "PASS (a) resume restored fold state: $(grep -oE 'resume: restored [0-9]+ L0 folds[^\\]*' "$WORK/stderr2.txt" | head -1)"
+if grep -qE 'resume: restored [1-9][0-9]* spool entries, [0-9]+ unfolds, [1-9][0-9]* layers' "$WORK/stderr2.txt"; then
+  echo "PASS (a) resume restored fold state: $(grep -oE 'resume: restored [0-9]+ spool entries, [0-9]+ unfolds, [0-9]+ layers[^\\]*' "$WORK/stderr2.txt" | head -1)"
 else
-  echo "FAIL (a) no 'resume: restored N L0 folds' line in run 2 stderr"; grep -i 'context-fold' "$WORK/stderr2.txt" | head -3; fail=1
+  echo "FAIL (a) no restored spool/layer state in run 2 stderr"; grep -i 'context-fold' "$WORK/stderr2.txt" | head -3; fail=1
 fi
 
 # (b) the prior read still renders folded in run 2's view

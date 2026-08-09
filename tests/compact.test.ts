@@ -9,20 +9,20 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapGateRegistry } from "../src/core/gate-registry";
+import { MapSpoolRegistry } from "../src/core/spool-registry";
 import { SpoolStore } from "../src/adapters/pi/spool";
-import { SeedIndexStore, emitFoldIndex, emitCompactIndex } from "../src/adapters/pi/index-store";
+import { SeedIndexStore, emitFoldIndex, emitCompactIndex, spoolCompactedBlocks } from "../src/adapters/pi/index-store";
 import { renderDetCompactionSummary } from "../src/adapters/pi/compact";
 import { linearize, type WireBlock } from "../src/core/block";
 import type { AgentMessage } from "../src/core/block";
-import { user, assistantWithCalls, bigResult, toolResult } from "./helpers";
+import { user, assistantText, assistantWithCalls, bigResult, toolResult } from "./helpers";
 
 let dir: string;
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 function setup() {
 	dir = mkdtempSync(join(tmpdir(), "contextfold-compact-"));
-	const registry = new MapGateRegistry();
+	const registry = new MapSpoolRegistry();
 	const spool = new SpoolStore(dir);
 	const index = new SeedIndexStore(dir);
 	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
@@ -41,6 +41,7 @@ function needled(): { messages: AgentMessage[]; needle: string } {
 	lines[144] = `   ${needle} (planted)`;
 	messages.push(assistantWithCalls([{ id: "cx", name: "read" }]));
 	messages.push(toolResult("cx", lines.join("\n"), "read"));
+	messages.push(assistantText("finished reading", "after-cx"));
 	messages.push(user("newest question"));
 	return { messages, needle };
 }
@@ -64,7 +65,39 @@ describe("recall survives hard compaction", () => {
 		expect(errors).toEqual([]);
 		expect(matches[0].text).toContain(needle);
 	});
+
+	it("spool-at-compaction makes a NEVER-folded block recallable after it leaves history", () => {
+		const { e, registry, spool, index } = setup();
+		// A short session compacted before any fold event: nothing is in the registry yet.
+		const needle = "UNFOLDED_NEEDLE_Z7=140072";
+		const lines = Array.from({ length: 200 }, (_, j) => `u${j}: ${"w".repeat(30)}`);
+		lines[99] = `   ${needle} (planted)`;
+		const messages: AgentMessage[] = [
+			user("quick look"),
+			assistantWithCalls([{ id: "cu", name: "read" }]),
+			toolResult("cu", lines.join("\n"), "read"),
+			assistantText("done", "after-cu"),
+		];
+		expect(registry.size).toBe(0);
+
+		// Hard compaction: spool the leaving span, then emit the compact record.
+		const blocks = linearize(messages) as unknown as WireBlock[];
+		const added = spoolCompactedBlocks(blocks, { spool, registry, now: 1_722_200_200_000 });
+		expect(added.map((a) => a.blockId)).toContain("r:cu");
+		const rec = emitCompactIndex(blocks, {
+			registry, index, sessionId: "s-compact", tokensBefore: 5_000, contextWindow: 80_000, now: 1_722_200_200_000,
+		});
+		expect(rec.spans.some((s) => s.blockId === "r:cu")).toBe(true); // recovery pointer exists
+
+		// Post-compaction history: the block is gone from the live array, recall still serves it.
+		e.process([user("fresh start")], { contextWindow: 80_000, tokens: null });
+		const { matches, missing } = e.resolveRecall([foldCodeOf("r:cu")], { grep: "UNFOLDED_NEEDLE_Z7" });
+		expect(missing).toEqual([]);
+		expect(matches[0].text).toContain(needle);
+	});
 });
+
+import { foldCode as foldCodeOf } from "../src/core/digest";
 
 describe("compact index record + deterministic summary", () => {
 	it("emitCompactIndex indexes the whole leaving span and the renderer carries it verbatim", () => {
@@ -94,7 +127,7 @@ describe("compact index record + deterministic summary", () => {
 		});
 		expect(summary).toContain("deterministic seed index — no model involved");
 		expect(summary).toContain("CAP_X9_LIMIT");
-		expect(summary).toContain("recall search=");
+		expect(summary).toContain("recall_folded search=");
 		expect(summary).toContain("dig through the dumps");
 		expect(summary).toContain("UNTRUSTED");
 		expect(summary).toContain("Earlier narrative summary.");

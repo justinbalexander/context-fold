@@ -74,8 +74,10 @@ describe("CacheTelemetry", () => {
 		t.noteFoldEvent(9_000);
 		// The re-prefill turn: read collapses to the surviving head, write covers the rest.
 		t.record({ input: 100, output: 10, cacheRead: 9_000, cacheWrite: 31_000, totalTokens: 40_110 });
+		expect(t.snapshot().lastTurnAfterFold).toBe(true);
 		// Two ordinary turns after it must not add to the fold's cost.
 		t.record({ input: 100, output: 10, cacheRead: 40_000, cacheWrite: 400, totalTokens: 40_510 });
+		expect(t.snapshot().lastTurnAfterFold).toBe(false);
 		t.record({ input: 100, output: 10, cacheRead: 40_400, cacheWrite: 350, totalTokens: 40_860 });
 
 		const s = t.snapshot();
@@ -169,6 +171,7 @@ describe("CacheTelemetry", () => {
 		expect(s.foldEvents).toBe(0);
 		expect(s.foldSavedTokens).toBe(0);
 		expect(s.foldReprefillTokens).toBe(0);
+		expect(s.lastTurnAfterFold).toBe(false);
 		expect(s.foldNetTokens).toBeNull();
 		expect(t.foldCostLine()).toBeNull();
 	});

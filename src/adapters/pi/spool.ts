@@ -1,12 +1,11 @@
 /*
- * spool.ts — the L0 ingestion spool: durable, on-disk ground truth for a folded tool result.
+ * spool.ts — durable, on-disk ground truth for a folded block.
  *
- * When the gate folds a large tool result to a born-folded pointer, the RAW payload is written
- * here as a versioned JSON envelope, one file per fold code. Recall (store.resolve, and the
- * grep/lines partial retrieval) reads from this spool — the pointer in the model's view is the
- * only thing that shrank; nothing was destroyed. The session jsonl still records the raw result
- * verbatim (the gate is observe-only there); the spool is the recall-optimized copy the extension
- * owns and can slice.
+ * When the pressure-driven ladder folds a block, its raw payload is written here as a versioned
+ * JSON envelope, one file per fold code. Recall, grep, and line-range retrieval read from this
+ * spool after hard compaction removes the raw message from live history. Pi's session JSONL still
+ * records the raw result verbatim; the spool is the recall-optimized copy the extension owns and
+ * can slice.
  *
  * Layout: `<sessionDir>/spool/<sessionId>/<foldCode>.json`. Writes are atomic
  * (tmp + rename). Reads verify sha256 and throw a typed SpoolError naming the path on any
@@ -46,12 +45,12 @@ export interface SpoolEnvelope {
 	aliasOf?: string;
 }
 
-/** What the caller learns after a write — enough to build the pointer digest (including the dedup note). */
+/** What the caller learns after a write — enough to register the durable recall route. */
 export interface SpoolWriteResult {
 	code: string;
 	/** The effective envelope carrying the content (the ORIGINAL when this was a dedup hit). */
 	envelope: SpoolEnvelope;
-	/** When set, this payload was identical to an earlier fold's; pointer notes "identical to {#code}". */
+	/** When set, this payload was identical to an earlier fold; recall reports the original code. */
 	dedupOf?: string;
 }
 
@@ -85,7 +84,7 @@ export interface SpoolWriteParams {
 
 /**
  * A per-session spool directory. One instance per session; the directory is created lazily on the
- * first write so an inert gate (kill switch off) never touches disk.
+ * first committed fold, so an idle session never touches disk.
  */
 export class SpoolStore {
 	private ensured = false;
@@ -220,7 +219,7 @@ function readEnvelopeFile(path: string): SpoolEnvelope {
  * Read the content-bearing envelope for a spool file at an absolute path, following one dedup alias
  * hop (the alias target is a sibling `<aliasOf>.json` in the same directory). Verifies integrity.
  * This is the authoritative recall entry point — the registry stores each fold's absolute spoolPath,
- * so recall works across resume/gate-off regardless of the current session's spool dir.
+ * so recall works across resume regardless of the current session's spool dir.
  */
 export function readEnvelopeAt(path: string, depth = 0): SpoolEnvelope {
 	const env = readEnvelopeFile(path);

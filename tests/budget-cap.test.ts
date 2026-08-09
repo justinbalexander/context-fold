@@ -6,12 +6,12 @@
 import { describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapGateRegistry } from "../src/core/gate-registry";
+import { MapSpoolRegistry } from "../src/core/spool-registry";
 import { configFromEnv } from "../src/adapters/pi/config";
 import { user } from "./helpers";
 
 function engine(cfg: Record<string, unknown> = {}) {
-	return new ContextFoldEngine(new FoldLadderPolicy(), cfg, new MapGateRegistry());
+	return new ContextFoldEngine(new FoldLadderPolicy(), cfg, new MapSpoolRegistry());
 }
 
 const msgs = [user("hello")];

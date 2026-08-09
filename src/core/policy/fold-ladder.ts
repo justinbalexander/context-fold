@@ -152,7 +152,6 @@ function maskable(b: ViewBlock): boolean {
 		isDurableId(b.id) &&
 		!b.protected &&
 		!b.held &&
-		!b.bornFolded &&
 		!b.frozen &&
 		b.foldedTokens < b.tokens
 	);

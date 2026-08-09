@@ -21,6 +21,8 @@ export interface AdvisorInput {
 	/** Last turn's provider usage. */
 	lastCacheRead: number;
 	lastInput: number;
+	/** True when the latest response followed a context-fold prefix rewrite. */
+	lastTurnAfterFold: boolean;
 	/** Current carried context in tokens (provider-anchored when available), or null unknown. */
 	carriedTokens: number | null;
 	contextWindow: number | null;
@@ -58,7 +60,10 @@ export function advise(i: AdvisorInput): Advisory {
 	// Cold = a turn that SHOULD have hit the cache read nothing. Turn 1 is always a prefill;
 	// a session that has never been warm (org/provider without caching) is cold by definition.
 	const coldNow =
-		i.turns >= 2 && i.lastCacheRead === 0 && (i.lastInput >= COLD_NOTIFY_INPUT || carried >= CARRY_FLOOR || !i.everWarm);
+		!i.lastTurnAfterFold &&
+		i.turns >= 2 &&
+		i.lastCacheRead === 0 &&
+		(i.lastInput >= COLD_NOTIFY_INPUT || carried >= CARRY_FLOOR || !i.everWarm);
 
 	const paybackTurns =
 		carried > i.reconTokens + CARRY_FLOOR / 2

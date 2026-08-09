@@ -6,13 +6,14 @@
 import { describe, expect, it } from "vitest";
 import { ContextFoldEngine, type FoldEventReport, type FrozenLayer } from "../src/adapters/pi/store";
 import { FoldLadderPolicy, LADDER_DEFAULTS } from "../src/core/policy/fold-ladder";
-import { MapGateRegistry } from "../src/core/gate-registry";
+import { MapSpoolRegistry } from "../src/core/spool-registry";
 import type { AgentMessage } from "../src/core/block";
-import { user, assistantWithCalls, bigResult, toolResult, isBalanced } from "./helpers";
+import type { FoldPolicy } from "../src/core/contract";
+import { user, assistantText, assistantWithCalls, bigResult, toolResult, isBalanced } from "./helpers";
 
 function ladderEngine(cfg: Record<string, unknown> = {}, ladderCfg = LADDER_DEFAULTS) {
 	const policy = new FoldLadderPolicy(ladderCfg);
-	const e = new ContextFoldEngine(policy, { tailTarget: 100, ...cfg }, new MapGateRegistry());
+	const e = new ContextFoldEngine(policy, { tailTarget: 100, ...cfg }, new MapSpoolRegistry());
 	const committed: FrozenLayer[] = [];
 	const events: FoldEventReport[] = [];
 	e.onLayerCommit = (layer) => committed.push(layer);
@@ -162,6 +163,68 @@ describe("discrete fold events", () => {
 		e.process(messages, { contextWindow: 200_000, tokens: null });
 		expect(committed.length).toBe(1);
 		expect(events[0].trigger).toBe("cap");
+	});
+
+	it("never masks a tool result before its first provider delivery", () => {
+		const { e, committed } = ladderEngine({ absoluteTokenCap: 1_000, tailTarget: 0 });
+		const messages: AgentMessage[] = [user("read it"), assistantWithCalls([{ id: "fresh", name: "read" }]), bigResult("fresh", 500)];
+
+		const first = e.process(messages, { contextWindow: 80_000, tokens: null });
+		expect(resultText(first, "fresh")).not.toContain("FOLDED");
+		expect(committed).toHaveLength(0);
+
+		messages.push(assistantText("finished reading", "after-fresh"), user("continue"));
+		const second = e.process(messages, { contextWindow: 80_000, tokens: null });
+		expect(resultText(second, "fresh")).toContain("FOLDED");
+		expect(committed).toHaveLength(1);
+	});
+
+	it("protects every parallel result on their shared first delivery", () => {
+		const { e, committed } = ladderEngine({ absoluteTokenCap: 1_000, tailTarget: 0 });
+		const messages: AgentMessage[] = [
+			user("read both"),
+			assistantWithCalls([{ id: "p1", name: "read" }, { id: "p2", name: "read" }]),
+			bigResult("p1", 300),
+			bigResult("p2", 300),
+		];
+
+		const first = e.process(messages, { contextWindow: 80_000, tokens: null });
+		expect(resultText(first, "p1")).not.toContain("FOLDED");
+		expect(resultText(first, "p2")).not.toContain("FOLDED");
+		expect(committed).toHaveLength(0);
+
+		messages.push(assistantText("finished reading", "after-parallel"), user("continue"));
+		const second = e.process(messages, { contextWindow: 80_000, tokens: null });
+		expect(resultText(second, "p1")).toContain("FOLDED");
+		expect(resultText(second, "p2")).toContain("FOLDED");
+	});
+
+	it("engine lowering rejects a fresh result even when a defective policy requests it", () => {
+		const hostile: FoldPolicy = {
+			id: "hostile",
+			label: "hostile",
+			conduct: (view) => [{ kind: "fold", ids: view.blocks.filter((block) => block.kind === "tool_result").map((block) => block.id) }],
+		};
+		const engine = new ContextFoldEngine(hostile, { tailTarget: 0 }, new MapSpoolRegistry());
+		const messages: AgentMessage[] = [user("read it"), assistantWithCalls([{ id: "fresh", name: "read" }]), bigResult("fresh", 300)];
+
+		const out = engine.process(messages, { contextWindow: 80_000, tokens: null });
+		expect(resultText(out, "fresh")).not.toContain("FOLDED");
+	});
+
+	it("keeps a fold raw when its durability callback rejects the commit", () => {
+		const { e, committed } = ladderEngine({ absoluteTokenCap: 10_000 });
+		const { messages, callIds } = session(3);
+		e.onFoldEvent = () => false;
+
+		const rejected = e.process(messages, { contextWindow: 80_000, tokens: null });
+		expect(resultText(rejected, callIds[0])).not.toContain("FOLDED");
+		expect(committed).toHaveLength(0);
+
+		e.onFoldEvent = () => true;
+		const accepted = e.process(messages, { contextWindow: 80_000, tokens: null });
+		expect(resultText(accepted, callIds[0])).toContain("FOLDED");
+		expect(committed[0].seq).toBe(1);
 	});
 
 	it("provider-reported usage drives the fraction when present", () => {

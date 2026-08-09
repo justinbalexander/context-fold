@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
 	spoolRetainMsFromEnv,
 	sweepSpools,
+	sweepWorkspaceSpools,
 	touchHeartbeat,
 	resetHeartbeatThrottle,
 	SPOOL_RETAIN_DAYS_DEFAULT,
@@ -112,6 +113,52 @@ describe("sweepSpools", () => {
 		const res = sweepSpools(root, "current", 14 * DAY, NOW);
 		expect(res.reaped).toEqual([]);
 		expect(res.kept).toBe(1);
+	});
+});
+
+describe("sweepWorkspaceSpools", () => {
+	/** Create `<root>/<workspace>/spool/<session>` with one aged envelope file. */
+	function workspaceSession(workspace: string, session: string, ageDays: number): string {
+		const dir = join(root, workspace, "spool", session);
+		mkdirSync(dir, { recursive: true });
+		const t = new Date(NOW - ageDays * DAY);
+		const p = join(dir, "abc123.json");
+		writeFileSync(p, "{}");
+		utimesSync(p, t, t);
+		utimesSync(dir, t, t);
+		return dir;
+	}
+
+	it("reaps stale sessions in sibling workspaces and removes an emptied spool root", () => {
+		const stale = workspaceSession("ws-abandoned", "s1", 30);
+		const fresh = workspaceSession("ws-active", "s2", 0.5);
+		const res = sweepWorkspaceSpools(root, join(root, "ws-current", "spool"), 1 * DAY, NOW);
+		expect(res.reaped).toEqual(["ws-abandoned/s1"]);
+		expect(existsSync(stale)).toBe(false);
+		expect(existsSync(join(root, "ws-abandoned", "spool"))).toBe(false); // emptied root removed
+		expect(existsSync(join(root, "ws-abandoned"))).toBe(true); // workspace dir itself untouched
+		expect(existsSync(fresh)).toBe(true);
+	});
+
+	it("never descends into the current workspace's spool root", () => {
+		const mine = workspaceSession("ws-current", "s-old", 400);
+		const res = sweepWorkspaceSpools(root, join(root, "ws-current", "spool"), 1 * DAY, NOW);
+		expect(res.reaped).toEqual([]);
+		expect(existsSync(mine)).toBe(true);
+	});
+
+	it("a sibling workspace's heartbeating session survives", () => {
+		const live = workspaceSession("ws-other", "s-live", 30);
+		touchHeartbeat(live, NOW);
+		const res = sweepWorkspaceSpools(root, join(root, "ws-current", "spool"), 1 * DAY, NOW);
+		expect(res.reaped).toEqual([]);
+		expect(existsSync(live)).toBe(true);
+	});
+
+	it("workspaces without a spool subdir and a missing sessions root are no-ops", () => {
+		mkdirSync(join(root, "ws-no-spool"), { recursive: true });
+		expect(sweepWorkspaceSpools(root, join(root, "ws-current", "spool"), 1 * DAY, NOW)).toEqual({ reaped: [], kept: 0 });
+		expect(sweepWorkspaceSpools(join(root, "nope"), join(root, "ws-current", "spool"), 1 * DAY, NOW)).toEqual({ reaped: [], kept: 0 });
 	});
 });
 

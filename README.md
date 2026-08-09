@@ -6,7 +6,7 @@ calls — out of the model's view. Every fold is reversible, indexed, and comput
 call. The core is written to be harness-agnostic and can be adapted to other coding harnesses with
 some work.
 
-**Requirements:** Node ≥ 22.19.0 and Pi ≥ 0.80.
+**Requirements:** Node ≥ 22.19.0 and Pi ≥ 0.80.4.
 
 ```bash
 pi install npm:context-fold
@@ -45,29 +45,26 @@ why every fold emits a deterministic index of exact tokens rather than a paraphr
 
 ## The system in short
 
-**1. Ingestion: the gate.** *(opt-in, `CONTEXTFOLD_L0`)* The moment a tool result lands, if it is
-over ~2000 estimated tokens it is spooled to disk and enters the model's view already folded to a
-pointer. This is the only stage that can act on a result before the model ever reads it.
-
-**2. Per-turn: the fold ladder.** *(always on)* Once usage crosses ~45 % of the context window, a
+**1. Per-turn: the fold ladder.** Once usage crosses ~45 % of the context window, a
 fold event masks stale `tool_result` and `thinking` blocks. User intent, assistant conclusions, and
-the record of every action are never touched.
+the record of every action are never touched. Fresh tool results are always delivered in full at
+least once.
 
-**3. The floor.** Eventually no more tool calls can be masked. At that point context-fold says so
+**2. The floor.** Eventually no more tool calls can be masked. At that point context-fold says so
 rather than churning. What remains is the irreducible floor, and it cannot compress past it.
 
-**4. Hard compaction.** *Pi* decides when this fires. By default (`CONTEXTFOLD_COMPACT=det`)
+**3. Hard compaction.** *Pi* decides when this fires. By default (`CONTEXTFOLD_COMPACT=det`)
 context-fold intercepts it and hands Pi a summary rendered verbatim from the session's seed index,
 so Pi's LLM summarization never runs. `CONTEXTFOLD_COMPACT=native` opts back into Pi's stock
 behavior.
 
 At this stage the raw messages do leave live context — that is what compaction is. What survives is
-the index, the spool, and Pi's session file, all on disk and all reachable through `recall`. The
+the index, the spool, and Pi's session file, all on disk and all reachable through `recall_folded`. The
 loss is bounded and reversible rather than lossy and final. There is no paraphrase step and nothing
 that can hallucinate. The extension warns you after a second forced compaction; it is worth running
 a handoff well before that, at a definable task finish line.
 
-**5. Handoff.** *(manual, `/fold-handoff`)* Writes a seed file for starting a fresh session: the
+**4. Handoff.** *(manual, `/fold-handoff`)* Writes a seed file for starting a fresh session: the
 same verbatim index plus the goal you state.
 
 > **On the thresholds.** Every percentage above is a default, not a tuned constant. The right
@@ -91,39 +88,13 @@ prompt-cache suffix, so mutations are batched at points where that cost is paid 
 - Each further event needs at least a ladder step (~12 % of the window) of maskable mass. Crossing
   the absolute budget cap (`min(200k, 0.75 × window)`) folds immediately.
 
-### The ingestion gate
+### Spool-backed recovery
 
-The ladder folds blocks once they have aged past a threshold. The **ingestion gate** folds one
-class of block at *arrival*, before the model ever reads it: a tool result larger than
-`CONTEXTFOLD_L0_THRESHOLD` estimated tokens. A verbose flood — a 12k-token file ingest, say — has
-near-zero marginal value warm, yet costs its full weight on every subsequent turn.
-
-(The gate's original name was *L0*, meaning level zero: the stage that sits below the ladder's
-numbered fold layers. That name survives in the `CONTEXTFOLD_L0*` variable names, which are part of
-the published configuration surface and are not being renamed.)
-
-With the gate enabled, every tool result is observed as it lands, so the session file keeps the raw
-payload. A qualifying result is spooled to a verified envelope and born folded: the view shows a
-≤400-token pointer carrying the `{#code FOLDED}` recovery tag, a tool-aware summary, head and tail,
-and every detected error or risk line verbatim. Error-shaped results get 4× threshold headroom, so
-a short error never folds away.
-
-**Why it ships off, and when to turn it on.** I have run the gate against real tasks, not a
-benchmark suite, and the pattern was consistent: near-inert where a capable model already scopes
-its own reads, decisive where a flood genuinely lands. On the two flood-shaped tasks I measured,
-input dropped by roughly 5× and 4×. Read those as single observed runs — there is no published
-harness behind them, no dataset, and I have no plans to build one. Turn the gate on if your
-sessions read large files, run chatty build or test commands, or fetch web pages. Leave it off if
-your agent already reads narrowly, or you will pay pointer overhead for nothing.
-
-**Deferred substitution (`CONTEXTFOLD_L0_KEEP_RECENT`).** The gate's known failure mode is recall
-churn: born-folding on arrival means a model that reads several files gets pointers back and must
-recall them, and the extra turns can out-cost the per-turn saving. Holding the newest N registered
-blocks warm is the obvious mitigation, and one live comparison did **not** support it — on a task
-where every masked payload was needed again, the gate came out meaningfully *more* expensive than
-the no-gate control, and deferral did not recover the difference. The churn was driven by the model
-needing *all* of the masked content, which an arrival-time policy cannot predict. The flag is
-retained as an experiment rather than a recommendation.
+Every committed ladder fold writes the exact masked block to a versioned, sha256-verified spool
+envelope before the raw message can leave live history. The model sees a deterministic
+`{#code FOLDED}` digest and can retrieve the original through `recall_folded` or restore it through
+`unfold`. This happens only when context pressure folds stale material; context-fold never hides a
+fresh result before its first delivery.
 
 ### The seed index
 
@@ -135,9 +106,9 @@ spool. Extraction is pure regex — same input, byte-identical output.
 
 ### Getting detail back
 
-- `recall search=<term>` — one sweep over every folded block, with matching lines grouped by code.
+- `recall_folded search=<term>` — one sweep over every folded block, with matching lines grouped by code.
   A detail lost somewhere behind N pointers costs one call, not N.
-- `recall <code>`, with optional `grep=<term>` or `lines=<a-b>` — whole or partial retrieval,
+- `recall_folded <code>`, with optional `grep=<term>` or `lines=<a-b>` — whole or partial retrieval,
   token-capped so a recall can never re-flood what folding saved.
 - `unfold <code>` — sticky re-expansion. The block stays expanded and is never re-masked.
 
@@ -181,7 +152,8 @@ cache read ≈ 0.1× input.
 - **History is never mutated.** Folding exists only in the per-call outgoing copy; the session file
   keeps every raw payload.
 - **Nothing is destroyed.** Ground truth lives in the session file and the spool. Every `{#code}`
-  handle resolves through `recall`/`unfold` until spool GC ages it out (default 14 days).
+  handle resolves through `recall_folded`/`unfold` until spool GC ages it out (default 24 hours; the
+  session file keeps the raw payload regardless).
 - **Tool pairs cannot orphan.** Folding is in-place content substitution and never changes the
   message count, so a `tool_call` can never lose its `tool_result`. Structural, not policed.
 - **Failure signals survive compression** at every fidelity level — the error lexicon is
@@ -199,15 +171,17 @@ cache read ≈ 0.1× input.
   a per-model tokenizer, so every threshold in this document is approximate. It drives budget
   decisions well enough; do not read it as billing truth.
 - **Images are invisible to the budget math.** A tool result carrying non-text parts (screenshots,
-  rendered pages) is never folded — neither by the gate nor the ladder, so nothing is ever lost —
+  rendered pages) is never folded, so nothing is ever lost —
   but its real token cost is not counted either. Image-heavy sessions read as further from the fold
   threshold than they are, so folding starts later than it should.
-- **The tool names are generic.** The extension registers `recall` and `unfold` as global tools. If
-  another extension registers the same names, one will shadow the other.
+- **The tool names are global.** The extension registers `recall_folded` and `unfold` as global
+  tools. If another extension registers the same names, one will shadow the other (`unfold` is the
+  generic one; `recall_folded` was named to avoid exactly this).
 - **Spool GC judges other sessions by file age.** The sweep at session start deletes sibling spool
-  directories whose newest file is older than the retention window. Live sessions refresh a
-  heartbeat file each turn, so an idle-but-running session is safe; a session whose process is
-  suspended for longer than the window can still lose its spool to a freshly started sibling.
+  directories — in this workspace and in sibling workspaces' spool roots — whose newest file is
+  older than the retention window. Live sessions refresh a heartbeat file each turn, so an
+  idle-but-running session is safe; a session whose process is suspended for longer than the
+  window can still lose its spool to a freshly started sibling.
   `CONTEXTFOLD_SPOOL_RETAIN_DAYS=0` disables the sweep.
 - **Primarily exercised against one model family.** Development and testing have mostly used
   `gpt-5.6-sol` via the openai-codex provider. Folding only reads Pi's usage numbers and message
@@ -234,14 +208,15 @@ extension watches provider usage for exactly that.
   changed prefix forces a full resend, and provider-reported input drops all at once. Folding still
   works — recall, the spool, and compaction are unaffected — but a long autonomous tool chain can
   approach the provider's context limit before any fold takes effect on the wire.
-- **Pi `context` hooks do not chain: load order decides.** Every handler receives the original event
-  and the last non-`undefined` return wins (verified in Pi 0.80–0.83). Two extensions rewriting
-  `context` are mutually destructive: list context-fold *after* any other context-rewriting
-  extension in `settings.json` `packages` so its folds are the surviving rewrite. The same
-  last-wins rule applies to `session_before_compact` and `before_agent_start`. Full hook-by-hook
-  collision table in `docs/pi-api-surface.md`.
+- **`codex-lite` does not rewrite context.** Its dialect mode replaces Pi's stock tools and appends
+  prompt guidance. There is no fold bypass in that pairing; fresh shell output reaches the model
+  before it can age into a ladder fold. Focused shell commands still reduce context growth.
+- **Current Pi chains `context` transforms as middleware.** Pi 0.83.0 and 0.84.1 are verified. On
+  older builds that predate transform chaining, context-fold must load after another context
+  rewriter. `session_before_compact` still selects one compaction result. Full versioned collision
+  table in `docs/pi-api-surface.md`.
 - **Do not load the package twice.** `pi install npm:context-fold` plus a `-e npm:context-fold`
-  flag registers `recall`/`unfold` twice and fails loudly at load with a tool-name conflict.
+  flag registers `recall_folded`/`unfold` twice and fails loudly at load with a tool-name conflict.
   Installed or `-e`, pick one.
 
 **The wire watchdog.** Because every one of these failure modes is invisible in the extension's own
@@ -258,9 +233,6 @@ pi -e npm:context-fold
 
 # Install persistently:
 pi install npm:context-fold
-
-# Enable the ingestion gate (all models, or a comma-separated model-substring allowlist):
-export CONTEXTFOLD_L0=1
 ```
 
 From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
@@ -278,17 +250,9 @@ From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 | `CONTEXTFOLD_TAIL` | `20000` | Protected-tail target — the newest ~N tokens never fold (clamped to half the budget). |
 | `CONTEXTFOLD_COMPACT` | `det` | Hard-compaction answer: `det` = deterministic seed-index summary; `native` = Pi stock. |
 | `CONTEXTFOLD_RECON_TOKENS` | `18000` | Reconstruction estimate used by the reset flag (input-token equivalents). |
-| `CONTEXTFOLD_L0` | _(off)_ | Ingestion gate: `1` = all models; comma-separated substrings = per-model allowlist; unset/`0` = inert. |
-| `CONTEXTFOLD_L0_THRESHOLD` | `2000` | Estimated-token size above which a result is spooled and born folded. |
-| `CONTEXTFOLD_L0_MINSAVE` | `0.5` | Minimum fraction the pointer must save to bother folding. |
-| `CONTEXTFOLD_L0_KEEP_RECENT` | `0` | Deferred substitution: hold the newest N gate-registered blocks at full fidelity, folding them only once stale. `0` = born folded (cheapest per turn); non-zero trades those tokens against recall round trips. Spooling is unaffected, so held blocks stay recallable. Experimental — see *The ingestion gate*. |
-| `CONTEXTFOLD_L0_ERRCAP` | `4` | Threshold multiplier for error-shaped results. |
-| `CONTEXTFOLD_SPOOL_RETAIN_DAYS` | `14` | Spool GC window at session start. `0`/`off` = never delete. |
+| `CONTEXTFOLD_SPOOL_RETAIN_DAYS` | `1` | Spool GC window at session start (fractional days allowed). `0`/`off` = never delete. |
 | `CONTEXTFOLD_DEBUG` | _(off)_ | One-line fold/cache summary to stderr each turn. |
 | `CONTEXTFOLD_DUMP` | _(unset)_ | Debug/e2e seam: write each turn's outgoing (folded) view to this JSON path. |
-
-The `CONTEXTFOLD_L0*` prefix is the ingestion gate's historical name; see
-[The ingestion gate](#the-ingestion-gate).
 
 ## Verification
 
@@ -298,7 +262,6 @@ npm install && npm run typecheck && npm test   # unit + integration suite
 
 ```bash
 scripts/e2e-ladder.sh   # live: fold event fires, index emitted, head byte-stable, buried value recalled
-scripts/e2e-gate.sh     # live: the gate folds a real flood; agent recovers a buried line via recall
 scripts/e2e-resume.sh   # live: folds survive a session restart
 ```
 
@@ -329,8 +292,8 @@ injects them at runtime — never bundle a copy.
 ## Provenance & license
 
 MIT. The pure core is ported from [Accordion](https://github.com/a-Fig/Accordion) (pinned commit
-`0c22434`), stripped of UI coupling and hardened since; the discrete fold ladder, the ingestion
-gate, the seed index, and the advisor layers are original to this project.
+`0c22434`), stripped of UI coupling and hardened since; the discrete fold ladder, seed index,
+spool-backed recovery, and advisor layers are original to this project.
 
 Much of this documentation was drafted with an LLM and edited by hand. The design decisions,
 thresholds, and measurements are mine.

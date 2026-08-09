@@ -7,14 +7,14 @@
 import { describe, expect, it } from "vitest";
 import { ContextFoldEngine, type FrozenLayer } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapGateRegistry } from "../src/core/gate-registry";
+import { MapSpoolRegistry } from "../src/core/spool-registry";
 import { restoreFoldState, recordLayer, FOLD_CUSTOM_TYPE, type EntryLike } from "../src/adapters/pi/persistence";
 import type { AgentMessage } from "../src/core/block";
 import { foldCode } from "../src/core/digest";
 import { user, assistantWithCalls, bigResult } from "./helpers";
 
 function engine(cfg: Record<string, unknown> = {}) {
-	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100, ...cfg }, new MapGateRegistry());
+	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100, ...cfg }, new MapSpoolRegistry());
 	const committed: FrozenLayer[] = [];
 	e.onLayerCommit = (layer) => committed.push(layer);
 	return { e, committed };

@@ -14,11 +14,11 @@
 import type { FoldCommand, PolicyHost, PolicyView, JSONValue, ViewBlock } from "../../core/contract";
 import type { FoldPolicy } from "../../core/contract";
 import type { AgentMessage, FoldOp, WireBlock } from "../../core/block";
-import { linearize, isDurableId } from "../../core/block";
+import { blockId, linearize, isDurableId } from "../../core/block";
 import { applyPlan } from "../../core/apply";
-import { digest, wireFoldable, foldCode, pointerDigest, substTokens, type PointerMeta } from "../../core/digest";
+import { digest, wireFoldable, foldCode, substTokens } from "../../core/digest";
 import { estTokens, safeSlice, BLOCK_OVERHEAD } from "../../core/tokens";
-import { MapGateRegistry, type GateRegistry, type GateEntry } from "../../core/gate-registry";
+import { MapSpoolRegistry, type SpoolRegistry, type SpoolEntry } from "../../core/spool-registry";
 import { readEnvelopeAt, SpoolError } from "./spool";
 import { readFileSync } from "node:fs";
 
@@ -42,18 +42,6 @@ export interface FoldConfig {
 	defaultContextWindow: number;
 	/** Emit a one-line fold summary to stderr each turn. */
 	debug: boolean;
-	/**
-	 * How many of the newest gate-registered blocks stay at full fidelity instead of rendering as
-	 * pointers — deferred L0 substitution. 0 (default) is born-folded: a flood never reaches warm
-	 * context at all, which is the cheapest per turn.
-	 *
-	 * Non-zero trades those tokens for fewer recall round trips. The gate's measured failure mode is
-	 * recall churn: a capable model reads many files, each lands as a pointer, and it then recalls
-	 * them one by one — the extra turns cost more than the per-turn saving. Leaving the newest few
-	 * warm lets the model use a result on the turn it asked for it, and the pointer arrives only once
-	 * the block is stale. The payload is spooled on arrival either way, so nothing is lost.
-	 */
-	gateKeepRecent: number;
 }
 
 export const DEFAULT_CONFIG: FoldConfig = {
@@ -62,7 +50,6 @@ export const DEFAULT_CONFIG: FoldConfig = {
 	tailTarget: 20_000,
 	defaultContextWindow: DEFAULT_CONTEXT_WINDOW,
 	debug: false,
-	gateKeepRecent: 0,
 };
 
 /** What the engine reports after committing a fold event's frozen layer (index emission seam). */
@@ -131,7 +118,7 @@ export interface CodeError {
 	message: string;
 }
 
-/** Partial-retrieval options for L0 recall (ignored for in-memory folds). */
+/** Partial-retrieval options for spool-backed recall (ignored for in-memory-only folds). */
 export interface RecallOptions {
 	/** Return only lines matching this term (case-insensitive substring), with line numbers. */
 	grep?: string;
@@ -153,9 +140,8 @@ export interface SearchHit {
 	lines: string[];
 }
 /**
- * Cap on a WHOLE-result recall (no grep/lines). Matches the gate's default fold threshold: recall
- * never hands back more warm tokens than the gate would have let through unfolded, so one recall
- * call can't re-flood the context the gate just saved (DESIGN §6a's partial-retrieval promise).
+ * Cap on a WHOLE-result recall (no grep/lines). A single recovery call must not re-flood the
+ * context that the pressure-driven ladder just reduced.
  */
 const RECALL_WHOLE_TOKEN_CAP = 2000;
 
@@ -165,23 +151,22 @@ export class ContextFoldEngine {
 
 	/** Agent-unfolded block ids — held (protected from re-folding) for the rest of the session. */
 	private readonly unfolded = new Set<string>();
+	/** Ids whose spool write failed permanently (fold-code collision). Held for the session so the
+	 *  ladder stops proposing them — the colliding block just renders raw, per-block fail-open. */
+	private readonly spoolRejected = new Set<string>();
 	/** Per-turn snapshot: durable id → wire block (full content), for the unfold/recall tool. */
 	private snapshot = new Map<string, WireBlock>();
 	/** Cross-turn deterministic digest cache (id + text length → digest/tokens). linearize recreates
 	 *  block objects every turn, so the WeakMap caches in digest.ts never hit across turns — without
 	 *  this the full risk-line regex sweep re-runs over every foldable block on every model call. */
 	private readonly detCache = new Map<string, { len: number; digest: string; tokens: number }>();
-	/** L0 pointer substitution on/off for the ACTIVE model (the adapter re-resolves the CONTEXTFOLD_L0
-	 *  allowlist each turn). Restored gate entries stay recallable regardless — this only gates the
-	 *  view substitution, so turning the kill switch off renders prior folds raw again. */
-	private gateActive = true;
 	/** Last status the policy published (display-only). */
 	private lastStatus: { text: string | null; metrics?: Record<string, number | string | boolean>; details?: JSONValue } | null = null;
 
 	private readonly host: PolicyHost;
 
-	// ── L0 ingestion gate: registry of born-folded blocks (recall reads the spool by entry path) ──
-	private readonly gate: GateRegistry;
+	// Exact originals for folded blocks; recall reads the spool by entry path.
+	private readonly spools: SpoolRegistry;
 
 	// ── recall-churn accounting (display-only; feeds the reset yellow flag) ──────────────────────
 	/** Total recall/search tool invocations this session. */
@@ -195,15 +180,17 @@ export class ContextFoldEngine {
 	private frozenById = new Map<string, string>();
 	/** Seq of the newest committed layer (layers are numbered from 1). */
 	private lastLayerSeq = 0;
-	/** Adapter callback: persist a committed layer (event-sourced, like gate folds). */
-	onLayerCommit: ((layer: FrozenLayer) => void) | null = null;
-	/** Adapter callback: a fold event committed — emit the seed index (spool + JSONL). */
-	onFoldEvent: ((event: FoldEventReport) => void) | null = null;
+	/** Adapter callback: persist a prepared layer. False rejects the fold before it reaches the wire. */
+	onLayerCommit: ((layer: FrozenLayer) => unknown) | null = null;
+	/** Adapter callback: durably spool/index a prepared event. `false` rejects the whole fold;
+	 *  an array of block ids drops just those blocks (their spool could not be written — fold-code
+	 *  collision) and commits the rest. Dropped ids are held for the session. */
+	onFoldEvent: ((event: FoldEventReport) => unknown) | null = null;
 
-	constructor(policy: FoldPolicy, cfg: Partial<FoldConfig> = {}, gate: GateRegistry = new MapGateRegistry()) {
+	constructor(policy: FoldPolicy, cfg: Partial<FoldConfig> = {}, spools: SpoolRegistry = new MapSpoolRegistry()) {
 		this.cfg = { ...DEFAULT_CONFIG, ...cfg };
 		this.policy = policy;
-		this.gate = gate;
+		this.spools = spools;
 		this.host = {
 			setStatus: (text, metrics, details) => {
 				this.lastStatus = { text, metrics, details };
@@ -216,16 +203,12 @@ export class ContextFoldEngine {
 		return this.lastStatus;
 	}
 
-	/** Enable/disable L0 pointer substitution (the adapter resolves the per-model kill switch). */
-	setGateActive(active: boolean): void {
-		this.gateActive = active;
-	}
-
 	/** Reset per-session state (session switch in one process): unfolds and per-block caches. */
 	resetForSession(): void {
 		this.recallCallCount = 0;
 		this.recallByCode.clear();
 		this.unfolded.clear();
+		this.spoolRejected.clear();
 		this.snapshot = new Map();
 		this.detCache.clear();
 		this.frozenById = new Map();
@@ -272,36 +255,31 @@ export class ContextFoldEngine {
 		// Refresh the snapshot for the unfold/recall tool (full content — folding never mutates it).
 		this.snapshot = new Map(blocks.map((b) => [b.id, b] as const));
 		this.pruneCaches(blocks);
+		const firstDelivery = firstDeliveryResultIds(messages);
 
-		// ── L0 GATE: born-folded pointers ────────────────────────────────────────
-		// Registered blocks enter the view already folded to a pointer digest (unless the agent has
-		// unfolded them). These ops apply EVERY turn regardless of budget pressure — the whole point of
-		// the gate is that a flood never reaches full-fidelity context in the first place.
-		const held = this.heldGateIds(blocks);
-		const gatePointers = this.computeGatePointers(blocks, held);
 		const frame = normalizeContextFrame(context);
 
 		const frozenOps = this.computeFrozenOps(blocks);
-		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers, frozenOps);
-		const view = this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens, held);
+		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, frozenOps);
+		const view = this.buildView(blocks, protectFrom, budget, cw, tailTarget, frozenOps, frame.tokens, firstDelivery);
 
 		const cmds = this.policy.conduct(view);
 
-		const ops: FoldOp[] = cmds != null && cmds.length > 0 ? this.lower(cmds, blocks, protectFrom, held) : [];
+		const ops: FoldOp[] = cmds != null && cmds.length > 0 ? this.lower(cmds, blocks, protectFrom, firstDelivery) : [];
 
-		// Commit this fold event's substitutions as a new frozen layer.
+		// Commit only after the adapter has durably spooled and indexed the event.
+		let committedOps: FoldOp[] = [];
 		if (ops.length > 0) {
 			const used = frame.tokens ?? view.liveTokens;
-			this.commitLayer(ops, gatePointers, blocks, { tokens: used, contextWindow: cw, fraction: cw > 0 ? used / cw : 0 });
+			committedOps = this.commitLayer(ops, blocks, { tokens: used, contextWindow: cw, fraction: cw > 0 ? used / cw : 0 });
 		}
 
-		// Merge order = gate > frozen > policy: the gate owns its ids outright; a frozen id's bytes
-		// outrank any late policy op for it (defense in depth — candidates already exclude frozen).
-		const allOps = mergeOpsById(gatePointers, mergeOpsById(frozenOps, ops));
+		// Frozen bytes outrank any late policy op for the same id (defense in depth — candidates
+		// already exclude frozen blocks).
+		const allOps = mergeOpsById(frozenOps, committedOps);
 		if (allOps.length === 0) return messages; // nothing to fold → send unchanged
 
 		if (this.cfg.debug) {
-			const l0 = gatePointers.size ? ` l0=${gatePointers.size}` : "";
 			const fz = frozenOps.size ? ` frozen=${frozenOps.size}` : "";
 			// Report BOTH counts when the provider gave us one. The policy decides on `reported`
 			// (Pi's whole-context number, system prompt included) but `live` only sums the message
@@ -309,7 +287,7 @@ export class ContextFoldEngine {
 			// correct fold look inexplicable to anyone reading this line to diagnose fold timing.
 			const rep = view.reportedTokens !== undefined ? ` reported=${view.reportedTokens}` : "";
 			process.stderr.write(
-				`[context-fold] ${ops.length} folds${l0}${fz}, live=${view.liveTokens}${rep} budget=${budget} ${this.lastStatus?.text ?? ""}\n`,
+				`[context-fold] ${ops.length} folds${fz}, live=${view.liveTokens}${rep} budget=${budget} ${this.lastStatus?.text ?? ""}\n`,
 			);
 		}
 
@@ -320,86 +298,63 @@ export class ContextFoldEngine {
 	 * Commit this fold event's substitutions as a new frozen layer, then report the event so the
 	 * adapter can spool the masked blocks and append their seed-index record.
 	 *
-	 * Ids already owned by the gate or by an earlier layer are skipped: their bytes are committed
-	 * and are not this event's to change. One layer per event, numbered from 1 — the seq is the
-	 * seed index's key, so it must never repeat.
+	 * Ids owned by an earlier layer are skipped: their bytes are committed and are not this event's
+	 * to change. One layer per event, numbered from 1 — the seq is the seed index's key, so it must
+	 * never repeat.
 	 */
 	private commitLayer(
 		ops: FoldOp[],
-		gatePointers: Map<string, string>,
 		blocks: WireBlock[],
 		usage: FoldEventReport["usage"],
-	): void {
+	): FoldOp[] {
 		const entries = ops
-			.filter((op) => !gatePointers.has(op.id) && !this.frozenById.has(op.id))
+			.filter((op) => !this.frozenById.has(op.id))
 			.map((op) => ({ id: op.id, digestText: op.digestText }));
-		if (entries.length === 0) return;
+		if (entries.length === 0) return [];
 
-		const layer: FrozenLayer = { seq: ++this.lastLayerSeq, entries };
-		for (const e of entries) this.frozenById.set(e.id, e.digestText);
-		this.onLayerCommit?.(layer);
-		if (this.cfg.debug) process.stderr.write(`[context-fold] layer ${layer.seq} committed (${entries.length} blocks frozen)\n`);
-
+		const seq = this.lastLayerSeq + 1;
 		const trigger = this.lastStatus?.metrics?.trigger === "cap" ? "cap" : "threshold";
-		this.onFoldEvent?.({ seq: layer.seq, trigger, maskedIds: entries.map((e) => e.id), blocks, usage });
-	}
+		const event = { seq, trigger, maskedIds: entries.map((e) => e.id), blocks, usage } satisfies FoldEventReport;
+		const res = this.onFoldEvent?.(event);
+		if (res === false) return [];
 
-	/**
-	 * Deferred L0 substitution: the newest `gateKeepRecent` registered blocks that would otherwise
-	 * render as pointers, held at full fidelity instead.
-	 *
-	 * The hold-out set is keyed on array position, not on the token tail, because the tail is derived
-	 * from the very pointer weights deferral changes — position is the one input available before that
-	 * math runs, and it keeps the set deterministic turn over turn. Frozen and agent-unfolded ids are
-	 * never held: their in-view form belongs to someone else.
-	 */
-	private heldGateIds(blocks: ReadonlyArray<{ id: string }>): Set<string> {
-		const held = new Set<string>();
-		if (this.cfg.gateKeepRecent <= 0 || !this.gateActive) return held;
-		for (let i = blocks.length - 1; i >= 0 && held.size < this.cfg.gateKeepRecent; i--) {
-			const id = blocks[i].id;
-			if (this.gate.get(id) && !this.unfolded.has(id) && !this.frozenById.has(id)) held.add(id);
+		// Per-block spool rejection (fold-code collision): freeze only what was durably spooled and
+		// hold the dropped ids so one unspoolable block can never poison every later fold event.
+		let kept = entries;
+		const dropped = Array.isArray(res) ? res.filter((x): x is string => typeof x === "string") : [];
+		if (dropped.length > 0) {
+			for (const id of dropped) this.spoolRejected.add(id);
+			const droppedSet = new Set(dropped);
+			kept = entries.filter((e) => !droppedSet.has(e.id));
 		}
-		return held;
+		if (kept.length === 0) return [];
+
+		const layer: FrozenLayer = { seq, entries: kept };
+		if (this.onLayerCommit?.(layer) === false) return [];
+
+		this.lastLayerSeq = layer.seq;
+		for (const entry of kept) this.frozenById.set(entry.id, entry.digestText);
+		if (this.cfg.debug) process.stderr.write(`[context-fold] layer ${layer.seq} committed (${kept.length} blocks frozen)\n`);
+		return kept;
 	}
 
-	private computeGatePointers(blocks: WireBlock[], held: ReadonlySet<string>): Map<string, string> {
-		const out = new Map<string, string>();
-		if (!this.gateActive || this.gate.size === 0) return out;
-		for (const b of blocks) {
-			const e = this.gate.get(b.id);
-			if (!e || this.unfolded.has(b.id)) continue;
-			if (held.has(b.id)) continue;
-			// A FROZEN id renders its committed layer bytes, not a pointer: ladder-masked blocks are
-			// registered (spool-backed recall must survive hard compaction), but their in-view form is
-			// owned by the frozen layer — swapping in a pointer here would silently move frozen bytes.
-			if (this.frozenById.has(b.id)) continue;
-			out.set(b.id, pointerDigest(b.text, pointerMetaOf(e)));
-		}
-		return out;
-	}
-
-	/** Inspection seam (tests/debug): the PolicyView this turn, incl. born-folded accounting. */
+	/** Inspection seam for tests and diagnostics. */
 	viewFor(messages: AgentMessage[], context: ContextFrameInput): PolicyView {
 		const blocks = linearize(messages);
-		const held = this.heldGateIds(blocks);
-		const gatePointers = this.computeGatePointers(blocks, held);
 		const frozenOps = this.computeFrozenOps(blocks);
 		const frame = normalizeContextFrame(context);
-		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, gatePointers, frozenOps);
-		return this.buildView(blocks, protectFrom, budget, cw, tailTarget, gatePointers, frozenOps, frame.tokens, held);
+		const { cw, budget, tailTarget, protectFrom } = this.frame(blocks, frame.contextWindow, frozenOps);
+		return this.buildView(blocks, protectFrom, budget, cw, tailTarget, frozenOps, frame.tokens);
 	}
 
 	/**
 	 * Per-turn budget frame. The tail target is CLAMPED to half the budget — an unclamped default
 	 * (20k) against a small context window would protect everything and permanently disable folding.
-	 * Protection walks RENDERED weights: a born-folded block occupies only its pointer's tokens, so
-	 * it must not absorb the tail allowance at full weight.
+	 * Protection walks rendered weights so previously frozen blocks consume their actual wire cost.
 	 */
 	private frame(
 		blocks: WireBlock[],
 		contextWindow: number | null,
-		gatePointers: Map<string, string>,
 		frozenOps: Map<string, string> = new Map(),
 	): { cw: number; budget: number; tailTarget: number; protectFrom: number } {
 		const cw = contextWindow ?? this.cfg.defaultContextWindow;
@@ -407,18 +362,16 @@ export class ContextFoldEngine {
 		const budget = Math.min(cap, Math.floor(cw * this.cfg.budgetFraction));
 		const tailTarget = Math.min(this.cfg.tailTarget, Math.floor(budget / 2));
 		const rendered = blocks.map((b) => {
-			const p = gatePointers.get(b.id) ?? frozenOps.get(b.id);
+			const p = frozenOps.get(b.id);
 			return { tokens: p !== undefined ? substTokens(p) : b.tokens };
 		});
 		return { cw, budget, tailTarget, protectFrom: protectedFromIndex(rendered, tailTarget) };
 	}
 
 	/**
-	 * Resolve fold-codes → ORIGINAL content (recall: read-only, no fold-state change). L0 (gate)
-	 * codes are served from the SPOOL — whole, or sliced by `grep`/`lines` (partial retrieval, so
-	 * recall never has to dump a whole flood back into context). A missing/corrupt spool becomes a
-	 * typed error naming the path, surfaced to the agent rather than thrown. Non-gate folds (ladder
-	 * masks) resolve from the in-memory snapshot; grep/lines are ignored for them.
+	 * Resolve fold-codes to original content (read-only, no fold-state change). Spool-backed codes
+	 * support bounded whole, grep, and line-range reads and remain recoverable after hard compaction.
+	 * A missing/corrupt spool becomes a typed error naming the path rather than an exception.
 	 */
 	resolveRecall(codes: string[], opts: RecallOptions = {}): { matches: CodeMatch[]; missing: string[]; errors: CodeError[] } {
 		this.recallCallCount++;
@@ -427,8 +380,8 @@ export class ContextFoldEngine {
 			this.recallByCode.set(c, (this.recallByCode.get(c) ?? 0) + 1);
 		}
 		const snapByCode = this.snapshotByCode();
-		const gateByCode = new Map<string, GateEntry>();
-		for (const e of this.gate.entries()) gateByCode.set(e.code, e);
+		const spoolByCode = new Map<string, SpoolEntry>();
+		for (const e of this.spools.entries()) spoolByCode.set(e.code, e);
 
 		const matches: CodeMatch[] = [];
 		const missing: string[] = [];
@@ -436,41 +389,63 @@ export class ContextFoldEngine {
 
 		for (const raw of codes) {
 			const code = normalizeCode(raw);
-			const entry = gateByCode.get(code);
+			const entry = spoolByCode.get(code);
+			// Recall serves FOLDED content only: a snapshot hit counts only when the block is frozen.
+			// Every live block's id hashes to a code, but a block that was never folded is already in
+			// view — resolving it would make recall a general history reader, which is autojournal's
+			// job, not this tool's.
+			const hits = (snapByCode.get(code) ?? []).filter((b) => this.frozenById.has(b.id));
 			if (entry) {
 				try {
 					const { text, note } = this.recallFromSpool(entry, opts);
 					const dedupNote = entry.dedupOf ? `identical to #${entry.dedupOf}` : "";
 					matches.push({
 						code,
-						label: `${entry.tool} · L0 spool`,
+						label: `${entry.tool} · spool`,
 						ids: [entry.blockId],
 						text,
 						note: [dedupNote, note].filter(Boolean).join(" · ") || undefined,
 					});
 				} catch (e) {
 					const path = e instanceof SpoolError ? e.path : entry.spoolPath;
-					errors.push({ code, message: `recall unavailable — spool file for #${code} could not be read (${path})` });
+					if (hits.length > 0) {
+						// The spool is unreadable but the block is still live in raw history — serve it
+						// from the snapshot through the same caps (DESIGN §7: a live block still resolves),
+						// carrying the spool warning as the note so the degradation stays visible.
+						const { text, note } = sliceLiveText(joinTexts(hits), opts);
+						matches.push({
+							code,
+							label: labelFor(hits),
+							ids: hits.map((b) => b.id),
+							text,
+							note: [`spool file unreadable (${path}) — served from live history`, note].filter(Boolean).join(" · "),
+						});
+					} else {
+						errors.push({ code, message: `recall unavailable — spool file for #${code} could not be read (${path})` });
+					}
 				}
 				continue;
 			}
-			const hits = snapByCode.get(code);
-			if (!hits || hits.length === 0) {
+			if (hits.length === 0) {
 				missing.push(raw);
 				continue;
 			}
-			matches.push({ code, label: labelFor(hits), ids: hits.map((b) => b.id), text: hits.map((b) => b.text).join("\n\n") });
+			// Live-history route (a frozen fold whose spool entry was dropped at restore). Bounded and
+			// sliced exactly like the spool route — recall must never re-flood, whichever haystack
+			// serves it.
+			const { text, note } = sliceLiveText(joinTexts(hits), opts);
+			matches.push({ code, label: labelFor(hits), ids: hits.map((b) => b.id), text, note });
 		}
 		return { matches, missing, errors };
 	}
 
 	/**
-	 * Read an L0 fold's content from the spool and slice it. grep and lines= read the SAME haystack
+	 * Read a fold's content from the spool and slice it. grep and lines= read the SAME haystack
 	 * (the tool's full-output file when readable, else the spool), so a grep hit's line number
 	 * is always a valid input for a lines= follow-up. Whole recall is token-capped: recall must never
-	 * re-flood the context the gate saved (DESIGN §6a partial-retrieval promise).
+	 * re-flood the context the ladder reduced.
 	 */
-	private recallFromSpool(entry: GateEntry, opts: RecallOptions): { text: string; note?: string } {
+	private recallFromSpool(entry: SpoolEntry, opts: RecallOptions): { text: string; note?: string } {
 		const spooled = readEnvelopeAt(entry.spoolPath).content;
 		if (opts.lines || opts.grep) {
 			let haystack = spooled;
@@ -490,8 +465,8 @@ export class ContextFoldEngine {
 	}
 
 	/**
-	 * SPAN RECALL: one sweep over EVERY currently-folded block's full content (born-folded L0
-	 * pointers and frozen ladder masks alike), returning matching lines grouped by fold code.
+	 * SPAN RECALL: one sweep over every currently folded block's full content, returning matching
+	 * lines grouped by fold code.
 	 * This is the anti-churn primitive — recovering identifiers scattered across N pointers costs
 	 * one call, not N probing recalls. Line numbers agree with `recall {code} lines=<a-b>` so a
 	 * follow-up slice is always valid. Token-capped like every recall surface.
@@ -524,14 +499,9 @@ export class ContextFoldEngine {
 		};
 
 		const blocks = [...this.snapshot.values()].sort((a, b) => a.order - b.order);
-		// A held (deferred) block is registered but still rendered warm, so sweeping it here would
-		// hand back lines the model can already read — inflating the reply and the scanned count.
-		const held = this.heldGateIds(blocks);
 		for (const b of blocks) {
-			const gateEntry = this.gate.get(b.id);
-			const folded = (gateEntry !== undefined && this.gateActive) || this.frozenById.has(b.id);
-			if (!folded || this.unfolded.has(b.id) || held.has(b.id)) continue;
-			sweep(gateEntry?.code ?? foldCode(b.id), labelFor([b]), b.text);
+			if (!this.frozenById.has(b.id) || this.unfolded.has(b.id)) continue;
+			sweep(foldCode(b.id), labelFor([b]), b.text);
 			if (truncated) break;
 		}
 
@@ -540,8 +510,8 @@ export class ContextFoldEngine {
 		// Serve those from the spool — the registry survives compaction for precisely this reason.
 		// Dedup aliases are skipped (their bytes are the target's), and an unreadable spool skips the
 		// entry (recalling that code surfaces the typed error).
-		if (this.gateActive && !truncated) {
-			for (const e of this.gate.entries()) {
+		if (!truncated) {
+			for (const e of this.spools.entries()) {
 				if (this.snapshot.has(e.blockId) || this.unfolded.has(e.blockId) || e.dedupOf) continue;
 				let content: string;
 				try {
@@ -549,13 +519,13 @@ export class ContextFoldEngine {
 				} catch {
 					continue;
 				}
-				sweep(e.code, `${e.tool} · L0 spool (compacted out of view)`, content);
+				sweep(e.code, `${e.tool} · spool (compacted out of view)`, content);
 				if (truncated) break;
 			}
 		}
 		const total = hits.reduce((n, h) => n + h.lines.length, 0);
 		const note = truncated
-			? `capped at ~${SEARCH_TOKEN_CAP} tok — narrow the term, or follow up with recall {code} lines=<a-b>`
+			? `capped at ~${SEARCH_TOKEN_CAP} tok — narrow the term, or follow up with recall_folded {code} lines=<a-b>`
 			: `${total} matching line${total === 1 ? "" : "s"} across ${hits.length} of ${scanned} folded blocks`;
 		return { hits, scanned, note };
 	}
@@ -578,11 +548,19 @@ export class ContextFoldEngine {
 		return byCode;
 	}
 
-	/** Mark fold-codes' blocks unfolded (held). They expand in the view on the next turn. */
-	markUnfold(codes: string[]): { matches: CodeMatch[]; missing: string[] } {
+	/** Mark fold-codes' blocks unfolded (held). They expand in the view on the next turn.
+	 *  A code that resolves only through the spool is reported as `compacted`: its raw message left
+	 *  live history at hard compaction, so there is nothing to re-expand — but the content still
+	 *  reads back through recall, and the tool message must say that rather than "no such code". */
+	markUnfold(codes: string[]): { matches: CodeMatch[]; missing: string[]; compacted: string[] } {
 		const res = this.resolve(codes);
 		for (const m of res.matches) for (const id of m.ids) this.unfolded.add(id);
-		return res;
+		const spoolCodes = new Set<string>();
+		for (const e of this.spools.entries()) spoolCodes.add(e.code);
+		const missing: string[] = [];
+		const compacted: string[] = [];
+		for (const raw of res.missing) (spoolCodes.has(normalizeCode(raw)) ? compacted : missing).push(raw);
+		return { matches: res.matches, missing, compacted };
 	}
 
 	/** Restore the agent's unfold decisions on session resume (event-sourced). */
@@ -598,8 +576,10 @@ export class ContextFoldEngine {
 		const missing: string[] = [];
 		for (const raw of codes) {
 			const code = normalizeCode(raw);
-			const hits = byCode.get(code);
-			if (!hits || hits.length === 0) {
+			// Folded blocks only, same as recall: unfolding a block that was never folded is a no-op
+			// wearing a success message, and would hold it against future folding as a side effect.
+			const hits = (byCode.get(code) ?? []).filter((b) => this.frozenById.has(b.id));
+			if (hits.length === 0) {
 				missing.push(raw);
 				continue;
 			}
@@ -619,45 +599,29 @@ export class ContextFoldEngine {
 		budget: number,
 		contextWindow: number,
 		tailTarget: number,
-		gatePointers: Map<string, string>,
 		frozenOps: Map<string, string>,
 		reportedTokens: number | null,
-		heldGate: ReadonlySet<string> = new Set(),
+		firstDelivery: ReadonlySet<string> = new Set(),
 	): PolicyView {
 		let liveTokens = 0;
 		const viewBlocks: ViewBlock[] = blocks.map((b, i) => {
-			const pointer = gatePointers.get(b.id);
-			const born = pointer !== undefined;
-			const frozenText = born ? undefined : frozenOps.get(b.id);
+			const frozenText = frozenOps.get(b.id);
 			const frozen = frozenText !== undefined;
 			const foldable = wireFoldable(b);
-			// Born-folded blocks are charged at POINTER weight (budget math counts the
-			// pre-folded block at digest weight); frozen blocks at their committed layer bytes;
-			// every other block starts warm at full weight.
-			const foldedTokens = born
-				? substTokens(pointer)
-				: frozen
-					? substTokens(frozenText)
-					: foldable
-						? this.detDigestTokens(b)
-						: b.tokens;
-			liveTokens += born || frozen ? foldedTokens : b.tokens;
+			const foldedTokens = frozen ? substTokens(frozenText) : foldable ? this.detDigestTokens(b) : b.tokens;
+			liveTokens += frozen ? foldedTokens : b.tokens;
 			return {
 				id: b.id,
 				kind: b.kind,
 				turn: b.turn,
 				order: b.order,
-				tokens: b.tokens, // FULL weight — what this block would cost warm, even when born folded
+				tokens: b.tokens,
 				foldedTokens,
 				toolName: b.toolName,
 				callId: b.callId,
 				isError: b.isError,
-				// Agent unfolds AND deferral-held gate blocks both render warm and must not be masked:
-				// a ladder fold of a held block would freeze it at det-digest bytes, and the deferred
-				// pointer could then never arrive (computeGatePointers skips frozen ids forever).
-				held: this.unfolded.has(b.id) || heldGate.has(b.id),
-				folded: born || frozen, // born-folded/frozen render folded from turn 1; others cleared to baseline
-				bornFolded: born,
+				held: this.unfolded.has(b.id) || firstDelivery.has(b.id) || this.spoolRejected.has(b.id),
+				folded: frozen,
 				frozen,
 				protected: i >= protectFrom,
 				text: b.text,
@@ -697,7 +661,7 @@ export class ContextFoldEngine {
 	 * frozen or already-emitted id is dropped. Defense in depth — the policy already enforces
 	 * these, but the wire re-checks so a bad command can never corrupt context.
 	 */
-	private lower(commands: FoldCommand[], blocks: WireBlock[], protectFrom: number, heldGate: ReadonlySet<string> = new Set()): FoldOp[] {
+	private lower(commands: FoldCommand[], blocks: WireBlock[], protectFrom: number, firstDelivery: ReadonlySet<string>): FoldOp[] {
 		const byId = new Map(blocks.map((b) => [b.id, b] as const));
 		const protectedAt = (id: string): boolean => {
 			const b = byId.get(id);
@@ -709,9 +673,10 @@ export class ContextFoldEngine {
 				!!b &&
 				isDurableId(id) &&
 				wireFoldable(b) &&
+				!firstDelivery.has(id) &&
 				!protectedAt(id) &&
 				!this.unfolded.has(id) &&
-				!heldGate.has(id) &&
+				!this.spoolRejected.has(id) &&
 				!this.frozenById.has(id)
 			);
 		};
@@ -732,10 +697,29 @@ export class ContextFoldEngine {
 
 	/** Drop cached digests for blocks no longer in the session (bounds memory). */
 	private pruneCaches(blocks: WireBlock[]): void {
-		if (this.detCache.size === 0) return;
 		const present = new Set(blocks.map((b) => b.id));
 		for (const id of [...this.detCache.keys()]) if (!present.has(id)) this.detCache.delete(id);
 	}
+}
+
+/**
+ * Tool results after the latest assistant response have not appeared in any provider request yet:
+ * that latest assistant message issued their calls. Holding this suffix is deterministic, handles
+ * parallel results, and survives resume without an adapter-side "seen" ledger.
+ */
+function firstDeliveryResultIds(messages: AgentMessage[]): Set<string> {
+	let lastAssistant = -1;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].role === "assistant") {
+			lastAssistant = i;
+			break;
+		}
+	}
+	const ids = new Set<string>();
+	for (let i = lastAssistant + 1; i < messages.length; i++) {
+		if (messages[i].role === "toolResult") ids.add(blockId(messages[i], i));
+	}
+	return ids;
 }
 
 /**
@@ -743,7 +727,7 @@ export class ContextFoldEngine {
  * enormous line (minified JS, JSONL, base64, a shell wrapper echoing a file as one string)
  * must not ride through any recall cap on an "always keep at least one line" rule — that is
  * exactly the re-flood hole (a live `recall lines=2-2` once returned a 40KB line and undid
- * everything the gate saved). When `around` is given the window CENTERS on it, so a grep
+ * the context reduction). When `around` is given the window CENTERS on it, so a grep
  * match deep inside the line stays visible.
  */
 function clipLineTo(line: string, maxChars: number, around?: number): string {
@@ -769,7 +753,7 @@ function sliceByLines(content: string, spec: string, source: string): { text: st
 	const b = Math.min(lines.length, parseInt(m[2], 10));
 	if (a > b) return { text: "", note: `empty range ${a}-${b} (${source} has ${lines.length} lines)` };
 	// Token-cap the slice: lines= must stay PARTIAL retrieval (an unbounded range would hand the
-	// whole flood back and undo the gate's savings in one call). Every line is char-clipped too —
+	// whole flood back and undo the fold's savings in one call). Every line is char-clipped too —
 	// the cap must hold even when the "range" is one enormous line.
 	const kept: string[] = [];
 	let tokens = 0;
@@ -790,7 +774,7 @@ function sliceByLines(content: string, spec: string, source: string): { text: st
 	return { text: kept.join("\n"), note };
 }
 
-/** Cap a whole-result recall so one call can never re-flood what the gate saved. */
+/** Cap a whole-result recall so one call can never re-flood what folding saved. */
 function capWholeRecall(content: string): { text: string; note?: string } {
 	if (estTokens(content) <= RECALL_WHOLE_TOKEN_CAP) return { text: content };
 	const lines = content.split("\n");
@@ -807,7 +791,7 @@ function capWholeRecall(content: string): { text: string; note?: string } {
 	// When a long line was clipped, say exactly what to do next — an agent that only sees
 	// "…clipped" tends to stop; the unseen content is reachable ONLY through grep.
 	const clipNote = clipped
-		? " · LONG LINE CLIPPED: unseen content inside it is reachable only via recall {code} grep=<term> — grep for the exact token you need"
+		? " · LONG LINE CLIPPED: unseen content inside it is reachable only via recall_folded {code} grep=<term> — grep for the exact token you need"
 		: " — use lines=<a-b> or grep=<term> for the rest";
 	return {
 		text: kept.join("\n"),
@@ -817,8 +801,8 @@ function capWholeRecall(content: string): { text: string; note?: string } {
 
 /**
  * Grep `content` for a case-insensitive substring, returning matching lines with 1-based numbers,
- * capped at ~the pointer budget with a "narrow your query" nudge past the cap (so recall-grep
- * can't itself defeat the gate). The caller resolves WHICH haystack (full output vs spool) so
+ * capped at ~the pointer budget with a "narrow your query" nudge past the cap. The caller resolves
+ * WHICH haystack (full output vs spool) so
  * grep and lines= always share one numbering space.
  */
 function grepContent(haystack: string, term: string, source: string): { text: string; note?: string } {
@@ -847,26 +831,23 @@ function grepContent(haystack: string, term: string, source: string): { text: st
 	return { text: kept.join("\n"), note };
 }
 
-/** Build the pointer-digest metadata for a born-folded block from its gate registry entry. */
-function pointerMetaOf(e: GateEntry): PointerMeta {
-	return {
-		code: e.code,
-		tool: e.tool,
-		input: e.input,
-		isError: e.isError,
-		bytes: e.bytes,
-		fullEstTokens: e.fullEstTokens,
-		spoolPath: e.spoolPath,
-		fullOutputPath: e.fullOutputPath,
-		dedupOf: e.dedupOf,
-	};
+/** Join a code's snapshot blocks into the one haystack recall slices (colliding ids share a code). */
+function joinTexts(blocks: WireBlock[]): string {
+	return blocks.map((b) => b.text).join("\n\n");
 }
 
-/** Gate ops (born-folded pointers) first, then policy ops whose id the gate didn't already claim. */
-function mergeOpsById(gatePointers: Map<string, string>, policyOps: FoldOp[]): FoldOp[] {
+/** Bounded read of live-history text — the same caps and slicing as the spool route. */
+function sliceLiveText(text: string, opts: RecallOptions): { text: string; note?: string } {
+	if (opts.lines) return sliceByLines(text, opts.lines, "live block");
+	if (opts.grep) return grepContent(text, opts.grep, "live block");
+	return capWholeRecall(text);
+}
+
+/** Existing frozen ops first, then new policy ops whose id was not already claimed. */
+function mergeOpsById(existing: Map<string, string>, policyOps: FoldOp[]): FoldOp[] {
 	const out: FoldOp[] = [];
-	for (const [id, digestText] of gatePointers) out.push({ id, digestText });
-	for (const op of policyOps) if (!gatePointers.has(op.id)) out.push(op);
+	for (const [id, digestText] of existing) out.push({ id, digestText });
+	for (const op of policyOps) if (!existing.has(op.id)) out.push(op);
 	return out;
 }
 

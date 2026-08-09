@@ -7,7 +7,7 @@
  *
  * Every digest carries a leading `{#<code> FOLDED}` tag. This is the engine's source-of-truth
  * string: it is the exact text the agent receives in place of the folded content. The agent
- * reads the short `code` from the tag and calls `unfold`/`recall` with it to pull the block
+ * reads the short `code` from the tag and calls `unfold`/`recall_folded` with it to pull the block
  * back to full content. The code is a 6-char base36 FNV-1a hash of the block's durable id —
  * stateless and globally stable (same block → same code, every session).
  *
@@ -30,8 +30,7 @@ export const FOLDABLE_KINDS: ReadonlySet<BlockKind> = new Set<BlockKind>(["text"
  * KIND is foldable and linearize saw all of it. KIND plus the `opaque` flag ONLY — deliberately
  * content- and id-independent. The durable-id guard (`isDurableId`) is a separate wire-emit
  * concern, NOT part of foldability. `opaque` marks a result carrying non-text parts (an image):
- * substitution would replace the whole content array and silently drop them from the view — the
- * L0 gate already refuses these at ingestion, and the ladder must match it.
+ * substitution would replace the whole content array and silently drop them from the view.
  */
 export function wireFoldable(b: DigestBlock): boolean {
 	return FOLDABLE_KINDS.has(b.kind) && !(b as { opaque?: boolean }).opaque;
@@ -74,7 +73,6 @@ export function digest(b: DigestBlock): string {
 	digestCache.set(b, out);
 	return out;
 }
-
 /** The per-kind essence kept when a block is folded (without the tag). */
 function digestBody(b: DigestBlock): string {
 	switch (b.kind) {
@@ -108,15 +106,14 @@ function digestBody(b: DigestBlock): string {
 }
 
 /**
- * Token cost of substituted content (a gate pointer or a frozen layer's bytes). The text varies
- * per block and per session, so it is NOT cached on the block. Same estimate + per-block overhead
- * as a digest.
+ * Token cost of a frozen layer's substituted content. The text varies per block and session, so it
+ * is not cached on the block. Uses the same estimate and per-block overhead as a digest.
  */
 export function substTokens(content: string): number {
 	return estTokens(content) + BLOCK_OVERHEAD;
 }
 
-// ── L0 ingestion gate: risk-line retention + tool-aware pointer digests ─────────
+// ── Risk-line retention ────────────────────────────────────────────────────────
 
 /** L3 (aging) risk-line caps — tight, so a routine result grows only a little. */
 const L3_RISK_LINES = 6;
@@ -126,7 +123,7 @@ const RISK_LINE_CLIP = 200;
 
 /**
  * Is a single line risk-bearing, and does it carry an ERROR/traceback? Uses the ledger's
- * `categorize` harvester — the single detector shared by the gate, the pointer and the digest.
+ * `categorize` harvester — the single detector shared by digests and the seed index.
  */
 function lineRisk(line: string): { risk: boolean; error: boolean } {
 	const c = categorize(line);
@@ -160,146 +157,4 @@ export function collectRiskLines(text: string, opts: { maxLines: number; maxChar
 		chars += line.length + 1;
 	}
 	return out;
-}
-
-/** Count how many distinct lines of `text` carry any risk flag (for the "+N more" pointer hint). */
-export function countRiskLines(text: string): number {
-	const seen = new Set<string>();
-	let n = 0;
-	for (const raw of text.split("\n")) {
-		const line = raw.trim();
-		if (!line || seen.has(line)) continue;
-		if (lineRisk(line).risk) {
-			seen.add(line);
-			n++;
-		}
-	}
-	return n;
-}
-
-/** Metadata a born-folded L0 pointer needs, beyond the block's own full text. */
-export interface PointerMeta {
-	/** The fold code (= foldCode(blockId)); the pointer's {#code FOLDED} handle. */
-	code: string;
-	tool: string;
-	/** The tool's input arguments, for the tool-aware one-line summary. */
-	input?: unknown;
-	isError: boolean;
-	/** Byte length of the full spooled content. */
-	bytes: number;
-	/** estTokens of the full spooled content (the weight this pointer removed from the view). */
-	fullEstTokens: number;
-	/** Absolute spool path (so the pointer is self-locating for debugging). */
-	spoolPath: string;
-	/** Bash results: the tool's own full-output file, also searched by recall-grep. */
-	fullOutputPath?: string;
-	/** When set, this payload was identical to an earlier fold. */
-	dedupOf?: string;
-}
-
-/** Pointer digest budget: ≤400 est-tokens total . */
-export const POINTER_TOKEN_BUDGET = 400;
-const POINTER_HEAD_LINES = 8;
-const POINTER_TAIL_LINES = 8;
-const POINTER_RISK_LINES = 40;
-const POINTER_LINE_CLIP = 200;
-
-function clipLine(s: string): string {
-	const t = s.replace(/\t/g, "  ");
-	return t.length > POINTER_LINE_CLIP ? safeSlice(t, POINTER_LINE_CLIP - 1) + "…" : t;
-}
-
-/** A short, tool-aware one-liner describing WHAT was folded (read: path+lines; grep: pattern; …). */
-function toolSummary(text: string, meta: PointerMeta): string {
-	const lineCount = text.split("\n").length;
-	const kb = (meta.bytes / 1024).toFixed(meta.bytes >= 10240 ? 0 : 1);
-	const size = `${lineCount} lines, ${kb}KB (~${meta.fullEstTokens} tok)`;
-	const input = (meta.input ?? {}) as Record<string, unknown>;
-	const errTag = meta.isError ? " [error]" : "";
-	switch (meta.tool) {
-		// Every interpolated input is clipped: the summary line is the one part of the pointer the
-		// budget-enforcement loops in pointerDigest never trim, so an unbounded path or pattern here
-		// would breach the ≤400-token contract with no recourse.
-		case "read": {
-			const path = typeof input.path === "string" ? clip(input.path, 120) : "";
-			return `read ${path}${errTag} — ${size}`.trim();
-		}
-		case "grep": {
-			const pat = typeof input.pattern === "string" ? clip(input.pattern, 80) : "";
-			return `grep ${JSON.stringify(pat)}${errTag} — ${size}`;
-		}
-		case "bash": {
-			const cmd = typeof input.command === "string" ? clip(input.command, 80) : "";
-			return `bash ${cmd}${errTag} — ${size}`;
-		}
-		case "find":
-		case "ls": {
-			return `${meta.tool}${errTag} — ${size}`;
-		}
-		default: {
-			const args = clip(JSON.stringify(input), 80);
-			return `${meta.tool} ${args}${errTag} — ${size}`;
-		}
-	}
-}
-
-/**
- * The born-folded L0 POINTER: a deterministic, tool-aware digest that stands in for a large tool
- * result in the model's view. Head + tail + every detected risk line (up to 40) survive verbatim;
- * the full content is on disk in the spool, recoverable whole, by grep, or by line range. Carries
- * the authoritative `{#code FOLDED}` tag so the agent can recall it. Budget ≤400 est-tokens; risk
- * lines are trimmed first if the budget is tight.
- */
-export function pointerDigest(text: string, meta: PointerMeta): string {
-	const tag = `{#${meta.code} FOLDED}`;
-	const lines = text.split("\n");
-	const summary = toolSummary(text, meta);
-
-	const head = lines.slice(0, POINTER_HEAD_LINES).map(clipLine);
-	// When head+tail would overlap (9–16 lines), the tail is the remainder — every line renders,
-	// and the "…" elision marker appears only when lines actually went missing between the two.
-	const elided = lines.length > POINTER_HEAD_LINES + POINTER_TAIL_LINES;
-	const tail = (elided ? lines.slice(-POINTER_TAIL_LINES) : lines.slice(POINTER_HEAD_LINES)).map(clipLine);
-
-	const totalRisk = countRiskLines(text);
-	let risk = collectRiskLines(text, { maxLines: POINTER_RISK_LINES, maxChars: 1200 });
-
-	const usage = `full content on disk — \`recall #${meta.code}\` for all of it, \`recall #${meta.code} grep=<term>\` or \`lines=<a-b>\` for a slice.`;
-	const dedupNote = meta.dedupOf ? ` (identical to #${meta.dedupOf})` : "";
-
-	const build = (riskLines: string[]): string => {
-		const parts: string[] = [`${tag} ${summary}${dedupNote}`];
-		if (head.length) parts.push("head:", ...head);
-		if (tail.length) parts.push(...(elided ? ["…"] : []), "tail:", ...tail);
-		if (riskLines.length) {
-			parts.push(`risk lines (${totalRisk}):`, ...riskLines);
-			if (totalRisk > riskLines.length) parts.push(`[+${totalRisk - riskLines.length} more — recall #${meta.code} grep=<term>]`);
-		}
-		parts.push(usage);
-		return parts.join("\n");
-	};
-
-	// Enforce the token budget by trimming risk lines first (head/tail/usage are load-bearing) —
-	// then head/tail lines: long risk-free lines alone can blow the budget, and the ≤400 contract
-	// must hold on every input, not just risk-heavy ones. Keep ≥3 lines each so the pointer stays
-	// recognizable.
-	let out = build(risk);
-	while (estTokens(out) > POINTER_TOKEN_BUDGET && risk.length > 0) {
-		risk = risk.slice(0, risk.length - 1);
-		out = build(risk);
-	}
-	while (estTokens(out) > POINTER_TOKEN_BUDGET && tail.length > 3) {
-		tail.pop();
-		out = build(risk);
-	}
-	while (estTokens(out) > POINTER_TOKEN_BUDGET && head.length > 3) {
-		head.pop();
-		out = build(risk);
-	}
-	return out;
-}
-
-/** Token weight of a pointer digest (for born-folded budget accounting). */
-export function pointerDigestTokens(text: string, meta: PointerMeta): number {
-	return estTokens(pointerDigest(text, meta)) + BLOCK_OVERHEAD;
 }

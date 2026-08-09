@@ -10,7 +10,7 @@
 #   (e) the fold is visible in provider-reported usage — the wire, not just our own dump.
 #
 # The pressure comes from CONTEXTFOLD_BUDGET_CAP (the cap trigger) so the check is independent
-# of the live model's real context-window size. The L0 gate is disabled to isolate the ladder.
+# of the live model's real context-window size.
 #
 # Model: defaults to gpt-5.6-sol via openai-codex (reliable tool use). Override with
 # E2E_PROVIDER / E2E_MODEL. Requires auth for the chosen provider in the active agent dir.
@@ -45,12 +45,12 @@ NEEDLE="LADDER_CAP_LIMIT=73114"
   for i in $(seq 401 800); do echo "line $i: more routine output continuing on unremarkably"; done
 } > "$BIGFILE"
 
-ENV_COMMON=(CONTEXTFOLD_L0=0 CONTEXTFOLD_DEBUG=1 CONTEXTFOLD_BUDGET_CAP="$CAP" CONTEXTFOLD_DUMP="$DUMP")
+ENV_COMMON=(CONTEXTFOLD_DEBUG=1 CONTEXTFOLD_BUDGET_CAP="$CAP" CONTEXTFOLD_DUMP="$DUMP")
 
 echo "== turn 1: flood ($PROVIDER/$MODEL, cap=$CAP) =="
 env "${ENV_COMMON[@]}" \
   "$PI" -p --mode json -ne -e "$EXT" --session-dir "$SESSIONS" --session-id "$SID" --provider "$PROVIDER" --model "$MODEL" \
-  "Call exec_command exactly once with command cat -- '$BIGFILE' so the complete raw file is returned as one tool result. Do not use wc, grep, sed, head, tail, Python, or any filtering command. Then reply with ONLY the total number of lines in it." \
+  "First call the bash tool with command cat -- '$BIGFILE' so the complete raw file is returned as one tool result. Do not use wc, grep, sed, head, tail, Python, or filtering. After reading it, make a SEPARATE bash tool call that runs printf context-fold-checkpoint. Then reply with ONLY the total number of lines in the file." \
   >"$WORK/stdout1.json" 2>"$WORK/stderr1.txt"
 echo "   exit=$?  $(grep -oE 'layer [0-9]+ committed \([0-9]+ blocks frozen\)' "$WORK/stderr1.txt" | head -1)"
 cp -f "$DUMP" "$WORK/view1.json" 2>/dev/null || true

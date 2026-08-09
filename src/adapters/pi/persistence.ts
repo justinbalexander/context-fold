@@ -1,16 +1,14 @@
 /*
  * persistence.ts — event-sourced fold state across restarts (DESIGN.md §6).
  *
- * The gate's cross-turn state — which tool results are born-folded, which folds the agent has
- * unfolded, and which layers are committed — lives only in memory during a session. A born-folded
- * block is registered from the `tool_result` hook, which does NOT re-fire on resume (the result is
- * already in history, not re-executed), so that state is persisted as custom session entries and
- * left-folded back on load.
+ * Spool locations, agent unfolds, and committed frozen layers live in memory during a session, so
+ * they are persisted as custom entries and replayed on resume. Legacy `kind:"gate"` records remain
+ * readable so old folded handles keep resolving after the arrival-time ingestion gate's removal.
  *
  * Custom entries don't enter LLM context; they exist purely to reconstruct state (CustomEntry docs).
  */
 import { readEnvelopeAt, SpoolError } from "./spool";
-import type { GateEntry } from "../../core/gate-registry";
+import type { SpoolEntry } from "../../core/spool-registry";
 
 /** The customType tag for every context-fold state entry. */
 export const FOLD_CUSTOM_TYPE = "contextfold.fold";
@@ -24,11 +22,11 @@ export interface FrozenLayerRecord {
 	entries: { id: string; digestText: string }[];
 }
 
-/** One event on the fold ledger. `gate` = a born-fold happened; `unfold` = the agent expanded
- *  folds; `layer` = a prefix-stable layer committed. Unknown kinds (from an older version) are
- *  ignored on restore. */
+/** One event on the fold ledger. `gate` is a legacy arrival-gate spool record. Unknown kinds are
+ * ignored on restore. */
 export type FoldRecord =
-	| { kind: "gate"; entry: GateEntry }
+	| { kind: "spool"; entry: SpoolEntry }
+	| { kind: "gate"; entry: SpoolEntry }
 	| { kind: "unfold"; ids: string[] }
 	| { kind: "layer"; layer: FrozenLayerRecord };
 
@@ -44,9 +42,9 @@ export interface EntryLike {
 	data?: unknown;
 }
 
-/** Record that a tool result was born-folded (so it can be restored on resume). */
-export function recordGateFold(pi: EntryAppender, entry: GateEntry): void {
-	pi.appendEntry(FOLD_CUSTOM_TYPE, { kind: "gate", entry } satisfies FoldRecord);
+/** Record the exact-content spool location for a newly folded block. */
+export function recordSpoolEntry(pi: EntryAppender, entry: SpoolEntry): void {
+	pi.appendEntry(FOLD_CUSTOM_TYPE, { kind: "spool", entry } satisfies FoldRecord);
 }
 
 /** Record that the agent unfolded one or more blocks (sticky across resume). */
@@ -60,40 +58,39 @@ export function recordLayer(pi: EntryAppender, layer: FrozenLayerRecord): void {
 }
 
 /**
- * Left-fold the session's context-fold entries into the restored state: the latest gate entry per
+ * Left-fold the session's context-fold entries into the restored state: the latest spool entry per
  * block wins, and every unfolded id accumulates. Pure — no disk, deterministic in entry order.
  */
 export function restoreFoldState(entries: EntryLike[]): {
-	gateEntries: GateEntry[];
+	spoolEntries: SpoolEntry[];
 	unfoldedIds: Set<string>;
 	layers: FrozenLayerRecord[];
 } {
-	const byBlock = new Map<string, GateEntry>();
+	const byBlock = new Map<string, SpoolEntry>();
 	const unfoldedIds = new Set<string>();
 	const layersBySeq = new Map<number, FrozenLayerRecord>();
 	for (const e of entries) {
 		if (e.customType !== FOLD_CUSTOM_TYPE) continue;
 		const rec = e.data as FoldRecord | undefined;
 		if (!rec || typeof rec !== "object") continue;
-		if (rec.kind === "gate" && rec.entry?.blockId) byBlock.set(rec.entry.blockId, rec.entry);
+		if ((rec.kind === "spool" || rec.kind === "gate") && rec.entry?.blockId) byBlock.set(rec.entry.blockId, rec.entry);
 		else if (rec.kind === "unfold" && Array.isArray(rec.ids)) for (const id of rec.ids) unfoldedIds.add(id);
 		else if (rec.kind === "layer" && rec.layer && typeof rec.layer.seq === "number" && Array.isArray(rec.layer.entries))
 			layersBySeq.set(rec.layer.seq, rec.layer);
 	}
 	const layers = [...layersBySeq.values()].sort((a, b) => a.seq - b.seq);
-	return { gateEntries: [...byBlock.values()], unfoldedIds, layers };
+	return { spoolEntries: [...byBlock.values()], unfoldedIds, layers };
 }
 
 /**
- * Revalidate restored gate entries against their spool files: a fold whose spool is missing or
- * corrupt is DROPPED from the registry — the block then renders raw (safe degradation) rather than
- * showing a pointer that can't resolve. Returns the survivors and a report of what was dropped.
+ * Revalidate restored entries against their spool files. A missing/corrupt entry is dropped from
+ * recall's durable route; a still-live folded block remains recoverable from the session snapshot.
  */
-export function revalidateSpools(entries: GateEntry[]): {
-	valid: GateEntry[];
+export function revalidateSpools(entries: SpoolEntry[]): {
+	valid: SpoolEntry[];
 	dropped: { code: string; path: string; reason: string }[];
 } {
-	const valid: GateEntry[] = [];
+	const valid: SpoolEntry[] = [];
 	const dropped: { code: string; path: string; reason: string }[] = [];
 	for (const e of entries) {
 		try {

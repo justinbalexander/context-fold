@@ -22,11 +22,14 @@
  * in its own dir (see `touchHeartbeat`), which the sweep reads like any other file. The residual
  * edge is a stopped process: it stops heartbeating and can still be reaped.
  */
-import { existsSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync, type Dirent } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync, type Dirent } from "node:fs";
+import { join, resolve } from "node:path";
 
-/** Default retention window: two weeks of resumability, bounded disk on a 24/7 box. */
-export const SPOOL_RETAIN_DAYS_DEFAULT = 14;
+/** Default retention window: 24 hours. A spool is a working artifact for the session that made it
+ *  (plus a same-day resume), not an archive — Pi's session JSONL keeps the raw payload forever,
+ *  so a reaped spool loses only the recall-optimized copy. Reviving genuinely stale sessions is
+ *  not a supported workflow; raise CONTEXTFOLD_SPOOL_RETAIN_DAYS if a machine needs one. */
+export const SPOOL_RETAIN_DAYS_DEFAULT = 1;
 const DAY_MS = 86_400_000;
 
 /** Liveness marker refreshed by a running session; counts as a normal file to the sweep. */
@@ -132,6 +135,51 @@ export function sweepSpools(spoolRoot: string, keepSessionId: string, retainMs: 
 			}
 		} catch {
 			result.kept++; // unreadable/undeletable → keep, never break the session over GC
+		}
+	}
+	return result;
+}
+
+/**
+ * Sweep sibling WORKSPACE spool roots (`<sessionsRoot>/<workspace>/spool/`). Pi keys session dirs
+ * by workspace, and `sweepSpools` alone only runs for a workspace when a new session starts *in
+ * it* — so a workspace that stops being used would retain its last spools forever. Same window as
+ * the per-session sweep: one number answers "how long is a spool worth keeping".
+ *
+ * The current workspace's root is skipped (its own sweep just ran, with the live session's dir
+ * protected); live sessions in other workspaces are protected by their hourly heartbeat like any
+ * fresh file. Only the `spool/` subdir of a workspace is ever touched, and a root left empty is
+ * removed. Fail-open throughout, like everything else in this file.
+ */
+export function sweepWorkspaceSpools(
+	sessionsRoot: string,
+	currentSpoolRoot: string,
+	retainMs: number,
+	now = Date.now(),
+): SweepResult {
+	const result: SweepResult = { reaped: [], kept: 0 };
+	if (retainMs <= 0) return result;
+
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(sessionsRoot, { withFileTypes: true });
+	} catch {
+		return result; // no sessions root — nothing to do
+	}
+
+	for (const ent of entries) {
+		if (!ent.isDirectory()) continue;
+		const spoolRoot = join(sessionsRoot, ent.name, "spool");
+		try {
+			if (resolve(spoolRoot) === resolve(currentSpoolRoot)) continue;
+			if (!existsSync(spoolRoot)) continue;
+			// No session of ours lives there: keepSessionId "" matches no dir.
+			const swept = sweepSpools(spoolRoot, "", retainMs, now);
+			result.reaped.push(...swept.reaped.map((sid) => `${ent.name}/${sid}`));
+			result.kept += swept.kept;
+			if (swept.kept === 0) rmdirSync(spoolRoot); // throws if anything remains — that's the guard
+		} catch {
+			// unreadable/undeletable/non-empty → leave it; never break a session over housekeeping
 		}
 	}
 	return result;

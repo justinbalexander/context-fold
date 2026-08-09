@@ -5,46 +5,36 @@
  * us a deep copy of the outgoing message array; we replace the content of stale blocks with
  * short reversible digests and return it. The real session history is never touched — folding
  * lives only in the outgoing copy. The agent pulls any folded block back with the
- * `unfold`/`recall` tools by its `{#<code> FOLDED}` handle.
+ * `unfold`/`recall_folded` tools by its `{#<code> FOLDED}` handle.
  *
  * The policy is the discrete fold ladder: fold events mask stale observations into prefix-stable
  * frozen layers, with a deterministic seed index emitted at every event. No model call ever fires
  * on the automatic path. Fully autonomous (no UI prompts) — runs identically headless.
  */
 import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage as CoreAgentMessage } from "../../core/block";
 import { FoldLadderPolicy } from "../../core/policy/fold-ladder";
 import { ContextFoldEngine } from "./store";
-import { SeedIndexStore, emitFoldIndex, emitCompactIndex } from "./index-store";
+import { SeedIndexStore, emitFoldIndex, emitCompactIndex, spoolCompactedBlocks } from "./index-store";
 import { renderDetCompactionSummary } from "./compact";
 import { registerHandoffCommand } from "./handoff";
 import { linearize, type WireBlock } from "../../core/block";
 import { registerFoldTools } from "./unfold-tool";
-import { MapGateRegistry } from "../../core/gate-registry";
-import { Gate, gateConfigFromEnv, gateModelIdentity } from "./gate";
+import { MapSpoolRegistry } from "../../core/spool-registry";
 import { SpoolStore } from "./spool";
-import { recordGateFold, recordLayer, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
-import { spoolRetainMsFromEnv, sweepSpools, touchHeartbeat } from "./retention";
+import { recordSpoolEntry, recordLayer, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
+import { spoolRetainMsFromEnv, sweepSpools, sweepWorkspaceSpools, touchHeartbeat } from "./retention";
 import { CacheTelemetry, k } from "./cache-telemetry";
 import { advise } from "./advisor";
-
-// ≤6 lines. Teaches the L0 pointer contract; positive framing (says when to reach for recall).
-const L0_TEACHING = [
-	"Context note: large or stale tool results in your context may appear folded to a short `{#<code> FOLDED}` pointer that keeps the head, tail, and any error/risk lines. The full result is preserved on disk.",
-	"Looking for a detail but unsure which folded block holds it? `recall search=<term>` sweeps EVERY folded block in one call — prefer it over recalling pointers one by one.",
-	"When you need detail from a specific pointer, call `recall {code}` for the whole result, or `recall {code} grep=<term>` / `recall {code} lines=<a-b>` for just the slice you need.",
-	"Reach for `unfold {code}` when you want a folded result kept expanded across your next turns.",
-].join("\n");
 
 import { adapterConfigFromEnv, configFromEnv } from "./config";
 export { adapterConfigFromEnv, configFromEnv };
 
 export default function contextFold(pi: ExtensionAPI): void {
 	// MASTER kill switch: CONTEXTFOLD=0/off/false disables the whole extension — no hooks, no
-	// tools, no folding — without touching the install symlink. The one-session escape hatch for
-	// a live folding incident (CONTEXTFOLD_L0 gates only the ingestion gate).
+	// tools, no folding — without changing the installed package.
 	const master = process.env.CONTEXTFOLD?.trim().toLowerCase();
 	if (master === "0" || master === "off" || master === "false") {
 		process.stderr.write("[context-fold] disabled by CONTEXTFOLD=0 — no folding this session\n");
@@ -54,14 +44,24 @@ export default function contextFold(pi: ExtensionAPI): void {
 	const foldCfg = configFromEnv();
 	const ladderPolicy = new FoldLadderPolicy(acfg.ladder);
 
-	// ── L0 ingestion gate: registry (shared with the engine) + lazy per-session spool store ──────
-	const registry = new MapGateRegistry();
+	// Exact originals for ladder folds, shared by fold-index emission and recall.
+	const registry = new MapSpoolRegistry();
 	const engine = new ContextFoldEngine(ladderPolicy, foldCfg, registry);
-	engine.onLayerCommit = (layer) => recordLayer(pi, layer);
 
 	const debug = process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true";
 	const dumpPath = process.env.CONTEXTFOLD_DUMP?.trim() || null;
 	const telemetry = new CacheTelemetry();
+	engine.onLayerCommit = (layer) => {
+		try {
+			recordLayer(pi, layer);
+			const saved = engine.status?.metrics?.tokens_saved;
+			telemetry.noteFoldEvent(typeof saved === "number" ? saved : 0);
+			return true;
+		} catch (err) {
+			process.stderr.write(`[context-fold] layer persistence failed (fold skipped): ${err instanceof Error ? err.message : String(err)}\n`);
+			return false;
+		}
+	};
 
 	// ── advisory state (display-only; nothing here gates a turn) ─────────────────────────────────
 	let compactions = 0;
@@ -84,6 +84,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			everWarm: t.everWarm,
 			lastCacheRead: t.last?.cacheRead ?? 0,
 			lastInput: t.last?.input ?? 0,
+			lastTurnAfterFold: t.lastTurnAfterFold,
 			carriedTokens: carried,
 			contextWindow: lastContextWindow,
 			irreducibleFloor: typeof m.irreducible_floor === "number" ? m.irreducible_floor : null,
@@ -97,7 +98,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 
 	// The trigger gauge: render whichever ladder condition is actually binding, so the line stays
 	// meaningful in every state. Below the entry threshold that IS the threshold ("next fold at
-	// 45% ctx"); at or past it the usage gate is permanently satisfied and the real trigger is
+	// 45% ctx"); at or past it the usage threshold is permanently satisfied and the real trigger is
 	// maskable mass reaching one ladder step, so the gauge tracks that instead — counting up from
 	// 0 right after a fold, since interim emptiness refills as new observations land. "No more
 	// folds possible" is reserved for the terminal state where the irreducible floor is over
@@ -132,14 +133,6 @@ export default function contextFold(pi: ExtensionAPI): void {
 	let spoolKey = "";
 	let indexStore: SeedIndexStore | null = null;
 	let indexKey = "";
-	let activeModelIdentity = "unknown";
-	let activeGate = false;
-	const resolveGate = (model: { id?: string; name?: string; provider?: string } | undefined) => {
-		activeModelIdentity = gateModelIdentity(model) ?? "unknown";
-		const cfg = gateConfigFromEnv(activeModelIdentity === "unknown" ? undefined : activeModelIdentity);
-		activeGate = cfg.enabled;
-		return cfg;
-	};
 	const spoolFor = (ctx: { sessionManager: { getSessionDir(): string; getSessionId(): string } }): SpoolStore => {
 		const dir = join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId());
 		if (!spool || spoolKey !== dir) {
@@ -157,13 +150,12 @@ export default function contextFold(pi: ExtensionAPI): void {
 		return indexStore;
 	};
 
-	// On resume, rebuild the gate registry + unfold set from the session's event-sourced fold ledger
-	// (the tool_result hook does not re-fire for results already in history). Revalidate each spool.
+	// On resume, rebuild the spool registry, unfold set, and frozen layers from the event-sourced
+	// fold ledger. Revalidate every spool before exposing it to recall.
 	// Keyed by SESSION ID: a session switch inside one process re-restores for the new session and
 	// clears the previous session's registry (stale codes must never serve another session's spool).
 	let restoredFor = "";
 	pi.on("session_start", (_event, ctx) => {
-		resolveGate(ctx.model);
 		const sid = ctx.sessionManager.getSessionId();
 		if (restoredFor === sid) return;
 		const isSwitch = restoredFor !== "";
@@ -175,9 +167,14 @@ export default function contextFold(pi: ExtensionAPI): void {
 		const retainMs = spoolRetainMsFromEnv();
 		if (retainMs > 0) {
 			try {
-				const swept = sweepSpools(join(ctx.sessionManager.getSessionDir(), "spool"), sid, retainMs);
-				if (debug && swept.reaped.length) {
-					process.stderr.write(`[context-fold] spool-gc: reaped ${swept.reaped.length} stale session spool dir(s)\n`);
+				const spoolRoot = join(ctx.sessionManager.getSessionDir(), "spool");
+				const swept = sweepSpools(spoolRoot, sid, retainMs);
+				// Abandoned-workspace pass: sibling workspaces' spool roots age out under the same
+				// window, since their own sweep only runs when a session starts there again.
+				const wsSwept = sweepWorkspaceSpools(dirname(ctx.sessionManager.getSessionDir()), spoolRoot, retainMs);
+				const reaped = swept.reaped.length + wsSwept.reaped.length;
+				if (debug && reaped) {
+					process.stderr.write(`[context-fold] spool-gc: reaped ${reaped} stale session spool dir(s)\n`);
 				}
 			} catch (err) {
 				process.stderr.write(`[context-fold] spool-gc failed (skipped): ${err instanceof Error ? err.message : String(err)}\n`);
@@ -210,9 +207,9 @@ export default function contextFold(pi: ExtensionAPI): void {
 		}
 
 		try {
-			const { gateEntries, unfoldedIds, layers } = restoreFoldState(ctx.sessionManager.getEntries() as unknown as { customType?: string; data?: unknown }[]);
-			if (gateEntries.length === 0 && unfoldedIds.size === 0 && layers.length === 0) return;
-			const { valid, dropped } = revalidateSpools(gateEntries);
+			const { spoolEntries, unfoldedIds, layers } = restoreFoldState(ctx.sessionManager.getEntries() as unknown as { customType?: string; data?: unknown }[]);
+			if (spoolEntries.length === 0 && unfoldedIds.size === 0 && layers.length === 0) return;
+			const { valid, dropped } = revalidateSpools(spoolEntries);
 			for (const e of valid) registry.set(e);
 			engine.restoreUnfolded(unfoldedIds);
 			// Layers restore byte-verbatim — the persisted substitution bytes are replayed rather
@@ -221,55 +218,13 @@ export default function contextFold(pi: ExtensionAPI): void {
 			engine.restoreLayers(layers);
 			if (debug)
 				process.stderr.write(
-					`[context-fold] resume: restored ${valid.length} L0 folds, ${unfoldedIds.size} unfolds, ${layers.length} layers${dropped.length ? `, dropped ${dropped.length} (missing spool)` : ""}\n`,
+					`[context-fold] resume: restored ${valid.length} spool entries, ${unfoldedIds.size} unfolds, ${layers.length} layers${dropped.length ? `, dropped ${dropped.length} (missing spool)` : ""}\n`,
 				);
 		} catch (err) {
 			// Fail-open: a restore failure just means prior folds render raw this session — but say so,
 			// or the only symptom is silent token creep.
 			process.stderr.write(`[context-fold] resume restore failed (folds render raw): ${err instanceof Error ? err.message : String(err)}\n`);
 		}
-	});
-
-	// OBSERVE-ONLY: spool + register large tool results as they land; never mutate the result
-	// (the session jsonl keeps the raw payload — the view-only `context` hook does the substitution).
-	pi.on("tool_result", (event, ctx) => {
-		const cfg = resolveGate(ctx.model);
-		if (!cfg.enabled) return; // kill switch off / model not in the allowlist → fully inert
-		try {
-			const gate = new Gate(cfg, registry, () => spoolFor(ctx));
-			const decision = gate.observe({
-				toolName: event.toolName,
-				toolCallId: event.toolCallId,
-				input: event.input,
-				isError: event.isError,
-				content: event.content as ReadonlyArray<{ type: string; text?: string }>,
-				fullOutputPath: (event as { details?: { fullOutputPath?: string } }).details?.fullOutputPath,
-			});
-			if (decision.folded) {
-				const entry = registry.get(`r:${event.toolCallId}`);
-				if (entry) recordGateFold(pi, entry); // event-source the fold for resume
-				if (debug) {
-					const dup = decision.dedupOf ? ` dedup=#${decision.dedupOf}` : "";
-					process.stderr.write(`[context-fold] l0-fold #${decision.code} tool=${event.toolName} ${decision.inTokens}→${decision.outTokens}${dup}\n`);
-				}
-			} else if (decision.reason === "error") {
-				// Unlike a one-off fold miss, an unavailable spool can silently disable L0 for the
-				// rest of the session. Keep the turn fail-open, but make that degraded state visible.
-				process.stderr.write(`[context-fold] gate error (result flows raw): ${decision.error ?? "spool write failed"}\n`);
-			}
-		} catch (err) {
-			// Fail-open: never let the gate break a tool result — but a persistent failure (unwritable
-			// spool dir, full disk) must be visible, or every fold silently degrades to no-gating.
-			process.stderr.write(`[context-fold] gate error (result flows raw): ${err instanceof Error ? err.message : String(err)}\n`);
-		}
-	});
-
-	// Teaching text: ≤6 lines telling the agent what the {#code FOLDED} pointers are and how to
-	// recall from them. Injected only when the gate is active for the current model, so it is charged
-	// to the gated arms and never taxes a baseline run. Positive framing (states when to recall).
-	pi.on("before_agent_start", (event, ctx) => {
-		if (!resolveGate(ctx.model).enabled) return;
-		return { systemPrompt: `${event.systemPrompt}\n\n${L0_TEACHING}` };
 	});
 
 	// OBSERVE-ONLY cache telemetry: every finalized assistant message carries real provider
@@ -295,26 +250,35 @@ export default function contextFold(pi: ExtensionAPI): void {
 			const foldCost = telemetry.foldCostLine();
 			process.stderr.write(`[context-fold] ${telemetry.statusLine()}${foldCost ? ` · ${foldCost}` : ""}\n`);
 		}
-		// Cold-session notification: one line at the START of a cold streak, never per-turn nagging.
-		const adv = buildAdvisory();
-		if (adv.coldNow && !wasCold) {
-			const t = telemetry.snapshot();
-			const carried = t.last ? t.last.cacheRead + t.last.input : 0;
-			if (carried >= 20_000)
-				process.stderr.write(
-					`[context-fold] session cold — this turn re-billed ~${Math.round(carried / 1000)}k tok as fresh input; consider /new (reconstruction ≈ ${Math.round(acfg.reconTokens / 1000)}k tok via the seed index)\n`,
-				);
-		}
-		wasCold = adv.coldNow;
 		if (dumpPath) {
-			// e2e seam, sibling of the view dump: never change the CONTEXTFOLD_DUMP payload
-			// itself (e2e-gate.sh parses it as a message array).
+			// E2E seam, sibling of the view dump: keep the view payload a message array and write
+			// telemetry beside it.
 			try {
 				writeFileSync(`${dumpPath}.telemetry.json`, JSON.stringify(telemetry.snapshot()), "utf8");
 			} catch {
 				/* dump is best-effort */
 			}
 		}
+	});
+
+	// A Pi "turn" is one provider response, so message_end also fires for every intermediate
+	// tool-call response while the agent is visibly still working. Coldness is a session-level
+	// recommendation: evaluate it only once Pi says retries, compaction and queued continuations
+	// have all settled. This also lets a transient cache miss recover later in the same agent run.
+	pi.on("agent_settled", () => {
+		const t = telemetry.snapshot();
+		const adv = buildAdvisory();
+		if (adv.coldNow && !wasCold) {
+			const carried = t.last ? t.last.cacheRead + t.last.input : 0;
+			if (carried >= 20_000)
+				process.stderr.write(
+					`[context-fold] session cold — the settled run re-billed ~${Math.round(carried / 1000)}k tok as fresh input; consider /new (reconstruction ≈ ${Math.round(acfg.reconTokens / 1000)}k tok via the seed index)\n`,
+				);
+		}
+		// The first response after a fold is intentionally excluded from cold detection because the
+		// extension itself rewrote the prefix. Treat it as an ignored sample, not a warm recovery:
+		// otherwise a genuinely cold streak would reset here and warn again on its next response.
+		if (!t.lastTurnAfterFold) wasCold = adv.coldNow;
 	});
 
 	// The make-or-break hook: rewrite the outgoing context before each model call.
@@ -324,10 +288,6 @@ export default function contextFold(pi: ExtensionAPI): void {
 			// so a quiet-but-live session is not reaped by a sibling's session_start sweep. Throttled
 			// internally to once an hour and inert until this session has actually spooled something.
 			touchHeartbeat(join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId()));
-			// Re-resolve the L0 kill switch per turn against the ACTIVE model: an allowlist change or
-			// a mid-session model switch takes effect immediately, and a resumed session with the gate
-			// off renders prior folds raw instead of substituting pointers.
-			engine.setGateActive(resolveGate(ctx.model).enabled);
 			lastContextWindow = ctx.getContextUsage()?.contextWindow ?? lastContextWindow;
 			// Ladder cold branch: no live cache read observed after a few turns ⇒ there is no warm
 			// prefix to protect, so the ladder folds earlier and more freely (measured, not assumed).
@@ -335,27 +295,27 @@ export default function contextFold(pi: ExtensionAPI): void {
 			ladderPolicy.setCold(t.turns >= 3 && t.totals.cacheRead === 0);
 			// Fold-event → seed-index emission. Bound per turn so the emitter sees this ctx's stores.
 			engine.onFoldEvent = (foldEvent) => {
-				// Arm the cache accounting first: the fold's re-prefill cost lands on the very next
-				// turn's cacheWrite, and it must be attributed even if index emission then throws.
-				const saved = engine.status?.metrics?.tokens_saved;
-				telemetry.noteFoldEvent(typeof saved === "number" ? saved : 0);
 				try {
-					const { record: rec, newEntries } = emitFoldIndex(foldEvent, {
+					const { record: rec, droppedIds } = emitFoldIndex(foldEvent, {
 						spool: spoolFor(ctx),
 						registry,
 						index: indexFor(ctx),
 						sessionId: ctx.sessionManager.getSessionId(),
+						persistEntry: (entry) => recordSpoolEntry(pi, entry),
 					});
-					// Event-source the ladder's spool registrations like L0 folds, so recall-by-code
-					// survives resume AND hard compaction (which removes the raw message from history).
-					for (const entry of newEntries) recordGateFold(pi, entry);
+					if (droppedIds.length)
+						process.stderr.write(
+							`[context-fold] fold-code collision: ${droppedIds.length} block(s) stay raw for this session (${droppedIds.join(", ")})\n`,
+						);
 					if (debug)
 						process.stderr.write(
 							`[context-fold] seed-index seq=${rec.seq} (${rec.trigger}): ${rec.spans.length} spans, ${rec.identifiers.length} ids, ${rec.errors.length} errors\n`,
 						);
+					return droppedIds.length ? droppedIds : true;
 				} catch (err) {
-					// Fail-open: a lost index record never costs the fold or the turn.
-					process.stderr.write(`[context-fold] seed-index emission failed: ${err instanceof Error ? err.message : String(err)}\n`);
+					// Reversibility is a commit precondition. Keep this turn raw when durability fails.
+					process.stderr.write(`[context-fold] seed-index emission failed (fold skipped): ${err instanceof Error ? err.message : String(err)}\n`);
+					return false;
 				}
 			};
 			const usage = ctx.getContextUsage();
@@ -397,6 +357,15 @@ export default function contextFold(pi: ExtensionAPI): void {
 			const prep = (event as { preparation: { messagesToSummarize: unknown[]; turnPrefixMessages: unknown[]; tokensBefore: number; firstKeptEntryId: string; previousSummary?: string } }).preparation;
 			const index = indexFor(ctx);
 			const blocks = linearize(prep.messagesToSummarize as unknown as CoreAgentMessage[]) as unknown as WireBlock[];
+			// Spool-at-compaction: blocks leaving live history that never folded become recallable
+			// too — the compact record below then carries recovery spans for the whole span.
+			const spooledNow = spoolCompactedBlocks(blocks, {
+				spool: spoolFor(ctx),
+				registry,
+				persistEntry: (entry) => recordSpoolEntry(pi, entry),
+			});
+			if (debug && spooledNow.length)
+				process.stderr.write(`[context-fold] compaction: spooled ${spooledNow.length} unfolded block(s) leaving history\n`);
 			const compactRecord = emitCompactIndex(blocks, {
 				registry,
 				index,
@@ -442,7 +411,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 					: "";
 			const adv = buildAdvisory();
 			const lines = [
-				`context-fold: ${state}${pos} · L0 ${activeGate ? "on" : "off"} · model ${activeModelIdentity}`,
+				`context-fold: ${state}${pos}`,
 				`${telemetry.statusLine()}${adv.coldNow ? " · COLD" : ""}${adv.paybackTurns !== null ? ` · reset pays back in ~${adv.paybackTurns} warm turns` : ""}`,
 				// Both sides of folding, not just the savings — see CacheTelemetry.foldCostLine.
 				...(telemetry.foldCostLine() ? [telemetry.foldCostLine() as string] : []),

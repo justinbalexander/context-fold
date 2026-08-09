@@ -2,9 +2,9 @@
  * extension-hooks.test.ts — the entry point's hook BODIES, not just their registration.
  *
  * extension-load.test.ts proves the hooks get registered; this file drives each one the way Pi
- * drives it. Everything here is wiring that only exists in index.ts — the gate handoff, the
- * teaching-text gate, the resume restore, the session-switch reset, and the compaction branch —
- * so a regression in any of them would otherwise surface first in a user's session.
+ * drives it. Everything here is wiring that only exists in index.ts — resume restore,
+ * session-switch reset, cache telemetry, and deterministic compaction — so a regression would
+ * otherwise surface first in a user's session.
  *
  * Skipped when the Pi CLI is not installed alongside (the adapter imports `typebox`, which Pi
  * injects at runtime — see vitest.config.ts).
@@ -47,13 +47,21 @@ function stubPi() {
 
 let dir: string;
 const savedEnv: Record<string, string | undefined> = {};
-const ENV_KEYS = ["CONTEXTFOLD", "CONTEXTFOLD_L0", "CONTEXTFOLD_COMPACT", "CONTEXTFOLD_RETAIN_DAYS", "CONTEXTFOLD_FOLD_AT", "CONTEXTFOLD_TAIL"];
+const ENV_KEYS = [
+	"CONTEXTFOLD",
+	"CONTEXTFOLD_COMPACT",
+	"CONTEXTFOLD_SPOOL_RETAIN_DAYS",
+	"CONTEXTFOLD_FOLD_AT",
+	"CONTEXTFOLD_TAIL",
+	"CONTEXTFOLD_L0",
+	"CONTEXTFOLD_L0_THRESHOLD",
+];
 
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "cf-hooks-"));
 	for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
 	// Spool GC reaps by mtime across sibling sessions; keep it inert so it can't touch a fixture.
-	process.env.CONTEXTFOLD_RETAIN_DAYS = "0";
+	process.env.CONTEXTFOLD_SPOOL_RETAIN_DAYS = "0";
 });
 afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
@@ -106,11 +114,26 @@ function heavySession(): AgentMessage[] {
 	return messages;
 }
 
-const bigPayload = () => Array.from({ length: 400 }, (_, i) => `line ${i}: ${"content ".repeat(8)}`).join("\n");
-
 describe.skipIf(!PI_PRESENT)("context hook", () => {
+	it("ignores obsolete L0 settings and delivers a large fresh result unchanged", async () => {
+		process.env.CONTEXTFOLD_L0 = "1";
+		process.env.CONTEXTFOLD_L0_THRESHOLD = "1";
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: 79_000 } });
+		const messages: AgentMessage[] = [
+			user("read it"),
+			assistantWithCalls([{ id: "fresh", name: "read" }]),
+			bigResult("fresh", 500),
+		];
+
+		const out = (await s.hooks.get("context")!({ messages }, ctx)) as { messages: AgentMessage[] };
+		expect(out.messages).toBe(messages);
+		expect(JSON.stringify(out.messages)).not.toContain("FOLDED");
+		expect(s.hooks.has("tool_result")).toBe(false);
+		expect(s.entries).toEqual([]);
+	});
+
 	it("folds the outgoing messages and leaves the caller's array untouched", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
 		const messages = heavySession();
@@ -124,7 +147,6 @@ describe.skipIf(!PI_PRESENT)("context hook", () => {
 	});
 
 	it("sends context raw rather than failing the turn when the pass throws", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		const messages = heavySession();
 		const broken = {
@@ -138,49 +160,13 @@ describe.skipIf(!PI_PRESENT)("context hook", () => {
 		const out = (await s.hooks.get("context")!({ messages }, broken)) as { messages: AgentMessage[] };
 		expect(out.messages).toBe(messages); // fail-open: the same array, unfolded
 	});
-});
 
-describe.skipIf(!PI_PRESENT)("tool_result hook (the L0 gate handoff)", () => {
-	it("spools and event-sources a large result when the gate is on", async () => {
-		process.env.CONTEXTFOLD_L0 = "1";
+	it("keeps a fold raw when its spool cannot be written", async () => {
 		const s = await load();
-		const { ctx } = ctxFor();
-
-		await s.hooks.get("tool_result")!(
-			{ toolName: "read", toolCallId: "c1", input: { path: "/x.log" }, isError: false, content: [{ type: "text", text: bigPayload() }] },
-			ctx,
-		);
-
-		const gateEntries = s.entries.filter((e) => (e.data as { kind?: string }).kind === "gate");
-		expect(gateEntries.length).toBe(1);
-		expect((gateEntries[0].data as { entry: { blockId: string } }).entry.blockId).toBe("r:c1");
-	});
-
-	it("is completely inert when the gate is off", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
-		const s = await load();
-		const { ctx } = ctxFor();
-
-		await s.hooks.get("tool_result")!(
-			{ toolName: "read", toolCallId: "c1", input: {}, isError: false, content: [{ type: "text", text: bigPayload() }] },
-			ctx,
-		);
-
-		expect(s.entries).toEqual([]);
-	});
-
-	it("never lets a gate failure break the tool result", async () => {
-		process.env.CONTEXTFOLD_L0 = "1";
-		const s = await load();
-		// Point the session dir *inside a regular file* so the spool mkdir fails with ENOTDIR: the
-		// gate must swallow it and let the raw result through rather than breaking the turn.
-		const blocker = join(dir, "not-a-dir");
+		const blocker = join(dir, "not-a-directory");
 		writeFileSync(blocker, "x");
-		const badCtx = {
-			model: { id: "m" },
-			sessionManager: { getSessionDir: () => join(blocker, "session"), getSessionId: () => "s1", getEntries: () => [] },
-		};
-
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		ctx.sessionManager.getSessionDir = () => join(blocker, "session");
 		const writes: string[] = [];
 		const originalWrite = process.stderr.write;
 		process.stderr.write = ((chunk: string | Uint8Array) => {
@@ -188,79 +174,54 @@ describe.skipIf(!PI_PRESENT)("tool_result hook (the L0 gate handoff)", () => {
 			return true;
 		}) as typeof process.stderr.write;
 		try {
-			expect(() => s.hooks.get("tool_result")!(
-				{ toolName: "read", toolCallId: "c1", input: {}, isError: false, content: [{ type: "text", text: bigPayload() }] },
-				badCtx,
-			)).not.toThrow();
+			const messages = heavySession();
+			const out = (await s.hooks.get("context")!({ messages }, ctx)) as { messages: AgentMessage[] };
+			expect(JSON.stringify(out.messages)).not.toContain("FOLDED");
+			expect(s.entries.some((entry) => (entry.data as { kind?: string }).kind === "layer")).toBe(false);
 		} finally {
 			process.stderr.write = originalWrite;
 		}
-		expect(s.entries).toEqual([]); // nothing recorded, and the result flows raw
-		expect(writes.join("")).toContain("gate error (result flows raw)");
-	});
-});
-
-describe.skipIf(!PI_PRESENT)("before_agent_start hook (teaching text)", () => {
-	it("teaches the pointer contract only when the gate is active for this model", async () => {
-		process.env.CONTEXTFOLD_L0 = "1";
-		const on = await load();
-		const withGate = (await on.hooks.get("before_agent_start")!({ systemPrompt: "BASE" }, ctxFor().ctx)) as { systemPrompt: string };
-
-		expect(withGate.systemPrompt).toContain("BASE");
-		expect(withGate.systemPrompt).toContain("FOLDED");
-		expect(withGate.systemPrompt).toContain("recall search=");
-
-		process.env.CONTEXTFOLD_L0 = "0";
-		const off = await load();
-		// Gate off ⇒ no pointers can appear, so the teaching text must not tax the prompt.
-		expect(off.hooks.get("before_agent_start")!({ systemPrompt: "BASE" }, ctxFor().ctx)).toBeUndefined();
+		expect(writes.join("")).toContain("seed-index emission failed (fold skipped)");
 	});
 });
 
 describe.skipIf(!PI_PRESENT)("session_start hook", () => {
-	it("restores a prior session's folds so they render without the tool_result hook re-firing", async () => {
-		process.env.CONTEXTFOLD_L0 = "1";
+	it("restores a prior session's frozen layers and spool handles", async () => {
 		const first = await load();
-		const { ctx } = ctxFor();
-		await first.hooks.get("tool_result")!(
-			{ toolName: "read", toolCallId: "c0", input: {}, isError: false, content: [{ type: "text", text: bigPayload() }] },
-			ctx,
-		);
-		expect(first.entries.length).toBe(1);
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		const messages = heavySession();
+		await first.hooks.get("context")!({ messages }, ctx);
+		expect(first.entries.some((entry) => (entry.data as { kind?: string }).kind === "spool")).toBe(true);
+		expect(first.entries.some((entry) => (entry.data as { kind?: string }).kind === "layer")).toBe(true);
 
 		// A fresh process: only the recorded ledger entries survive.
 		const resumed = await load();
 		const ledger = first.entries.map((e) => ({ customType: e.customType, data: e.data }));
-		const resumedCtx = ctxFor({ entries: ledger }).ctx;
+		const resumedCtx = ctxFor({ entries: ledger, usage: { contextWindow: 80_000, tokens: null } }).ctx;
 		await resumed.hooks.get("session_start")!({}, resumedCtx);
 
-		const messages = [user("go"), assistantWithCalls([{ id: "c0", name: "read" }]), toolResult("c0", bigPayload())];
 		const out = (await resumed.hooks.get("context")!({ messages }, resumedCtx)) as { messages: AgentMessage[] };
 		expect(JSON.stringify(out.messages)).toContain("FOLDED");
 	});
 
 	it("a session switch drops the previous session's codes (they must not serve another session)", async () => {
-		process.env.CONTEXTFOLD_L0 = "1";
 		const s = await load();
-		const firstCtx = ctxFor({ sessionId: "s1" }).ctx;
+		const firstCtx = ctxFor({ sessionId: "s1", usage: { contextWindow: 80_000, tokens: null } }).ctx;
 		await s.hooks.get("session_start")!({}, firstCtx);
-		await s.hooks.get("tool_result")!(
-			{ toolName: "read", toolCallId: "c0", input: {}, isError: false, content: [{ type: "text", text: bigPayload() }] },
-			firstCtx,
-		);
-		const code = (s.entries[0].data as { entry: { code: string } }).entry.code;
+		await s.hooks.get("context")!({ messages: heavySession() }, firstCtx);
+		const spoolRecord = s.entries.find((entry) => (entry.data as { kind?: string }).kind === "spool")!;
+		const code = (spoolRecord.data as { entry: { code: string } }).entry.code;
 
 		// Switch sessions in the same process, carrying no ledger into the new one.
 		await s.hooks.get("session_start")!({}, ctxFor({ sessionId: "s2", entries: [] }).ctx);
 
-		const res = await s.tools.get("recall")!.execute("t1", { codes: [code] });
+		const res = await s.tools.get("recall_folded")!.execute("t1", { codes: [code] });
 		expect(res.content.map((c) => c.text).join("")).toContain("no folded block with that code");
 	});
 });
 
 describe.skipIf(!PI_PRESENT)("session_before_compact hook", () => {
 	it("replaces Pi's LLM summary with a deterministic one rendered from the seed index", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		process.env.CONTEXTFOLD_COMPACT = "det";
 		const s = await load();
 		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
@@ -284,7 +245,6 @@ describe.skipIf(!PI_PRESENT)("session_before_compact hook", () => {
 	});
 
 	it("carries a previous summary forward but marks it untrusted", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		process.env.CONTEXTFOLD_COMPACT = "det";
 		const s = await load();
 		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
@@ -340,11 +300,164 @@ describe.skipIf(!PI_PRESENT)("message_end hook and the status command", () => {
 
 		expect(notices.join("\n")).toContain("no usage yet");
 	});
+
+	it("waits for agent_settled before warning that a session is cold", async () => {
+		const s = await load();
+		const { ctx } = ctxFor();
+		const writes: string[] = [];
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 5_000, cacheRead: 30_000, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 40_000, cacheRead: 0, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			expect(writes.join("")).not.toContain("session cold");
+
+			await s.hooks.get("agent_settled")!({}, ctx);
+			expect(writes.filter((w) => w.includes("session cold"))).toHaveLength(1);
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+	});
+
+	it("does not warn when an intermediate miss recovers before the agent settles", async () => {
+		const s = await load();
+		const { ctx } = ctxFor();
+		const writes: string[] = [];
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 40_000, cacheRead: 0, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 1_000, cacheRead: 40_000, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("agent_settled")!({}, ctx);
+			expect(writes.join("")).not.toContain("session cold");
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+	});
+
+	it("does not misclassify the expected post-fold cache miss at settlement", async () => {
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		await s.hooks.get("message_end")!(
+			{ message: { role: "assistant", usage: { input: 5_000, cacheRead: 30_000, cacheWrite: 0, output: 50 } } },
+			ctx,
+		);
+		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
+
+		const writes: string[] = [];
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 40_000, cacheRead: 0, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("agent_settled")!({}, ctx);
+			expect(writes.join("")).not.toContain("session cold");
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+	});
+
+	it("does not let post-fold suppression reset an existing cold streak", async () => {
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		const writes: string[] = [];
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 5_000, cacheRead: 30_000, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 40_000, cacheRead: 0, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("agent_settled")!({}, ctx);
+
+			await s.hooks.get("context")!({ messages: heavySession() }, ctx);
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 40_000, cacheRead: 0, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("agent_settled")!({}, ctx);
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 40_000, cacheRead: 0, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("agent_settled")!({}, ctx);
+
+			expect(writes.filter((w) => w.includes("session cold"))).toHaveLength(1);
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+	});
+
+	it("warns again after a genuine warm recovery starts a new cold streak", async () => {
+		const s = await load();
+		const { ctx } = ctxFor();
+		const writes: string[] = [];
+		const originalWrite = process.stderr.write;
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 5_000, cacheRead: 30_000, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 40_000, cacheRead: 0, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("agent_settled")!({}, ctx);
+
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 1_000, cacheRead: 40_000, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("agent_settled")!({}, ctx);
+			await s.hooks.get("message_end")!(
+				{ message: { role: "assistant", usage: { input: 40_000, cacheRead: 0, cacheWrite: 0, output: 50 } } },
+				ctx,
+			);
+			await s.hooks.get("agent_settled")!({}, ctx);
+
+			expect(writes.filter((w) => w.includes("session cold"))).toHaveLength(2);
+		} finally {
+			process.stderr.write = originalWrite;
+		}
+	});
 });
 
 describe.skipIf(!PI_PRESENT)("footer status line", () => {
 	it("shows idle at session start, then a fold summary with nothing left maskable after a fold event", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
 
@@ -360,7 +473,6 @@ describe.skipIf(!PI_PRESENT)("footer status line", () => {
 	});
 
 	it("names the configured entry threshold while usage is still below it", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		process.env.CONTEXTFOLD_FOLD_AT = "0.6";
 		const s = await load();
 		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 30_000 } });
@@ -371,7 +483,6 @@ describe.skipIf(!PI_PRESENT)("footer status line", () => {
 	});
 
 	it("tracks maskable mass toward the next step once usage is past the threshold", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		process.env.CONTEXTFOLD_TAIL = "1000"; // shrink the protected tail so one older result is maskable
 		const s = await load();
 		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 40_000 } });
@@ -385,14 +496,13 @@ describe.skipIf(!PI_PRESENT)("footer status line", () => {
 		];
 
 		// 40k/80k = 50% ≥ the 45% threshold, but only ~2.5k of maskable mass (< the 9.6k step):
-		// no fold fires, and the gauge shows progress toward the step instead of the usage gate.
+		// no fold fires, and the gauge shows progress toward the step instead of the usage threshold.
 		await s.hooks.get("context")!({ messages }, ctx);
 		expect(statuses["context-fold"]).toMatch(/next fold: \S+\/\S+ maskable/);
 		expect(statuses["context-fold"]).not.toContain("×");
 	});
 
 	it("shows an empty step gauge past the threshold with nothing maskable yet", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		const { ctx, statuses } = ctxFor({ usage: { contextWindow: 80_000, tokens: 40_000 } });
 
@@ -406,7 +516,6 @@ describe.skipIf(!PI_PRESENT)("footer status line", () => {
 	});
 
 	it("declares no more folds possible only when the irreducible floor is over budget", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		// 70k reported of an 80k window is past the 60k budget (0.75 × window), and a pure-text
 		// conversation leaves nothing maskable: the terminal state, not an interim one.
@@ -417,7 +526,6 @@ describe.skipIf(!PI_PRESENT)("footer status line", () => {
 	});
 
 	it("survives a ctx whose ui has no setStatus (headless stubs, older hosts)", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		const bare = ctxFor({ usage: { contextWindow: 80_000, tokens: null } }).ctx as { ui?: unknown };
 		bare.ui = undefined;
@@ -441,7 +549,6 @@ describe.skipIf(!PI_PRESENT)("wire watchdog (folds that never reach the provider
 	}
 
 	it("warns on stderr once per session and raises the status flag", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		const { ctx, notices } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
 
@@ -470,7 +577,6 @@ describe.skipIf(!PI_PRESENT)("wire watchdog (folds that never reach the provider
 	});
 
 	it("a fold whose next turn shows the prefix rewrite stays quiet", async () => {
-		process.env.CONTEXTFOLD_L0 = "0";
 		const s = await load();
 		const { ctx, notices } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
 

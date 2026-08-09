@@ -1,32 +1,29 @@
 /*
  * persistence.test.ts — event-sourced fold state across restarts.
  *
- * Simulates a resume: session 1 folds + unfolds and appends ledger entries; a FRESH engine +
- * registry in "session 2" rebuilds state from those entries and reproduces the folded view, with
- * every pointer still resolving from the spool.
+ * A fresh engine rebuilds spool locations, frozen layers, and unfolds from custom session entries.
+ * Legacy `kind:"gate"` records remain readable so handles from pre-removal sessions still resolve.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	FOLD_CUSTOM_TYPE,
-	recordGateFold,
+	recordLayer,
+	recordSpoolEntry,
 	recordUnfold,
 	restoreFoldState,
 	revalidateSpools,
 	type EntryAppender,
 } from "../src/adapters/pi/persistence";
-import { Gate, GATE_DEFAULTS, type GateConfig } from "../src/adapters/pi/gate";
-import { SpoolStore } from "../src/adapters/pi/spool";
-import { MapGateRegistry } from "../src/core/gate-registry";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
+import { SpoolStore } from "../src/adapters/pi/spool";
+import { linearize, type AgentMessage } from "../src/core/block";
+import { digest, foldCode } from "../src/core/digest";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { foldCode } from "../src/core/digest";
-import { user, assistantWithCalls, toolResult } from "./helpers";
-import type { AgentMessage } from "../src/core/block";
-
-const ENABLED: GateConfig = { enabled: true, ...GATE_DEFAULTS };
+import { MapSpoolRegistry, type SpoolEntry } from "../src/core/spool-registry";
+import { assistantWithCalls, toolResult, user } from "./helpers";
 
 let dir: string;
 beforeEach(() => {
@@ -36,7 +33,6 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-/** A fake session entry log that records appendEntry calls as CustomEntry-shaped objects. */
 class FakeLedger implements EntryAppender {
 	entries: { type: string; customType: string; data: unknown }[] = [];
 	appendEntry(customType: string, data?: unknown): void {
@@ -45,12 +41,9 @@ class FakeLedger implements EntryAppender {
 }
 
 function flood(tag: string): string {
-	const lines = [];
-	for (let i = 0; i < 300; i++) lines.push(`row ${i}: ${tag} bulky tabular content spanning the terminal width for size`);
-	return lines.join("\n");
+	return Array.from({ length: 300 }, (_, i) => `row ${i}: ${tag} bulky tabular content spanning the terminal width for size`).join("\n");
 }
 
-/** A two-read session used across both simulated runs. */
 function twoReadSession(a: string, b: string): AgentMessage[] {
 	return [
 		user("read both files"),
@@ -62,86 +55,85 @@ function twoReadSession(a: string, b: string): AgentMessage[] {
 	];
 }
 
-describe("fold ledger round-trip", () => {
-	it("restoreFoldState left-folds gate + unfold events (latest gate per block wins)", () => {
-		const led = new FakeLedger();
-		recordGateFold(led, { blockId: "r:c1", code: "aaa", fullTokens: 100, tool: "read", isError: false, bytes: 1, fullEstTokens: 90, spoolPath: "/x/aaa.json" });
-		recordGateFold(led, { blockId: "r:c2", code: "bbb", fullTokens: 200, tool: "read", isError: false, bytes: 2, fullEstTokens: 180, spoolPath: "/x/bbb.json" });
-		recordUnfold(led, ["r:c1"]);
+function spoolEntry(store: SpoolStore, callId: string, content: string): SpoolEntry {
+	const blockId = `r:${callId}`;
+	const code = foldCode(blockId);
+	const written = store.write({ blockId, code, tool: "read", input: undefined, isError: false, content });
+	return {
+		blockId,
+		code,
+		fullTokens: written.envelope.estTokens + 4,
+		tool: "read",
+		isError: false,
+		bytes: written.envelope.bytes,
+		fullEstTokens: written.envelope.estTokens,
+		spoolPath: store.pathFor(code),
+	};
+}
 
-		const { gateEntries, unfoldedIds } = restoreFoldState(led.entries);
-		expect(gateEntries.map((e) => e.blockId).sort()).toEqual(["r:c1", "r:c2"]);
+describe("fold ledger round-trip", () => {
+	it("restores current spool records, unfolds, and legacy gate records", () => {
+		const ledger = new FakeLedger();
+		const first = { blockId: "r:c1", code: "aaa", fullTokens: 100, tool: "read", isError: false, bytes: 1, fullEstTokens: 90, spoolPath: "/x/aaa.json" };
+		const second = { blockId: "r:c2", code: "bbb", fullTokens: 200, tool: "read", isError: false, bytes: 2, fullEstTokens: 180, spoolPath: "/x/bbb.json" };
+		recordSpoolEntry(ledger, first);
+		ledger.appendEntry(FOLD_CUSTOM_TYPE, { kind: "gate", entry: second });
+		recordUnfold(ledger, ["r:c1"]);
+
+		const { spoolEntries, unfoldedIds } = restoreFoldState(ledger.entries);
+		expect(spoolEntries.map((entry) => entry.blockId).sort()).toEqual(["r:c1", "r:c2"]);
 		expect([...unfoldedIds]).toEqual(["r:c1"]);
-		expect(led.entries.every((e) => e.customType === FOLD_CUSTOM_TYPE)).toBe(true);
 	});
 
 	it("ignores unrelated custom entries", () => {
-		const entries = [{ type: "custom", customType: "someone.else", data: { kind: "gate" } }];
-		expect(restoreFoldState(entries).gateEntries).toEqual([]);
+		const entries = [{ type: "custom", customType: "someone.else", data: { kind: "spool" } }];
+		expect(restoreFoldState(entries).spoolEntries).toEqual([]);
 	});
 });
 
-describe("resume restores fold state and all pointers resolve", () => {
-	it("a fresh engine rebuilds the folded view from the ledger; recall still works", () => {
+describe("resume restores folds and recall", () => {
+	it("rebuilds frozen layers while every persisted handle still resolves", () => {
 		const a = flood("ALPHA");
 		const b = flood("BETA");
-		const msgs = twoReadSession(a, b);
+		const messages = twoReadSession(a, b);
+		const blocks = linearize(messages);
+		const ledger = new FakeLedger();
+		const store = new SpoolStore(dir);
+		for (const [callId, content] of [["c1", a], ["c2", b]] as const) recordSpoolEntry(ledger, spoolEntry(store, callId, content));
+		recordLayer(ledger, {
+			seq: 1,
+			entries: blocks
+				.filter((block) => block.id === "r:c1" || block.id === "r:c2")
+				.map((block) => ({ id: block.id, digestText: digest(block) })),
+		});
+		recordUnfold(ledger, ["r:c1"]);
 
-		// ── Session 1: gate folds both reads; agent unfolds the first. Ledger captures it all. ──
-		const reg1 = new MapGateRegistry();
-		const store1 = new SpoolStore(dir);
-		const led = new FakeLedger();
-		const gate1 = new Gate(ENABLED, reg1, () => store1);
-		for (const cid of ["c1", "c2"]) {
-			const text = cid === "c1" ? a : b;
-			gate1.observe({ toolName: "read", toolCallId: cid, input: { path: `/${cid}` }, isError: false, content: [{ type: "text", text }] });
-			recordGateFold(led, reg1.get(`r:${cid}`)!);
-		}
-		const engine1 = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg1);
-		engine1.markUnfold([foldCode("r:c1")]);
-		recordUnfold(led, ["r:c1"]);
+		const restored = restoreFoldState(ledger.entries);
+		const { valid, dropped } = revalidateSpools(restored.spoolEntries);
+		expect(dropped).toEqual([]);
+		const registry = new MapSpoolRegistry();
+		for (const entry of valid) registry.set(entry);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, registry);
+		engine.restoreLayers(restored.layers);
+		engine.restoreUnfolded(restored.unfoldedIds);
 
-		// ── Session 2 (resume): FRESH registry + engine, rebuild purely from the ledger. ──
-		const reg2 = new MapGateRegistry();
-		const { gateEntries, unfoldedIds } = restoreFoldState(led.entries);
-		const { valid, dropped } = revalidateSpools(gateEntries);
-		expect(dropped).toEqual([]); // both spools still on disk
-		for (const e of valid) reg2.set(e);
-		const engine2 = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg2);
-		engine2.restoreUnfolded(unfoldedIds);
-
-		const out = engine2.process(msgs, 400_000);
-		const results = out.filter((m) => m.role === "toolResult");
-		const tr1 = (results[0].content as any)[0].text as string; // r:c1 — unfolded → full
-		const tr2 = (results[1].content as any)[0].text as string; // r:c2 — still born-folded → pointer
-
-		expect(tr1).toContain("row 200:"); // unfold restored: full content back
-		expect(tr1).not.toContain("recall #");
-		expect(tr2).toContain(`{#${foldCode("r:c2")} FOLDED}`); // fold restored: pointer
-		expect(tr2).toContain("recall #");
-
-		// And every restored pointer still resolves from the spool (whole recall is token-capped).
-		const rec = engine2.resolveRecall([foldCode("r:c2")]);
-		expect(b.startsWith(rec.matches[0].text)).toBe(true);
-		expect(rec.matches[0].text.length).toBeGreaterThan(0);
+		const results = engine.process(messages, 400_000).filter((message) => message.role === "toolResult");
+		const first = (results[0].content as { text: string }[])[0].text;
+		const second = (results[1].content as { text: string }[])[0].text;
+		expect(first).toContain("row 200:");
+		expect(first).not.toContain("FOLDED");
+		expect(second).toContain(`{#${foldCode("r:c2")} FOLDED}`);
+		expect(b.startsWith(engine.resolveRecall([foldCode("r:c2")]).matches[0].text)).toBe(true);
 	});
 
-	it("revalidation drops a fold whose spool file has vanished (safe degrade)", () => {
-		const a = flood("GAMMA");
-		const reg = new MapGateRegistry();
-		const store = new SpoolStore(dir);
-		const led = new FakeLedger();
-		const gate = new Gate(ENABLED, reg, () => store);
-		gate.observe({ toolName: "read", toolCallId: "c1", input: {}, isError: false, content: [{ type: "text", text: a }] });
-		recordGateFold(led, reg.get("r:c1")!);
-
-		// Simulate the spool dir being cleaned between sessions.
+	it("drops a restored entry whose spool vanished", () => {
+		const ledger = new FakeLedger();
+		const entry = spoolEntry(new SpoolStore(dir), "c1", flood("GAMMA"));
+		recordSpoolEntry(ledger, entry);
 		rmSync(dir, { recursive: true, force: true });
 
-		const { gateEntries } = restoreFoldState(led.entries);
-		const { valid, dropped } = revalidateSpools(gateEntries);
+		const { valid, dropped } = revalidateSpools(restoreFoldState(ledger.entries).spoolEntries);
 		expect(valid).toEqual([]);
-		expect(dropped).toHaveLength(1);
 		expect(dropped[0].code).toBe(foldCode("r:c1"));
 	});
 });

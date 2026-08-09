@@ -1,5 +1,5 @@
 /*
- * spool.test.ts — the L0 spool store: envelope write/read, sha256 dedup, corrupt/missing paths.
+ * spool.test.ts — fold spool envelopes: write/read, sha256 dedup, corrupt/missing paths.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";

@@ -7,7 +7,7 @@
  * alongside (the adapter imports `typebox`, which Pi injects at runtime — see vitest.config.ts).
  */
 import { describe, it, expect } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const PI_PRESENT = existsSync(resolve(__dirname, "../node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"));
@@ -37,21 +37,32 @@ function stubPi(): Recorded {
 	};
 }
 
+describe("package manifest", () => {
+	it("uses a shipped root entry point so Pi displays context-fold", () => {
+		const manifest = JSON.parse(readFileSync(resolve(__dirname, "../package.json"), "utf8"));
+
+		expect(manifest.pi?.extensions).toEqual(["./index.ts"]);
+		expect(manifest.files).toContain("index.ts");
+	});
+});
+
 describe.skipIf(!PI_PRESENT)("extension entry point", () => {
 	it("registers every hook, tool and command", async () => {
-		const { default: contextFold } = await import("../src/adapters/pi/index");
+		const { default: contextFold } = await import("../index");
 		const s = stubPi();
 		contextFold(s.api);
 
 		expect(s.hooks).toEqual(
-			expect.arrayContaining(["session_start", "tool_result", "before_agent_start", "message_end", "context", "session_before_compact"]),
+			expect.arrayContaining(["session_start", "message_end", "agent_settled", "context", "session_before_compact"]),
 		);
-		expect(s.tools).toEqual(expect.arrayContaining(["recall", "unfold"]));
+		expect(s.hooks).not.toContain("tool_result");
+		expect(s.hooks).not.toContain("before_agent_start");
+		expect(s.tools).toEqual(expect.arrayContaining(["recall_folded", "unfold"]));
 		expect(s.commands).toEqual(expect.arrayContaining(["context-fold", "fold-handoff"]));
 	});
 
 	it("registers nothing at all when CONTEXTFOLD=0 (the master kill switch)", async () => {
-		const { default: contextFold } = await import("../src/adapters/pi/index");
+		const { default: contextFold } = await import("../index");
 		const prev = process.env.CONTEXTFOLD;
 		process.env.CONTEXTFOLD = "0";
 		const s = stubPi();

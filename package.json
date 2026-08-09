@@ -1,6 +1,6 @@
 {
   "name": "context-fold",
-  "version": "0.2.3",
+  "version": "0.3.1",
   "description": "Deterministic, reversible in-session context compaction for the Pi coding agent — folds stale tool output out of the model's view, never out of the session.",
   "keywords": [
     "pi-package",
@@ -26,6 +26,7 @@
     "node": ">=22.19.0"
   },
   "files": [
+    "index.ts",
     "src",
     "docs",
     "DESIGN.md",
@@ -33,7 +34,7 @@
   ],
   "pi": {
     "extensions": [
-      "./src/adapters/pi/index.ts"
+      "./index.ts"
     ]
   },
   "scripts": {
@@ -43,7 +44,7 @@
     "prepublishOnly": "npm run typecheck && npm run test"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": ">=0.80.4",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
@@ -55,7 +56,7 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
     "@types/node": "^26.0.1",
     "typescript": "^5.6.0",
     "vitest": "^4.1.10"

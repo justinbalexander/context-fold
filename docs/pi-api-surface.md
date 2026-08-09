@@ -2,7 +2,7 @@
 
 The exact Pi APIs this extension depends on, verified against the engine source rather than taken
 from the docs. Written for contributors: if one of these moves, this is the list to re-check.
-Verified against Pi 0.80–0.83; the authoritative reference is `docs/extensions.md`,
+Verified against Pi 0.83.0 and 0.84.1; the authoritative reference is `docs/extensions.md`,
 `docs/compaction.md` and `examples/extensions/*` inside an installed
 `@earendil-works/pi-coding-agent`.
 
@@ -15,13 +15,17 @@ array genuinely replaces what is sent. Confirmed in the engine, not just the doc
   `const result = await emitHook({type:"context", messages:[...messages]}); return result?.messages ?? messages;`
 - `pi-agent-core/dist/agent-loop.js` calls `transformContext` immediately before `convertToLlm`
   and the stream. It runs every assistant turn, on a copy, and never mutates persisted entries.
-- **Handlers do NOT chain** (verified in `emitHook`, identical across Pi 0.80.2 / 0.82.1 / 0.83.0):
-  every handler receives the *original* event, and the last non-`undefined` return wins. Handler
-  order is `Set` insertion order, which is extension load order. Practical rule: this extension
-  must be listed *after* any other context-rewriting extension in `settings.json` `packages`, or
-  its folds are silently discarded. The same last-wins dispatch applies to every hook, including
-  `session_before_compact` and `before_agent_start`. Composing `context` hooks upstream — folding
-  each handler's returned messages into the next handler's event — would remove this constraint.
+- **Current Pi chains handlers as middleware.** In both verified versions,
+  `ExtensionRunner.emitContext()` passes each returned message array into the next handler's event,
+  so context-fold and another context rewriter both survive. `emitBeforeAgentStart()`,
+  `emitMessageEnd()`, and `emitToolResult()` use the same transform-chain model for their respective
+  payloads.
+- **Older builds used last-wins dispatch.** Every handler received the original event and the last
+  non-`undefined` return won. On a build that predates transform chaining, context-fold must load
+  after another context rewriter. Check the installed `ExtensionRunner` rather than inferring this
+  behavior from a version not listed above.
+- `session_before_compact` is not a transform chain in Pi 0.84: the last non-cancel result is still
+  selected, while `{ cancel: true }` short-circuits.
 
 ```ts
 interface ContextEvent       { type: "context"; messages: AgentMessage[]; }
@@ -31,19 +35,13 @@ pi.on("context", async (e, ctx) => ({ messages: rewritten }));
 
 ### Collision surface
 
-Because dispatch is last-wins, every hook this extension *returns a value from* is a place where
-another extension can silently erase its work, or have its own erased. Keep this table current as
-hooks are added:
+| Hook | context-fold returns | Pi 0.83.0 / 0.84.1 | Legacy last-wins build |
+|---|---|---|---|
+| `context` | rewritten messages, every turn | Chained | **High:** last context rewriter wins |
+| `session_before_compact` | deterministic compaction summary | **High:** last non-cancel strategy wins | **High:** last strategy wins |
+| `message_end` | nothing | Observe-only | Observe-only |
 
-| Hook | context-fold returns | Collision risk |
-|---|---|---|
-| `context` | rewritten messages, every turn | **High** — any other context rewriter |
-| `session_before_compact` | deterministic compaction summary | **High** — the loser's compaction strategy is silently ignored |
-| `before_agent_start` | appended `systemPrompt` (gate on) | Medium — one prompt-appender's text is dropped |
-| `tool_call` | nothing | None — observe-only |
-| `tool_result` | nothing | Low — another extension returning a *patch* could make the spooled payload diverge from what history keeps |
-
-Tool-name and command-name conflicts (`recall`, `unfold`, `/context-fold`) are different: they fail
+Tool-name and command-name conflicts (`recall_folded`, `unfold`, `/context-fold`) are different: they fail
 loudly at load rather than silently, so they need no mitigation beyond knowing to expect them.
 
 ## Everything else this extension uses
@@ -54,9 +52,8 @@ All of these fire headless.
 |---|---|
 | Detect pressure | `ctx.getContextUsage()` → `{ contextWindow, tokens }` |
 | Measured prompt-cache usage | `message.usage.{cacheRead,cacheWrite,input}` on `message_end` |
-| Observe a tool result as it lands | `pi.on("tool_result", …)` — observe-only; never mutate |
+| Know the agent loop is actually idle | `pi.on("agent_settled", …)` — fires after retries, compaction, and queued continuations finish |
 | Hard-compaction summary / cancel | `pi.on("session_before_compact", …) → {compaction:{summary, firstKeptEntryId, tokensBefore}} \| {cancel:true}` |
-| Inject teaching text | `pi.on("before_agent_start", …) → { systemPrompt }` |
 | Agent-facing tool | `pi.registerTool({ name, label, description, promptSnippet, promptGuidelines, parameters: Type.Object({…}), execute })` |
 | Slash command | `pi.registerCommand(name, { description, handler })` |
 | Footer status line (TUI) | `ctx.ui.setStatus(key, text)` — keyed slot on the footer's extension-status line; `undefined` clears. No-op stub in print/json modes, forwarded as an event in RPC mode. |

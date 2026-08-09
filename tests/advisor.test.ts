@@ -11,6 +11,7 @@ const base: AdvisorInput = {
 	everWarm: true,
 	lastCacheRead: 90_000,
 	lastInput: 2_000,
+	lastTurnAfterFold: false,
 	carriedTokens: 92_000,
 	contextWindow: 200_000,
 	irreducibleFloor: 25_000,
@@ -32,6 +33,12 @@ describe("cold detection", () => {
 		const a = advise({ ...base, lastCacheRead: 0, lastInput: 92_000 });
 		expect(a.coldNow).toBe(true);
 		expect(a.flags.some((f) => f.includes("economically free"))).toBe(true);
+	});
+
+	it("does not call the expected one-response cache miss after a fold a cold session", () => {
+		const a = advise({ ...base, lastCacheRead: 0, lastInput: 92_000, lastTurnAfterFold: true });
+		expect(a.coldNow).toBe(false);
+		expect(a.flags.some((f) => f.includes("session is cold"))).toBe(false);
 	});
 
 	it("a session that has never been warm (broken/absent provider cache) counts as cold", () => {

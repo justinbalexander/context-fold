@@ -16,7 +16,7 @@ as untested.
    preserves the stable prefix and retains proper history.
 
 2. **Reversible by default.** Every folded block carries a deterministic `{#<code> FOLDED}` tag.
-   The agent reads the code and calls `recall`/`unfold` to get the original back. 
+   The agent reads the code and calls `recall_folded`/`unfold` to get the original back. 
 
 3. **Protected working tail.** The newest ~N tokens never fold, so recent reasoning stays at full
    fidelity. The tail is never empty — the newest block is always protected.
@@ -31,11 +31,11 @@ The session file is never modified.
 src/
   core/                    # No Pi dependencies; adaptable to any harness
     tokens.ts              # estTokens = ceil(len/4), BLOCK_OVERHEAD, clip, firstLine, safeSlice
-    digest.ts              # the {#code FOLDED} tag, foldCode (FNV-1a), per-kind and pointer digests
+    digest.ts              # the {#code FOLDED} tag, foldCode (FNV-1a), per-kind digests
     contract.ts            # PolicyView / FoldCommand / ViewBlock 
     block.ts               # the WireBlock model, linearize(), blockId(), isDurableId()
     apply.ts               # applyPlan(messages, ops) 
-    gate-registry.ts       # id → born-folded pointer entry
+    spool-registry.ts      # folded block id → exact-content spool location
     index/seed-index.ts    # deterministic extraction of the seed index record
     policy/
       fold-ladder.ts       # the shipped fold policy
@@ -43,7 +43,6 @@ src/
   adapters/pi/             # every Pi API call and all disk I/O 
     index.ts               # the extension entry point: hooks, tools, commands
     store.ts               # the engine 
-    gate.ts                # the ingestion gate (L0)
     spool.ts               # sha256-verified fold envelopes on disk
     index-store.ts         # seed-index.jsonl emission
     persistence.ts         # event-sourced fold state
@@ -52,7 +51,7 @@ src/
     advisor.ts             # cold detection and the reset yellow flag
     cache-telemetry.ts     # measured cacheRead/cacheWrite accounting
     retention.ts           # spool GC
-    unfold-tool.ts         # the recall / unfold tools
+    unfold-tool.ts         # the recall_folded / unfold tools
     config.ts              # CONTEXTFOLD_* env parsing
 ```
 
@@ -75,17 +74,15 @@ Pi's `context` hook fires before every model call, hands over a deep copy of the
 ```
 on "context" (messages, ctx):
   blocks   = linearize(messages)                  # provider messages → typed Block[]
-  gate     = computeGatePointers(blocks)          # L0 born-folded pointers (every turn)
   frozen   = computeFrozenOps(blocks)             # committed layer bytes (every turn)
   view     = buildView(blocks, protect, budget, …)
   cmds     = policy.conduct(view)                 # the fold ladder; [] = nothing to do
   ops      = lower(cmds, blocks, protect)         # FoldCommand[] → FoldOp[]
   commit(ops)                                     # freeze as a layer, emit the seed index
-  return applyPlan(messages, merge(gate, frozen, ops))
+  return applyPlan(messages, merge(frozen, ops))
 ```
 
-The merge order is **gate > frozen > policy**: the gate owns its ids outright, and a frozen id's
-bytes outrank any late policy op for it.
+Frozen bytes outrank any late policy op for the same id.
 
 ---
 
@@ -97,12 +94,19 @@ that invalidation is paid once, and each event's substitutions are committed as 
 whose bytes never change again. The head of the context therefore stays byte-identical turn over
 turn, which is what keeps prefix caches warm.
 
-A fold event fires when both hold: usage is past the first-fold threshold (by default at 45 % of the window,
-or 25 % when telemetry shows the session has never had a live cache read), and the maskable mass is worth at least one ladder step (~12 % of
-the window). If context crosses the budget cap then it is treated as an urgent event that should be handled immediately.
+A fold event fires when both hold: usage is past the first-fold threshold (by default at 45 % of
+the window, or 25 % when telemetry shows the session has never had a live cache read), and the
+maskable mass is worth at least one ladder step (~12 % of the window). Crossing the budget cap is
+an urgent event regardless of ladder position.
 
-A committed layer is only ever released by an explicit `unfold` and never by the engine deciding to re-plan. Unfolds re-prefill the cache to
-reproduce byte-identical digests. 
+Tool results after the latest assistant response are first-delivery results: that assistant issued
+their calls, and no provider request has received their output yet. They are held regardless of
+tail size or budget pressure. Parallel results are held together. Once a later assistant response
+exists, they become ordinary ladder candidates.
+
+A committed layer is only ever released by an explicit `unfold`, never by the engine deciding to
+re-plan. An unfold deliberately breaks and re-prefills the prefix once; later turns keep that raw
+block byte-identical.
 
 Layers accumulate for the life of the session. Nothing scans them per turn, the engine keeps a
 flat `id → digestText` map and the newest seq, so there is no bound to enforce and no reason to
@@ -110,48 +114,41 @@ merge them.
 
 ---
 
-## 5. The ingestion gate
+## 5. Spool-backed recovery
 
-The ladder folds blocks once they age past a threshold. The **ingestion gate** folds one class of
-block *at ingestion*, before it is ever sent warm: a tool result larger than
-`CONTEXTFOLD_L0_THRESHOLD` est-tokens. A verbose flood (think a 12k+ token file ingest) has
-near-zero marginal value warm, yet costs its full weight on every subsequent turn.
+Fresh tool results always reach the model at full fidelity. When the ladder later commits a fold,
+the adapter writes each masked block to
+`<sessionDir>/spool/<sessionId>/<code>.json`: a versioned, sha256-verified envelope written
+atomically, with dedup aliases for identical payloads. The frozen digest carries the authoritative
+`{#code FOLDED}` handle. `recall_folded` reads the envelope whole or through bounded grep/line slices;
+`unfold` restores the live block on the next turn.
 
-The gate was originally called *L0* — level zero, the stage below the ladder's numbered fold
-layers. The prose name is now "the ingestion gate"; `L0` survives in the `CONTEXTFOLD_L0*`
-environment variables and in `gate.ts` identifiers, because those are published surface.
-
-- **Observe-only seam.** The `tool_result` hook spools the raw payload and registers a born-fold,
-  but never mutates the result. The session file keeps raw ground truth. Substitution is view-only,
-  in the `context` hook.
-- **Spool.** `<sessionDir>/spool/<sessionId>/<code>.json` — a versioned, sha256-verified envelope
-  per fold, written atomically, with dedup aliases for identical payloads.
-- **Born-folded blocks are terminal.** Such a block enters the view already a pointer: budget math
-  charges its *pointer* weight, and the ladder never re-folds it.
-- **The pointer** carries a tool-aware digest (path/pattern/command plus sizes), head and tail, and
-  **every detected error/risk line verbatim** — a buried `ImportError` never reduces to a summary
-  line. Capped at ~400 est-tokens.
-- **Error policy.** Error-shaped results (the `isError` flag or a lexical error hit) get a
-  `CONTEXTFOLD_L0_ERRCAP`× higher threshold, so a short error is never folded away; a large one
-  folds but keeps every error line.
-- **Deferred substitution** (`CONTEXTFOLD_L0_KEEP_RECENT`, experimental, default `0`). The newest
-  N registered blocks render warm and take their pointer only once newer registrations push them
-  out of the hold-out set. The set is keyed on array position (not the token tail), so it stays
-  deterministic turn over turn; spooling and recall are unaffected. See the README for the A/B
-  evidence and the open question that keeps this flag alive.
+The spool and seed-index record are commit preconditions. The engine prepares a layer, the adapter
+spools and indexes every masked block, and only then does the engine freeze and apply its bytes. A
+durability failure (disk, index, or layer persistence) rejects the entire event and sends that turn
+raw. A fold-code collision is the one per-block exception: the code space is `hash mod 36^6`, so
+two durable ids can rarely share a code, and the second is a permanent per-id condition — that
+block alone is dropped from the event, held raw for the session, and announced on stderr, while
+the rest of the event commits. The spool is therefore the durability floor after hard compaction
+removes the raw message from live history, not an arrival-time masking policy. At hard compaction
+itself, every foldable block leaving live history that never folded is spooled then (per-block
+fail-open), so the recall route covers the entire compacted span, not only the blocks earlier
+fold events happened to reach.
 
 ## 6. Fold-state persistence
 
-The `tool_result` hook does not re-fire for results already in history, so the gate registry, the
-agent's unfold decisions and the committed layers are event-sourced as custom entries
-(`contextfold.fold`) and left-folded back on `session_start`. Each restored pointer is revalidated
-against its spool file; a vanished spool drops the fold (the block renders raw) rather than leaving
-a dead pointer.
+Spool locations, agent unfold decisions, and committed layers are event-sourced as custom entries
+(`contextfold.fold`) and replayed on `session_start`. Each restored location is revalidated against
+its spool file. Legacy `kind:"gate"` records remain readable so handles from sessions created before
+the arrival-time gate's removal still resolve.
 
 Retention: at session start, sibling session spools whose newest file is older than
-`CONTEXTFOLD_SPOOL_RETAIN_DAYS` are removed whole-directory. Dedup aliases only ever point at
-siblings in the same directory, so nothing dangles, and the current session's spool is never
-touched.
+`CONTEXTFOLD_SPOOL_RETAIN_DAYS` (default 24 hours — a spool is a working artifact, not an archive;
+Pi's session JSONL keeps the raw payload regardless) are removed whole-directory. A second pass
+applies the same window to sibling *workspace* spool roots, since a workspace's own sweep only
+runs when a session starts there again — without it an abandoned workspace would retain its last
+spools forever. Dedup aliases only ever point at siblings in the same directory, so nothing
+dangles, and the current session's spool is never touched.
 
 Freshness is measured by the newest file mtime in the directory, which on its own would judge a
 *live* session by when it last folded. A session that folded early and then ran quietly for longer
@@ -170,12 +167,12 @@ rather than swallowed. A failure should be visible, never silent.
 
 | failure | cost |
 |---|---|
-| gate throws | that one result flows raw |
 | fold pass throws | that one turn's context goes out raw |
-| seed-index emission throws | that one index record is lost |
+| spool, seed-index, or layer persistence throws | that fold event is rejected; the turn goes out raw |
+| fold-code collision on one block | that block alone stays raw for the session; the rest of the event folds |
 | deterministic compaction throws | Pi's own compaction runs instead |
 | resume restore throws | prior folds render raw this session |
-| spool missing or corrupt | that fold drops; recall returns a typed error naming the path |
+| spool missing or corrupt (at restore or mid-session) | a live block still resolves from raw history, through the same recall caps and slices; only a block that also left live history errors |
 
 `CONTEXTFOLD=0` disables the extension entirely for one session — the escape hatch for testing or
 for isolating a suspected fold-related problem.
@@ -210,5 +207,4 @@ for isolating a suspected fold-related problem.
 The pure core is derived from [Accordion](https://github.com/a-Fig/Accordion) (pinned commit
 `0c22434`) — `digest.ts` and `tokens.ts` close to verbatim, `applyPlan` and the block model
 adapted — stripped of all Svelte/Tauri/browser coupling and hardened since. The discrete fold
-ladder, the ingestion gate, the seed index, the spool, and the advisor layers are original to
-this project.
+ladder, seed index, spool-backed recovery, and advisor layers are original to this project.

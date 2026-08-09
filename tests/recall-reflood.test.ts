@@ -1,9 +1,9 @@
 /*
- * recall-reflood.test.ts — regression for the live e2e-gate (c) failure (2026-07-28): a spooled
+ * recall-reflood.test.ts — regression for a live recall failure (2026-07-28): a spooled
  * payload whose content is ONE enormous line (shell wrappers echoing a file as a single string,
  * minified JS, JSONL, base64) must not ride through any recall cap on an "always keep at least
  * one line" rule. Measured live: `recall {code} lines=2-2` returned a 40KB line and re-flooded
- * everything the gate saved. Every recall surface — whole, lines=, grep=, search= — must hold
+ * the folded payload. Every recall surface — whole, lines=, grep=, search= — must hold
  * its cap against this input class, while grep stays USEFUL: the match is windowed, not cut off.
  */
 import { mkdtempSync, rmSync } from "node:fs";
@@ -12,11 +12,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapGateRegistry } from "../src/core/gate-registry";
-import { Gate, GATE_DEFAULTS } from "../src/adapters/pi/gate";
+import { MapSpoolRegistry } from "../src/core/spool-registry";
 import { SpoolStore } from "../src/adapters/pi/spool";
+import { foldCode } from "../src/core/digest";
 import type { AgentMessage } from "../src/core/block";
-import { user, assistantWithCalls, toolResult } from "./helpers";
+import { user, assistantText, assistantWithCalls, toolResult } from "./helpers";
 
 let dir: string;
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
@@ -27,31 +27,36 @@ const NEEDLE = "MARKER_C0FFEE_the_buried_answer_is_8931";
 const HUGE_LINE = "x".repeat(30_000) + ` ${NEEDLE} ` + "y".repeat(15_000);
 const PAYLOAD = ["header line", HUGE_LINE, "footer line"].join("\n");
 
-/** Hard ceiling for any single recall result: the gate threshold in chars, with slack for notes. */
+/** Hard ceiling for any single recall result, with slack for notes. */
 const FLOOD_CEILING_CHARS = 9_000;
 
 function setup() {
 	dir = mkdtempSync(join(tmpdir(), "contextfold-reflood-"));
-	const registry = new MapGateRegistry();
+	const registry = new MapSpoolRegistry();
 	const spool = new SpoolStore(dir);
-	const gate = new Gate({ enabled: true, ...GATE_DEFAULTS }, registry, () => spool);
-	const decision = gate.observe({
-		toolName: "exec",
-		toolCallId: "call-1",
-		input: { cmd: "cat report.log" },
+	const blockId = "r:call-1";
+	const code = foldCode(blockId);
+	const written = spool.write({ blockId, code, tool: "exec", input: undefined, isError: false, content: PAYLOAD });
+	registry.set({
+		blockId,
+		code,
+		fullTokens: written.envelope.estTokens + 4,
+		tool: "exec",
 		isError: false,
-		content: [{ type: "text", text: PAYLOAD }],
+		bytes: written.envelope.bytes,
+		fullEstTokens: written.envelope.estTokens,
+		spoolPath: spool.pathFor(code),
 	});
-	expect(decision.folded).toBe(true);
 	const messages: AgentMessage[] = [
 		user("read the file"),
 		assistantWithCalls([{ id: "call-1", name: "exec" }]),
 		toolResult("call-1", PAYLOAD, "exec"),
+		assistantText("finished reading", "after-report"),
 		user("now the newest question"),
 	];
 	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
-	e.process(messages, { contextWindow: 10_000_000, tokens: null });
-	return { e, code: decision.code! };
+	e.process(messages, { contextWindow: 20_000, tokens: null });
+	return { e, code };
 }
 
 describe("single-huge-line recall caps", () => {

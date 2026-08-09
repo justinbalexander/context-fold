@@ -4,7 +4,7 @@
  * Pure, zero-latency regex harvest with two consumers:
  *   • `categorize(text)` sorts text into five buckets (paths, commands, errors, exact values,
  *     decisions). The digest uses it to decide which lines of a folded block are worth keeping
- *     verbatim; the L0 gate uses it to recognise error-shaped output it must not fold away.
+ *     verbatim; the seed index uses the same categories for mechanical recovery metadata.
  *   • `ERROR_MARKER_SOURCE` / `errorMarkerRe()` are the one error lexicon, shared with the seed
  *     index so "what counts as an error line" is answered identically everywhere.
  *
@@ -34,9 +34,9 @@ interface CategorizedMarkers {
  * before "Error", so `\bError` misses them — match the whole PascalCase name instead. The
  * plain-word list is deliberately broad and any-case: test runners say "3 failed", tools print
  * "fatal:", CI says "Aborted" — a failure signal in any of those spellings must count as
- * error-shaped (this detector feeds the gate's never-fold-a-short-error threshold, the pointer's
- * kept-verbatim risk lines, AND the index's error field; a missed spelling is the failure
- * mode). Kept as a SOURCE string so each consumer builds its own regex (no shared lastIndex).
+ * error-shaped (this detector feeds the ladder digest's kept-verbatim risk lines and the index's
+ * error field; a missed spelling is the failure mode). Kept as a SOURCE string so each consumer
+ * builds its own regex (no shared lastIndex).
  */
 export const ERROR_MARKER_SOURCE =
 	"(?:\\b(?:[A-Z][A-Za-z]*(?:Error|Exception|Warning)|[Ee]rror|ERROR|FAIL(?:ED|URE)?|[Ff]ail(?:ed|ure)s?|FATAL|[Ff]atal|PANIC|[Pp]anic|[Aa]borted|exception|Traceback|ENOENT|ECONNREFUSED)\\b|npm ERR!|Segmentation fault|core dumped|Permission denied|✗|✘)";

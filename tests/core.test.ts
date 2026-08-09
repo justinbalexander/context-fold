@@ -129,8 +129,7 @@ describe("applyPlan — defense in depth", () => {
 describe("opaque tool results (non-text parts)", () => {
 	it("linearize marks a mixed image+text result opaque, and wireFoldable refuses it", () => {
 		// Folding replaces the whole content array with one text block, so an image inside a mixed
-		// result would silently vanish from the view. The gate refuses these at ingestion; the
-		// ladder path must match it.
+		// result would silently vanish from the view, so the ladder must refuse it.
 		const messages = [
 			user("look at the page"),
 			assistantWithCalls([{ id: "c1", name: "browser" }]),

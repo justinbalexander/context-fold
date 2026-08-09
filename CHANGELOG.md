@@ -3,6 +3,81 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
+## 0.3.1 — 2026-08-09
+
+Fixes from an adversarial functionality audit of 0.3.0, plus a deliberate narrowing of the
+agent-facing recall surface and a retention rework.
+
+- **A fold-code collision no longer disables folding for the session.** Two durable block ids can
+  rarely hash to the same 6-char code; the spool's overwrite refusal used to reject the entire fold
+  event, and because the collider stayed eligible, every later event too. The colliding block alone
+  is now dropped (it stays raw and held, announced on stderr) and the rest of the event commits.
+- **Every recall route is now bounded and sliceable, including live history.** Recall served from
+  the live snapshot (a fold whose spool entry was dropped at resume, or a legacy session) used to
+  return the whole payload uncapped and silently ignore `grep`/`lines`; it now goes through the
+  same caps and slicing as spool-backed recall. A spool file that becomes unreadable mid-session
+  falls back to the same bounded live read instead of returning only an error.
+- **`unfold` on a compacted-away code now names that state.** It used to claim "no folded block
+  with that code" while `recall` still served the content; it now says the block left live history
+  at compaction and points at `recall` with its slicing options.
+- **The `recall` tool is renamed `recall_folded`.** The old name read as a general memory tool —
+  an invitation to browse — and could collide with other extensions' generic `recall`. The new name
+  binds the tool to the `{#code FOLDED}` markers it dereferences. `unfold` keeps its name (it
+  already lexically matches the marker). Every model-facing reference — tool prompts, recall
+  notes, and the deterministic compaction summary — moves with it.
+- **Hard compaction now spools the whole leaving span.** Blocks that never folded (inside the
+  protected tail at compaction time, or a session compacted before its first fold) used to leave
+  live history with no recall route beyond Pi's session JSONL. They are now spooled per-block
+  fail-open just before the compact index record is emitted, so `recall` covers the entire
+  compacted span and the record carries recovery pointers for it.
+- **Spool retention default is now 24 hours, and the GC reaches abandoned workspaces.** The spool
+  is a working artifact for the session that made it (Pi's session JSONL keeps every raw payload
+  regardless), so two weeks of retention mostly stored dead weight. The sweep also gained a
+  sibling-workspace pass: per-session sweeping only runs for a workspace when a new session starts
+  in it, so a workspace that stopped being used previously retained its last spools forever.
+  `CONTEXTFOLD_SPOOL_RETAIN_DAYS` still overrides (fractional days allowed; `0`/`off` disables).
+- **`recall`/`unfold` now resolve folded blocks only, and their prompts frame recall as a
+  fallback.** Every live block's id hashes to a code, so a never-folded block's code used to
+  resolve to its full live content — a general history reader recall was never meant to be. Both
+  tools now answer only for frozen or spooled blocks. The tool descriptions and guidelines are
+  rewritten to the narrow contract: recall only when a `{#code FOLDED}` pointer blocks the current
+  step, prefer rerunning cheap commands, and `search=` is documented as a pointer lookup (which
+  folded block holds a known identifier), not a search engine.
+
+## 0.3.0 — 2026-08-08
+
+- **The arrival-time ingestion gate has been removed.** Fresh tool results now always reach the
+  model in full before they can age into a pressure-driven ladder fold. This removes the
+  `CONTEXTFOLD_L0*` configuration surface, the `tool_result` observer, born-folded pointer digests,
+  and the known immediate-recall churn path. The shared spool/recovery machinery remains: ladder
+  folds are still exact, reversible, indexed, and recoverable after hard compaction. Resume accepts
+  legacy `kind:"gate"` records so old handles continue to resolve.
+- **Cold-session advice now waits until Pi's agent run has settled.** The old `message_end` check
+  ran after every intermediate tool-call response, so a transient cache miss could print a stale
+  warning while the agent was still visibly working. The advisory now evaluates at
+  `agent_settled`, after retries, compaction, and queued continuations finish, and ignores the
+  expected one-response cache miss caused by context-fold's own prefix rewrite.
+- **Recall guidance now discourages sequential paging of broad shell output.** When most of a
+  folded result would be needed, the model is told to rerun a narrower command instead; targeted
+  `grep`, line-range recall, span search, and sticky unfold remain available.
+- **A fold now reaches the model only after its recovery state is durable.** The exact spool
+  payload, seed-index record, session spool records, and frozen layer must all persist successfully;
+  otherwise the complete fold event is rejected and that turn is sent raw.
+- **Compaction recovery records can no longer be shadowed by later folds.** Fold-layer sequence
+  numbering now advances past deterministic-compaction index records, including after resume, so a
+  later fold cannot reuse the compaction record's sequence and hide its recovery map.
+- **Readable compacted folds remain span-searchable after the raw block leaves history.**
+  `recall search=<term>` now sweeps their persisted spools as well as the live snapshot. Direct code
+  recall reports a missing or corrupt spool explicitly; span search skips unreadable spool entries.
+- **Current Pi integration guidance is versioned.** Pi 0.83.0 and 0.84.1 chain context transforms
+  as middleware; the former last-wins warning remains relevant only to older builds that predate
+  transform chaining. `codex-lite` is documented separately from the cached
+  `@howaboua/pi-codex-conversion` transport. The development fixture now uses Pi 0.84.1.
+- The minimum Pi version is now stated precisely as 0.80.4, where `agent_settled` was introduced.
+- **Pi now displays the local development package as `context-fold`.** Its manifest points through
+  a shipped root entry point instead of exposing the adapter directory name (`pi`) in the startup
+  extension list.
+
 ## 0.2.3 — 2026-08-05
 
 - **Spool GC no longer reaps a live session that has been quiet.** The sweep dated a sibling

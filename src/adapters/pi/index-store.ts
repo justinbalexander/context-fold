@@ -2,22 +2,23 @@
  * index-store.ts — seed-index emission at fold events (docs/SEED_INDEX_SPEC.md).
  *
  * On every fold event the adapter (1) spools each masked block's full text — the C-layer
- * durability floor: even a below-gate-threshold observation that folds out of view has a
- * sha256-verified on-disk copy — and (2) appends one deterministic index record to
+ * durability floor for exact recall after hard compaction — and (2) appends one deterministic
+ * index record to
  * `<spoolDir>/seed-index.jsonl`. The JSONL is append-only and IS the persistence: resume just
  * keeps appending under later seqs, and `latest record per seq wins` is the consumer contract.
  *
- * Fail-open like every sibling: an index/spool failure costs the record, never the turn.
+ * The caller treats successful spool + index emission as a fold commit precondition. A failure
+ * keeps that turn raw rather than creating an unrecallable frozen layer.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { extractIndex, buildIndexRecord, type IndexBlock, type IndexSpan, type SeedIndexRecord } from "../../core/index/seed-index";
-import { foldCode } from "../../core/digest";
+import { foldCode, wireFoldable } from "../../core/digest";
 import { BLOCK_OVERHEAD } from "../../core/tokens";
-import type { WireBlock } from "../../core/block";
+import { isDurableId, type WireBlock } from "../../core/block";
 import type { FoldEventReport } from "./store";
-import type { SpoolStore } from "./spool";
-import type { GateEntry, GateRegistry } from "../../core/gate-registry";
+import { SpoolError, type SpoolStore, type SpoolWriteResult } from "./spool";
+import type { SpoolEntry, SpoolRegistry } from "../../core/spool-registry";
 
 export const INDEX_FILENAME = "seed-index.jsonl";
 export const INDEX_HARNESS = "pi-context-fold";
@@ -57,19 +58,24 @@ export class SeedIndexStore {
 }
 
 /**
- * Handle one engine fold event: spool the masked blocks (skipping any the L0 gate already owns),
- * build spans, extract the index fields, and append the record. Deterministic except for `now`.
+ * Handle one engine fold event: spool the masked blocks, build spans, extract index fields, and
+ * append the record. A legacy arrival-gate entry may already own a spool; reuse it during resumed
+ * sessions rather than duplicating the payload. A per-block SpoolError (fold-code collision)
+ * drops only that block, reported via `droppedIds` so the engine leaves it raw and holds it.
+ * Deterministic except for `now`.
  */
 export function emitFoldIndex(
 	event: FoldEventReport,
 	deps: {
 		spool: SpoolStore;
-		registry: GateRegistry;
+		registry: SpoolRegistry;
 		index: SeedIndexStore;
 		sessionId: string;
 		now?: number;
+		/** Persist each new spool entry before it becomes visible in the in-memory registry. */
+		persistEntry?: (entry: SpoolEntry) => void;
 	},
-): { record: SeedIndexRecord; newEntries: GateEntry[] } {
+): { record: SeedIndexRecord; newEntries: SpoolEntry[]; droppedIds: string[] } {
 	const byId = new Map(event.blocks.map((b) => [b.id, b] as const));
 	const masked: WireBlock[] = [];
 	for (const id of event.maskedIds) {
@@ -78,24 +84,29 @@ export function emitFoldIndex(
 	}
 
 	const spans: IndexSpan[] = [];
-	const newEntries: GateEntry[] = [];
+	const newEntries: SpoolEntry[] = [];
+	/** Blocks whose spool write is durably done — the only ones the record may claim as masked. */
+	const spooled: WireBlock[] = [];
+	const droppedIds: string[] = [];
 	for (const b of masked) {
-		const gateEntry = deps.registry.get(b.id);
-		if (gateEntry) {
-			// Already gate-spooled — point at the existing envelope, don't duplicate.
+		const existing = deps.registry.get(b.id);
+		if (existing) {
+			// Already spooled — point at the existing envelope, don't duplicate.
 			spans.push({
 				blockId: b.id,
-				code: gateEntry.code,
-				tool: gateEntry.tool,
+				code: existing.code,
+				tool: existing.tool,
 				turn: b.turn,
-				log: { path: gateEntry.spoolPath, byteStart: 0, byteEnd: gateEntry.bytes, lines: countLines(b.text) },
-				fullOutputPath: gateEntry.fullOutputPath,
+				log: { path: existing.spoolPath, byteStart: 0, byteEnd: existing.bytes, lines: countLines(b.text) },
+				fullOutputPath: existing.fullOutputPath,
 			});
+			spooled.push(b);
 			continue;
 		}
+		const code = foldCode(b.id);
+		let res: SpoolWriteResult;
 		try {
-			const code = foldCode(b.id);
-			const res = deps.spool.write({
+			res = deps.spool.write({
 				blockId: b.id,
 				code,
 				tool: b.toolName ?? b.kind,
@@ -104,40 +115,45 @@ export function emitFoldIndex(
 				content: b.text,
 				now: deps.now,
 			});
-			spans.push({
-				blockId: b.id,
-				code,
-				tool: b.toolName ?? b.kind,
-				turn: b.turn,
-				log: {
-					path: deps.spool.pathFor(code),
-					byteStart: 0,
-					byteEnd: res.envelope.bytes,
-					lines: countLines(b.text),
-				},
-			});
-			// Register the spooled mask so recall-by-code survives HARD compaction (once Pi removes
-			// the raw message from history, the snapshot path is gone; the registry + spool is the
-			// durable route). In the live view the frozen layer's bytes still win — the engine skips
-			// frozen ids when substituting pointers.
-			const entry: GateEntry = {
-				blockId: b.id,
-				code,
-				fullTokens: b.tokens + BLOCK_OVERHEAD,
-				tool: b.toolName ?? b.kind,
-				input: undefined,
-				isError: b.isError ?? false,
-				bytes: res.envelope.bytes,
-				fullEstTokens: res.envelope.estTokens,
-				spoolPath: deps.spool.pathFor(code),
-				dedupOf: res.dedupOf,
-			};
-			deps.registry.set(entry);
-			newEntries.push(entry);
-		} catch {
-			// Fold-code collision or disk trouble: the span is lost but the record still carries the
-			// lexical fields, and recall-from-snapshot still works — degrade, don't abort.
+		} catch (err) {
+			// A SpoolError here is per-BLOCK and permanent for this id (fold-code collision, or a
+			// corrupt existing envelope at this code's path). Fail open per block: drop the collider
+			// from the event and fold the rest — one unlucky hash must never end folding for the
+			// session. Anything else (disk full, unwritable dir) leaves the whole event's durability
+			// unproven, so it still rejects the event by rethrowing.
+			if (err instanceof SpoolError) {
+				droppedIds.push(b.id);
+				continue;
+			}
+			throw err;
 		}
+		spans.push({
+			blockId: b.id,
+			code,
+			tool: b.toolName ?? b.kind,
+			turn: b.turn,
+			log: {
+				path: deps.spool.pathFor(code),
+				byteStart: 0,
+				byteEnd: res.envelope.bytes,
+				lines: countLines(b.text),
+			},
+		});
+		// Stage the registry entry; publish it only after the complete index record is durable.
+		const entry: SpoolEntry = {
+			blockId: b.id,
+			code,
+			fullTokens: b.tokens + BLOCK_OVERHEAD,
+			tool: b.toolName ?? b.kind,
+			input: undefined,
+			isError: b.isError ?? false,
+			bytes: res.envelope.bytes,
+			fullEstTokens: res.envelope.estTokens,
+			spoolPath: deps.spool.pathFor(code),
+			dedupOf: res.dedupOf,
+		};
+		newEntries.push(entry);
+		spooled.push(b);
 	}
 
 	const record = buildIndexRecord(
@@ -153,11 +169,72 @@ export function emitFoldIndex(
 				fraction: Math.round(event.usage.fraction * 1000) / 1000,
 			},
 		},
-		extractIndex({ masked: masked as unknown as IndexBlock[], all: event.blocks as unknown as IndexBlock[] }),
+		// Extraction covers only the durably spooled blocks: a dropped collider stays raw in the
+		// live view, so nothing of it is leaving history and nothing of it needs indexing.
+		extractIndex({ masked: spooled as unknown as IndexBlock[], all: event.blocks as unknown as IndexBlock[] }),
 		spans,
 	);
 	deps.index.append(record);
-	return { record, newEntries };
+	for (const entry of newEntries) deps.persistEntry?.(entry);
+	for (const entry of newEntries) deps.registry.set(entry);
+	return { record, newEntries, droppedIds };
+}
+
+/**
+ * Spool-at-compaction: write every foldable, durable, not-yet-spooled block that is about to
+ * leave live history, so recall covers the ENTIRE compacted span rather than only the blocks a
+ * fold event happened to reach first (a result inside the protected tail at compaction time, or
+ * a session compacted before its first fold, would otherwise leave no recall route). Runs before
+ * `emitCompactIndex` so the new entries carry recovery spans in the compact record.
+ *
+ * Per-block fail-open: an unspoolable block just isn't recallable afterwards — Pi's session JSONL
+ * still keeps it — and compaction itself never fails over spooling.
+ */
+export function spoolCompactedBlocks(
+	blocks: WireBlock[],
+	deps: {
+		spool: SpoolStore;
+		registry: SpoolRegistry;
+		now?: number;
+		/** Persist each new spool entry so the durable route survives resume. */
+		persistEntry?: (entry: SpoolEntry) => void;
+	},
+): SpoolEntry[] {
+	const added: SpoolEntry[] = [];
+	for (const b of blocks) {
+		if (!wireFoldable(b) || !isDurableId(b.id) || !b.text || deps.registry.has(b.id)) continue;
+		const code = foldCode(b.id);
+		let res: SpoolWriteResult;
+		try {
+			res = deps.spool.write({
+				blockId: b.id,
+				code,
+				tool: b.toolName ?? b.kind,
+				input: undefined,
+				isError: b.isError ?? false,
+				content: b.text,
+				now: deps.now,
+			});
+		} catch {
+			continue;
+		}
+		const entry: SpoolEntry = {
+			blockId: b.id,
+			code,
+			fullTokens: b.tokens + BLOCK_OVERHEAD,
+			tool: b.toolName ?? b.kind,
+			input: undefined,
+			isError: b.isError ?? false,
+			bytes: res.envelope.bytes,
+			fullEstTokens: res.envelope.estTokens,
+			spoolPath: deps.spool.pathFor(code),
+			dedupOf: res.dedupOf,
+		};
+		deps.persistEntry?.(entry);
+		deps.registry.set(entry);
+		added.push(entry);
+	}
+	return added;
 }
 
 /**
@@ -168,7 +245,7 @@ export function emitFoldIndex(
 export function emitCompactIndex(
 	blocks: WireBlock[],
 	deps: {
-		registry: GateRegistry;
+		registry: SpoolRegistry;
 		index: SeedIndexStore;
 		sessionId: string;
 		tokensBefore: number;

@@ -37,6 +37,8 @@ export interface CacheTelemetrySnapshot {
 	foldSavedTokens: number;
 	/** Tokens the provider re-prefilled on the turns right after a fold (the cost side). */
 	foldReprefillTokens: number;
+	/** Whether the latest recorded response was the first request carrying a newly folded view. */
+	lastTurnAfterFold: boolean;
 	/**
 	 * Has this provider ever reported a non-zero cache write? Several dialects never do — the Codex
 	 * route reports `cached_tokens` only, and Pi hardcodes Google's write to 0 — so "no write
@@ -86,6 +88,7 @@ export class CacheTelemetry {
 	 *  raises the per-turn rate without erasing what earlier folds already earned. */
 	private foldAccruedSavedTokens = 0;
 	private pendingFold = false;
+	private lastTurnAfterFold = false;
 	/** Wire watchdog: the last pre-fold prompt size (cacheRead+input), armed by a masking fold. */
 	private pendingWireBaseline: number | null = null;
 	private wireDeferredFolds = 0;
@@ -130,6 +133,7 @@ export class CacheTelemetry {
 		this.totals.cacheRead += turn.cacheRead;
 		this.totals.cacheWrite += turn.cacheWrite;
 		this.totals.totalTokens += turn.totalTokens;
+		this.lastTurnAfterFold = this.pendingFold;
 		if (this.pendingFold) {
 			this.foldReprefillTokens += turn.cacheWrite;
 			this.pendingFold = false;
@@ -151,6 +155,7 @@ export class CacheTelemetry {
 		this.foldReprefillTokens = 0;
 		this.foldAccruedSavedTokens = 0;
 		this.pendingFold = false;
+		this.lastTurnAfterFold = false;
 		this.pendingWireBaseline = null;
 		this.wireDeferredFolds = 0;
 	}
@@ -168,6 +173,7 @@ export class CacheTelemetry {
 			foldEvents: this.foldEvents,
 			foldSavedTokens: this.foldSavedTokens,
 			foldReprefillTokens: this.foldReprefillTokens,
+			lastTurnAfterFold: this.lastTurnAfterFold,
 			writeReported: this.totals.cacheWrite > 0,
 			foldNetTokens:
 				this.foldEvents > 0 && this.totals.cacheWrite > 0

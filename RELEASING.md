@@ -66,7 +66,6 @@ changed:
 
 ```bash
 scripts/e2e-ladder.sh   # fold event fires, index emitted, head byte-stable, buried value recalled
-scripts/e2e-gate.sh     # the ingestion gate folds a real flood; agent recovers a buried line via recall
 scripts/e2e-resume.sh   # folds survive a session restart
 ```
 

@@ -40,7 +40,7 @@ const RECALL_PARAMS = Type.Object({
 	search: Type.Optional(
 		Type.String({
 			description:
-				"Span search: grep EVERY folded block in one call (no codes needed) and get matching lines grouped by code. Use this instead of recalling pointers one by one.",
+				"Pointer lookup: find WHICH folded block holds a known identifier (one bounded sweep, matching lines grouped by code). Use before guessing codes; follow up with a grep/lines slice.",
 		}),
 	),
 });
@@ -55,19 +55,21 @@ function summarize(matches: CodeMatch[], missing: string[], errors: CodeError[] 
 
 export function registerFoldTools(pi: ExtensionAPI, engine: ContextFoldEngine, onUnfold?: (ids: string[]) => void): void {
 	pi.registerTool({
-		name: "recall",
+		name: "recall_folded",
 		label: "Recall folded context",
 		description:
-			"Return the ORIGINAL content of folded context blocks. Two forms: (1) codes from " +
-			"{#<code> FOLDED} tags — whole content, or sliced with grep=<term> / lines=<a-b>; " +
-			"(2) search=<term> with no codes — ONE sweep over every folded block, returning matching " +
-			"lines grouped by code. Read-only: blocks stay folded. Full text is on disk in the spool.",
+			"FALLBACK: read back a folded context block when its {#<code> FOLDED} marker hides a detail " +
+			"the CURRENT step needs. Output is bounded: whole reads are token-capped; slice with " +
+			"grep=<term> / lines=<a-b>. search=<term> (no codes) is a pointer lookup — it names which " +
+			"folded block holds a known identifier. Read-only: blocks stay folded. If the information " +
+			"is cheaply available another way (rerun the command, read the file), do that instead.",
 		promptSnippet:
-			"recall({codes?, grep?, lines?, search?}) — read folded content by code, or span-search ALL folded blocks in one call.",
+			"recall_folded({codes?, grep?, lines?, search?}) — fallback read of folded content; only when a {#code FOLDED} pointer blocks the current step.",
 		promptGuidelines: [
-			"Looking for a detail but unsure which folded block holds it? Use recall search=<term> — one call sweeps everything folded.",
-			"When you see a {#<code> FOLDED} marker and need that block, call recall with the code; add grep=<term> or lines=<a-b> to fetch only the part you need.",
-			"recall is a one-shot read; the block stays folded. Use unfold to keep a block expanded.",
+			"recall_folded is a fallback, not a browsing tool: use it only when a {#<code> FOLDED} marker hides something the current step needs, and prefer rerunning a cheap command or re-reading the file when that answers the question.",
+			"Know the identifier but not which pointer holds it? recall_folded search=<term> names the folded block(s); then slice with grep=<term> or lines=<a-b>.",
+			"If you need most of a broad shell result, rerun a narrower command instead of paging it through many recall_folded calls.",
+			"recall_folded is a one-shot read; the block stays folded. Use unfold only for a block your ongoing work keeps needing.",
 		],
 		parameters: RECALL_PARAMS,
 		async execute(_toolCallId, params) {
@@ -106,20 +108,26 @@ export function registerFoldTools(pi: ExtensionAPI, engine: ContextFoldEngine, o
 		description:
 			"Re-expand one or more folded context blocks back to full content, identified by the short " +
 			"code in their {#<code> FOLDED} tag. The full content returns to your context from your next " +
-			"turn on (sticky). Use recall instead for a one-time read.",
+			"turn on (sticky). Use recall_folded instead for a one-time read.",
 		promptSnippet: "unfold({codes}) — permanently re-expand folded blocks back to full content.",
 		promptGuidelines: [
-			"Call unfold with a {#<code> FOLDED} code when you need a folded block's full content for ongoing work.",
+			"Unfold only a block your ongoing work keeps needing — it re-expands permanently and costs its full token weight every turn after. For a one-time read, recall_folded is the right tool.",
 			"The expanded content appears on your next turn, not this one.",
 		],
 		parameters: CODES_PARAMS,
 		async execute(_toolCallId, params) {
-			const { matches, missing } = engine.markUnfold(params.codes);
+			const { matches, missing, compacted } = engine.markUnfold(params.codes);
 			onUnfold?.(matches.flatMap((m) => m.ids)); // persist the unfold so it survives resume
+			// A compacted code is real but un-expandable: its raw message left live history at hard
+			// compaction. Point at recall, which still serves the spooled content.
+			const compactedLines = compacted.map(
+				(c) => `⚠ ${c} — compacted out of live history; nothing to re-expand. Use recall_folded ${c} (grep=<term> / lines=<a-b>) to read it.`,
+			);
+			const header = [summarize(matches, missing), ...compactedLines].filter(Boolean).join("\n");
 			const text = matches.length
-				? `${summarize(matches, missing)}\n\nExpanded ${matches.length} block(s); full content returns on your next turn.`
-				: summarize(matches, missing) || "No codes provided.";
-			return { content: [{ type: "text", text }], details: { unfolded: matches.map((m) => m.code), missing } };
+				? `${header}\n\nExpanded ${matches.length} block(s); full content returns on your next turn.`
+				: header || "No codes provided.";
+			return { content: [{ type: "text", text }], details: { unfolded: matches.map((m) => m.code), missing, compacted } };
 		},
 	});
 }

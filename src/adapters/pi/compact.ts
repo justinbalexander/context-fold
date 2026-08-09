@@ -47,8 +47,8 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
 		"# Compaction summary (deterministic seed index — no model involved)",
 		"",
 		"Everything below is extracted VERBATIM from the session; nothing is paraphrased.",
-		"Full history is preserved on disk. To recover detail: `recall search=<term>` sweeps every",
-		"folded block in one call; `recall <code>` / `recall <code> lines=<a-b>` pulls a specific one.",
+		"Full history is preserved on disk. To recover detail: `recall_folded search=<term>` sweeps every",
+		"folded block in one call; `recall_folded <code>` / `recall_folded <code> lines=<a-b>` pulls a specific one.",
 		`Ground truth: ${input.spoolDir}`,
 	];
 
@@ -65,7 +65,7 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
 		parts.push("", "## Error lines observed (verbatim)");
 		for (const e of errors) parts.push(`- ${e}`);
 	}
-	if (identifiers.length) parts.push("", "## Exact identifiers (grep keys for recall)", listed(identifiers));
+	if (identifiers.length) parts.push("", "## Exact identifiers (grep keys for recall_folded)", listed(identifiers));
 	if (spans.length) {
 		parts.push("", "## Recovery pointers");
 		for (const s of spans) parts.push(`- {#${s.code ?? "?"} FOLDED} ${s.tool ?? "?"} · turn ${s.turn} · ${s.log.lines} lines`);

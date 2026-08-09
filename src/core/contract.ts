@@ -40,17 +40,9 @@ export interface ViewBlock {
 	/** Currently rendered folded in the view. */
 	folded: boolean;
 	/**
-	 * Born folded by the L0 ingestion gate: this block entered the view already collapsed to a
-	 * pointer digest. It is TERMINAL — the policy never folds it again (its `foldedTokens` is the
-	 * pointer weight the budget already counts), but its full `tokens` stays visible so the
-	 * policy's accounting of what the block really costs stays honest.
-	 */
-	bornFolded?: boolean;
-	/**
 	 * Frozen by a committed prefix-stable layer: this block's substitution bytes are fixed for the
 	 * session (they extend the byte-stable head that keeps the provider's prompt cache warm).
-	 * TERMINAL like `bornFolded` — released only by an explicit agent unfold, which deliberately
-	 * breaks the prefix at one point.
+	 * It is terminal until an explicit agent unfold deliberately breaks the prefix at one point.
 	 */
 	frozen?: boolean;
 	/** Inside the protected working tail — the newest blocks, never folded. */

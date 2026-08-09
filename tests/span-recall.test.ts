@@ -1,8 +1,7 @@
 /*
  * span-recall.test.ts — the churn guard: recovering identifiers scattered
  * across N folded pointers must cost fewer calls than N. One `search` sweep covers every folded
- * block — L0 born-folded pointers and ladder-frozen masks alike — with line numbers that agree
- * with the per-code `lines=` slice path.
+ * block with line numbers that agree with the per-code `lines=` slice path.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,11 +9,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapGateRegistry } from "../src/core/gate-registry";
-import { Gate, GATE_DEFAULTS } from "../src/adapters/pi/gate";
-import { SpoolStore } from "../src/adapters/pi/spool";
+import { MapSpoolRegistry } from "../src/core/spool-registry";
 import type { AgentMessage } from "../src/core/block";
-import { user, assistantWithCalls, toolResult } from "./helpers";
+import { user, assistantText, assistantWithCalls, toolResult } from "./helpers";
 
 let dir: string;
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
@@ -31,6 +28,7 @@ function needledSession(n: number): { messages: AgentMessage[]; needles: string[
 		messages.push(assistantWithCalls([{ id: `c${i}`, name: "read" }]));
 		messages.push(toolResult(`c${i}`, lines.join("\n"), "read"));
 	}
+	messages.push(assistantText("finished collecting", "after-shards"));
 	messages.push(user("now the newest question"));
 	return { messages, needles };
 }
@@ -38,7 +36,7 @@ function needledSession(n: number): { messages: AgentMessage[]; needles: string[
 describe("span recall (churn guard)", () => {
 	it("one search call recovers needles from all N ladder-frozen pointers (1 call < N)", () => {
 		dir = mkdtempSync(join(tmpdir(), "contextfold-span-"));
-		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapGateRegistry());
+		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapSpoolRegistry());
 		const { messages, needles } = needledSession(5);
 		e.process(messages, { contextWindow: 40_000, tokens: null }); // ~25k live → ~0.63 ≥ 0.45 → fold event
 
@@ -50,7 +48,7 @@ describe("span recall (churn guard)", () => {
 
 	it("search line numbers agree with the per-code lines= slice", () => {
 		dir = mkdtempSync(join(tmpdir(), "contextfold-span-"));
-		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapGateRegistry());
+		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapSpoolRegistry());
 		const { messages } = needledSession(5);
 		e.process(messages, { contextWindow: 40_000, tokens: null });
 		const sweep = e.searchFolded("SHARD_CAP_0");
@@ -60,38 +58,9 @@ describe("span recall (churn guard)", () => {
 		expect(matches[0].text).toContain("SHARD_CAP_0");
 	});
 
-	it("covers L0 born-folded pointers too (gate + registry path)", () => {
-		dir = mkdtempSync(join(tmpdir(), "contextfold-span-"));
-		const registry = new MapGateRegistry();
-		const spool = new SpoolStore(dir);
-		const gate = new Gate({ enabled: true, ...GATE_DEFAULTS }, registry, () => spool);
-		const { messages, needles } = needledSession(3);
-
-		// Feed the gate as tool results land (the tool_result hook path).
-		for (const m of messages) {
-			const tr = m as { role?: string; toolCallId?: string; toolName?: string; isError?: boolean; content?: { type: string; text?: string }[] };
-			if (tr.role !== "toolResult") continue;
-			gate.observe({
-				toolName: tr.toolName ?? "read",
-				toolCallId: tr.toolCallId!,
-				input: {},
-				isError: !!tr.isError,
-				content: tr.content ?? [],
-			});
-		}
-		expect(registry.size).toBe(3);
-
-		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
-		e.process(messages, { contextWindow: 10_000_000, tokens: null }); // huge window: only L0 pointers fold
-		const sweep = e.searchFolded("SHARD_CAP_");
-		expect(sweep.hits.length).toBe(3);
-		const returned = sweep.hits.flatMap((h) => h.lines).join("\n");
-		for (const needle of needles) expect(returned).toContain(needle);
-	});
-
 	it("caps the sweep and says how to narrow", () => {
 		dir = mkdtempSync(join(tmpdir(), "contextfold-span-"));
-		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapGateRegistry());
+		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapSpoolRegistry());
 		// Every line matches → the sweep must clip, not flood.
 		const messages: AgentMessage[] = [user("flood")];
 		for (let i = 0; i < 6; i++) {
@@ -108,7 +77,7 @@ describe("span recall (churn guard)", () => {
 
 	it("counts recall churn for the yellow flag", () => {
 		dir = mkdtempSync(join(tmpdir(), "contextfold-span-"));
-		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapGateRegistry());
+		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapSpoolRegistry());
 		const { messages } = needledSession(5);
 		e.process(messages, { contextWindow: 40_000, tokens: null });
 		const sweep = e.searchFolded("SHARD_CAP_0");
