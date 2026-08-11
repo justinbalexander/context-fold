@@ -356,7 +356,19 @@ export default function contextFold(pi: ExtensionAPI): void {
 		try {
 			const prep = (event as { preparation: { messagesToSummarize: unknown[]; turnPrefixMessages: unknown[]; tokensBefore: number; firstKeptEntryId: string; previousSummary?: string } }).preparation;
 			const index = indexFor(ctx);
-			const blocks = linearize(prep.messagesToSummarize as unknown as CoreAgentMessage[]) as unknown as WireBlock[];
+			// Pi hands a mid-turn cut over in TWO arrays and drops BOTH from live history:
+			// `messagesToSummarize` is the whole turns before the cut turn, `turnPrefixMessages` is the
+			// cut turn's own head (compaction.ts: historyEnd = isSplitTurn ? turnStartIndex :
+			// firstKeptEntryIndex). Pi's native path summarizes the prefix separately; returning a
+			// summary here replaces that path outright, so the prefix is ours to carry or lose. The
+			// ranges are disjoint and in this order chronological. Reading only the first array cost a
+			// live session its whole history on 2026-08-10: the cut landed inside the opening turn, so
+			// `messagesToSummarize` was empty and the summary rendered as a bare header.
+			const leaving = [
+				...(prep.messagesToSummarize ?? []),
+				...(prep.turnPrefixMessages ?? []),
+			] as unknown as CoreAgentMessage[];
+			const blocks = linearize(leaving) as unknown as WireBlock[];
 			// Spool-at-compaction: blocks leaving live history that never folded become recallable
 			// too — the compact record below then carries recovery spans for the whole span.
 			const spooledNow = spoolCompactedBlocks(blocks, {

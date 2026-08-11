@@ -5,7 +5,20 @@ Notable changes to context-fold.
 
 ## Unreleased
 
-Documentation and comment cleanup; no behavior changes.
+A compaction data-loss fix, plus documentation and comment cleanup.
+
+- **Deterministic compaction no longer drops the turn it cuts through.** Pi hands
+  `session_before_compact` two disjoint arrays, and removes both from live history:
+  `messagesToSummarize` (whole turns before the cut) and `turnPrefixMessages` (the head of the
+  turn the cut lands inside). The det summary was built from the first array only, so on any
+  mid-turn cut — the normal case when compaction fires during a long tool loop — the prefix left
+  live context with no summary text and no spool entry to recall it back. Returning a summary
+  from the hook replaces Pi's native path outright, including the turn-prefix summary it would
+  otherwise have written, so nothing else covered the gap. Worst case, observed live on
+  2026-08-10: the cut fell inside the opening turn, `messagesToSummarize` was empty, and a
+  67k-token session compacted to a six-line header whose recall pointers resolved to nothing.
+  Both arrays are now spooled and indexed. Every prior test passed `turnPrefixMessages: []`,
+  which is why this held for three releases.
 
 - **Docs re-verified against the source.** Every operational claim in `README.md` and `DESIGN.md`
   — configuration defaults, ladder constants, the tool surface, footer status strings, seed-index

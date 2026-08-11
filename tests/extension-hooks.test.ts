@@ -269,6 +269,43 @@ describe.skipIf(!PI_PRESENT)("session_before_compact hook", () => {
 		expect(out.compaction.summary).toContain("UNTRUSTED");
 	});
 
+	// Pi splits a mid-turn cut into TWO arrays: `messagesToSummarize` (whole turns before the
+	// cut's turn) and `turnPrefixMessages` (the cut turn's own head). BOTH leave live history —
+	// Pi's native path summarizes the prefix separately, and an extension that returns a summary
+	// replaces that path entirely. Reading only `messagesToSummarize` therefore drops the prefix
+	// with no summary text and no spool route. When the cut lands inside the FIRST turn,
+	// `messagesToSummarize` is empty and the whole session would vanish behind a bare header.
+	it("covers turnPrefixMessages, the mid-turn half Pi also drops", async () => {
+		process.env.CONTEXTFOLD_COMPACT = "det";
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+
+		// Exactly the live shape observed 2026-08-10: the cut fell inside the opening turn, so
+		// everything the session had done sat in the turn prefix and nothing preceded it.
+		const prefix: AgentMessage[] = [
+			user("trace the overflow path"),
+			assistantWithCalls([{ id: "tp0", name: "read" }]),
+			toolResult("tp0", `SENTINEL_PREFIX_BODY\n${"line of prefix output\n".repeat(400)}`),
+			assistantText("the prefix turn reached this conclusion"),
+		];
+
+		const out = (await s.hooks.get("session_before_compact")!(
+			{ preparation: { messagesToSummarize: [], turnPrefixMessages: prefix, tokensBefore: 40_000, firstKeptEntryId: "e9" } },
+			ctx,
+		)) as { compaction: { summary: string } };
+
+		// The prefix must survive as recoverable detail, not just as a header. Assert on the block
+		// BODY, never on the search term itself — a miss echoes the term back and would pass.
+		const hit = await s.tools.get("recall_folded")!.execute("t1", { search: "SENTINEL_PREFIX_BODY" });
+		const hitText = hit.content.map((c) => c.text).join("");
+		expect(hitText).toContain("1 matching line");
+		const code = /=== (\w+) \(/.exec(hitText)?.[1];
+		expect(code).toBeTruthy();
+		const body = await s.tools.get("recall_folded")!.execute("t2", { codes: [code!] });
+		expect(body.content.map((c) => c.text).join("")).toContain("line of prefix output");
+		expect(out.compaction.summary).toContain("trace the overflow path");
+	});
+
 	it("stands aside for Pi's own compaction under CONTEXTFOLD_COMPACT=native", async () => {
 		process.env.CONTEXTFOLD_COMPACT = "native";
 		const s = await load();
