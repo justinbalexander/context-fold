@@ -1,8 +1,8 @@
 # context-fold
 
 Deterministic, reversible context compaction for the [Pi coding agent](https://github.com/earendil-works/pi).
-Long agentic sessions stay under budget by folding stale content — mostly long chains of tool
-calls — out of the model's view. Every fold is reversible, indexed, and computed without a model
+Long agentic sessions stay under budget by folding stale content (mostly long chains of tool
+calls) out of the model's view. Every fold is reversible, indexed, and computed without a model
 call. The core is written to be harness-agnostic and can be adapted to other coding harnesses with
 some work.
 
@@ -17,7 +17,7 @@ pi install npm:context-fold
 Context management is annoying, and I know plenty of people who are too lazy to summarize and hand
 off to a new session. They let context grow unmanaged right up until they smash `/compact`. This
 system came out of iterative research over various compaction methods, and it is an attempt at
-economically optimizing context over a long session — eating as few cache-read hits as possible
+economically optimizing context over a long session: eating as few cache-read hits as possible
 until you decide to end the session or the work is done.
 
 ## Why deterministic
@@ -32,7 +32,7 @@ tasks, at equal or lower cost ([The Complexity Trap](https://arxiv.org/abs/2508.
 LLM summaries lose exactly what matters. File and identifier trails are the weakest-preserved
 category even in good production summarizers
 ([Factory.ai](https://factory.ai/news/evaluating-compression)). In one fixed-interval math
-experiment, 40.4 % of post-summary answer-state transitions went from correct to wrong — even
+experiment, 40.4 % of post-summary answer-state transitions went from correct to wrong, even
 though summarization was net positive overall
 ([Self-Compacting Agents](https://arxiv.org/abs/2606.23525)). A summary can also fabricate
 instructions that then become post-compaction "ground truth"
@@ -40,7 +40,7 @@ instructions that then become post-compaction "ground truth"
 
 For precise recall, retrieval over raw stored history beats an in-context summary by a wide margin
 ([MemGPT](https://arxiv.org/abs/2310.08560), [LongMemEval](https://arxiv.org/abs/2410.10813)).
-But grep only finds what lexically matches ([NoLiMa](https://arxiv.org/abs/2502.05167)) — which is
+But grep only finds what lexically matches ([NoLiMa](https://arxiv.org/abs/2502.05167)). This is
 why every fold emits a deterministic index of exact tokens rather than a paraphrase.
 
 ## The system in short
@@ -53,12 +53,12 @@ least once.
 **2. The floor.** Eventually no more tool calls can be masked. At that point context-fold says so
 rather than churning. What remains is the irreducible floor, and it cannot compress past it.
 
-**3. Hard compaction.** *Pi* decides when this fires. By default (`CONTEXTFOLD_COMPACT=det`)
+**3. Hard compaction.** Pi decides when this fires. By default (`CONTEXTFOLD_COMPACT=det`)
 context-fold intercepts it and hands Pi a summary rendered verbatim from the session's seed index,
 so Pi's LLM summarization never runs. `CONTEXTFOLD_COMPACT=native` opts back into Pi's stock
 behavior.
 
-At this stage the raw messages do leave live context — that is what compaction is. What survives is
+At this stage the raw messages do leave live context; that is what compaction is. What survives is
 the index, the spool, and Pi's session file, all on disk and all reachable through `recall_folded`. The
 loss is bounded and reversible rather than lossy and final. There is no paraphrase step and nothing
 that can hallucinate. The extension warns you after a second forced compaction; it is worth running
@@ -102,15 +102,15 @@ Every fold event appends one deterministic record to `seed-index.jsonl` in the s
 directory (spec: `docs/SEED_INDEX_SPEC.md`): files touched, commands run, error lines in every
 spelling the lexicon knows (lowercase `failed`, `npm ERR!`, …), exact identifiers and numbers
 harvested from the masked output, first lines of user messages, and byte-extent spans into the
-spool. Extraction is pure regex — same input, byte-identical output.
+spool. Extraction is pure regex: same input, byte-identical output.
 
 ### Getting detail back
 
-- `recall_folded search=<term>` — one sweep over every folded block, with matching lines grouped by code.
+- `recall_folded search=<term>`: one sweep over every folded block, with matching lines grouped by code.
   A detail lost somewhere behind N pointers costs one call, not N.
-- `recall_folded <code>`, with optional `grep=<term>` or `lines=<a-b>` — whole or partial retrieval,
+- `recall_folded <code>`, with optional `grep=<term>` or `lines=<a-b>`: whole or partial retrieval,
   token-capped so a recall can never re-flood what folding saved.
-- `unfold <code>` — sticky re-expansion. The block stays expanded and is never re-masked.
+- `unfold <code>`: sticky re-expansion. The block stays expanded and is never re-masked.
 
 Recall works live, after resume, and after hard compaction: masked content resolves from the spool
 even once the raw message has left history.
@@ -118,34 +118,34 @@ even once the raw message has left history.
 ### Status and advisories
 
 Measured prompt-cache telemetry (per-message `cacheRead`/`cacheWrite`) drives the advisories below,
-in price-agnostic input-token equivalents — fee *ratios* are near-constant across vendors, with
+in price-agnostic input-token equivalents; fee ratios are near-constant across vendors, with
 cache read ≈ 0.1× input.
 
-- **Cold detection** — an expected-warm turn that read zero cached tokens gets one stderr notice
+- **Cold detection**: an expected-warm turn that read zero cached tokens gets one stderr notice
   with the re-billed size and a `/new` suggestion.
-- **`/context-fold` status** — fold position (usage %, the next-fold gauge), cache hit ratios, and
+- **`/context-fold` status**: fold position (usage %, the next-fold gauge), cache hit ratios, and
   flags: folds committed but not observed on the wire, a second forced compaction, irreducible
   context past half the window, cold with a large carry, and recall churn. Advisory only; nothing
   blocks.
-- **Footer status line (TUI)** — a persistent one-line summary in Pi's footer (`⧉ context-fold ×3
+- **Footer status line (TUI)**: a persistent one-line summary in Pi's footer (`⧉ context-fold ×3
   · ~41k tok masked · next fold: 3.1k/9.6k maskable · cache avg 66%`), updated as fold events fire.
   Purely visual: nothing is added to the transcript or the model's context, and headless modes are
   unaffected. The middle segment is the ladder's trigger gauge, showing whichever fold condition is
-  actually binding — below the entry threshold it names it (`next fold at 45% ctx`); once usage is
+  actually binding. Below the entry threshold it names it (`next fold at 45% ctx`); once usage is
   past the threshold, which is permanent from then on, it tracks maskable mass toward the next fold
   step (`next fold: 3.1k/9.6k maskable`, counting up from 0 right after a fold as new observations
   land). `⚠ no more folds possible (over budget)` appears only in the terminal state where the
   irreducible tail and roots exceed the budget. `cache avg` is the whole-session cache hit ratio,
   unlike Pi's `CH`, which is the last turn only.
-- **Fold cost accounting** — once a fold event has fired, the status reports *both* sides: tokens
+- **Fold cost accounting**: once a fold event has fired, the status reports both sides: tokens
   masked per turn against tokens the provider re-prefilled because the fold moved the prefix, plus
   the running net. A fold rewrites history from the earliest masked block forward, so that
   re-prefill is a real cost this extension causes, and reporting only the savings would be
   dishonest accounting. It is charged to the single turn carrying the new bytes, because every
   later turn reads them back from cache. The cost side needs a provider that reports cache
-  *writes*: Anthropic and Bedrock Converse do, while the Codex route reports cached reads only and
+  writes: Anthropic and Bedrock Converse do, while the Codex route reports cached reads only and
   Pi hardcodes Google's write to zero. Where writes are unreported the line says so instead of
-  showing a zero — "nothing was rewritten" and "this provider never says" are different facts.
+  showing a zero, because "nothing was rewritten" and "this provider never says" are different facts.
 
 ## Guarantees
 
@@ -156,12 +156,12 @@ cache read ≈ 0.1× input.
   session file keeps the raw payload regardless).
 - **Tool pairs cannot orphan.** Folding is in-place content substitution and never changes the
   message count, so a `tool_call` can never lose its `tool_result`. Structural, not policed.
-- **Failure signals survive compression** at every fidelity level — the error lexicon is
+- **Failure signals survive compression** at every fidelity level; the error lexicon is
   deliberately broad and any-case.
 - **No model is ever called.** Folding, digests, compaction, and the handoff seed are all
   deterministic. Nothing this extension produces is a paraphrase.
 - **Fail-open, bounded blast radius.** A defect costs one result's folding, one block's fidelity,
-  or one turn's folding — never the turn itself. `CONTEXTFOLD=0` disables everything per session.
+  or one turn's folding, never the turn itself. `CONTEXTFOLD=0` disables everything per session.
 - **Deterministic core.** The pure core has no clock, no randomness, and no I/O; all disk I/O lives
   in the adapter.
 
@@ -171,14 +171,14 @@ cache read ≈ 0.1× input.
   a per-model tokenizer, so every threshold in this document is approximate. It drives budget
   decisions well enough; do not read it as billing truth.
 - **Images are invisible to the budget math.** A tool result carrying non-text parts (screenshots,
-  rendered pages) is never folded, so nothing is ever lost —
-  but its real token cost is not counted either. Image-heavy sessions read as further from the fold
+  rendered pages) is never folded, so nothing is ever lost, but its real token cost is not
+  counted either. Image-heavy sessions read as further from the fold
   threshold than they are, so folding starts later than it should.
 - **The tool names are global.** The extension registers `recall_folded` and `unfold` as global
   tools. If another extension registers the same names, one will shadow the other (`unfold` is the
-  generic one; `recall_folded` was named to avoid exactly this).
+  generic one; `recall_folded` was named to avoid this collision).
 - **Spool GC judges other sessions by file age.** The sweep at session start deletes sibling spool
-  directories — in this workspace and in sibling workspaces' spool roots — whose newest file is
+  directories (in this workspace and in sibling workspaces' spool roots) whose newest file is
   older than the retention window. Live sessions refresh a heartbeat file each turn, so an
   idle-but-running session is safe; a session whose process is suspended for longer than the
   window can still lose its spool to a freshly started sibling.
@@ -199,14 +199,14 @@ cache read ≈ 0.1× input.
 
 Findings from running context-fold beside other Pi extensions. The common theme: a fold can be
 committed and correct locally yet still be discarded or deferred downstream, which is why the
-extension watches provider usage for exactly that.
+extension watches provider usage for that outcome.
 
 - **`@howaboua/pi-codex-conversion` defers folds to user-turn boundaries.** Its cached WebSocket
   continuation answers a mid-chain prefix change by sending only the pending tool output as a delta
   against the server-held previous response, so a fold's rewrite of older history stays local for
   the rest of that tool chain. At the next user message there is no pending tool output, the
   changed prefix forces a full resend, and provider-reported input drops all at once. Folding still
-  works — recall, the spool, and compaction are unaffected — but a long autonomous tool chain can
+  works (recall, the spool, and compaction are unaffected), but a long autonomous tool chain can
   approach the provider's context limit before any fold takes effect on the wire.
 - **`codex-lite` does not rewrite context.** Its dialect mode replaces Pi's stock tools and appends
   prompt guidance. There is no fold bypass in that pairing; fresh shell output reaches the model
@@ -247,7 +247,7 @@ From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 | `CONTEXTFOLD_COLD_FOLD_AT` | `0.25` | First-fold threshold when no live cache read has ever been observed. |
 | `CONTEXTFOLD_BUDGET_FRACTION` | `0.75` | Budget = this fraction of the context window… |
 | `CONTEXTFOLD_BUDGET_CAP` | `200000` | …capped at this absolute ceiling (attention degrades at absolute depth). `0`/`off` disables. |
-| `CONTEXTFOLD_TAIL` | `20000` | Protected-tail target — the newest ~N tokens never fold (clamped to half the budget). |
+| `CONTEXTFOLD_TAIL` | `20000` | Protected-tail target: the newest ~N tokens never fold (clamped to half the budget). |
 | `CONTEXTFOLD_COMPACT` | `det` | Hard-compaction answer: `det` = deterministic seed-index summary; `native` = Pi stock. |
 | `CONTEXTFOLD_RECON_TOKENS` | `18000` | Reconstruction estimate used by the reset flag (input-token equivalents). |
 | `CONTEXTFOLD_SPOOL_RETAIN_DAYS` | `1` | Spool GC window at session start (fractional days allowed). `0`/`off` = never delete. |
@@ -268,7 +268,7 @@ scripts/e2e-resume.sh   # live: folds survive a session restart
 The live scripts drive real Pi sessions against a real provider, so they cost money and need
 provider auth plus `python3`. They load the working copy explicitly, so they test the checkout
 rather than an installed build. Override the model with `E2E_PROVIDER` / `E2E_MODEL`. These are
-liveness checks, not benchmarks — they assert that folding happens and survives, not how much it
+liveness checks, not benchmarks: they assert that folding happens and survives, not how much it
 saves.
 
 ## Develop
@@ -287,7 +287,7 @@ There is no build step: Pi loads the TypeScript source directly through jiti, so
 `src/` as-is and installs no dependencies of its own.
 
 `typebox` and `@earendil-works/pi-coding-agent` are declared as optional peer dependencies. Pi
-injects them at runtime — never bundle a copy.
+injects them at runtime; never bundle a copy.
 
 ## Provenance & license
 
