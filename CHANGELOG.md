@@ -13,6 +13,10 @@ cleanup.
   is a fallback with `search=`/`grep=`/`lines=` slicing, rerun a narrower command rather than page
   a broad result through recall, and unfold only what ongoing work keeps needing. Behavior is
   unchanged; this only cuts system-prompt weight.
+- **Contributor docs brought to the house prose standard.** `DESIGN.md`, `AGENTS.md`,
+  `RELEASING.md`, and both files under `docs/` lose their em dashes and clause-joining punctuation
+  in favor of plain sentences, and two dated incident comments in the source drop their dates. One
+  stale name fixed: `RELEASING.md` now says `recall_folded` where it said `recall`. No claim changed.
 
 - **Deterministic compaction no longer drops the turn it cuts through.** Pi hands
   `session_before_compact` two disjoint arrays, and removes both from live history:

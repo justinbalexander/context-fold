@@ -280,7 +280,7 @@ describe.skipIf(!PI_PRESENT)("session_before_compact hook", () => {
 		const s = await load();
 		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
 
-		// Exactly the live shape observed 2026-08-10: the cut fell inside the opening turn, so
+		// Exactly the live shape that lost a session's history: the cut fell inside the opening turn, so
 		// everything the session had done sat in the turn prefix and nothing preceded it.
 		const prefix: AgentMessage[] = [
 			user("trace the overflow path"),

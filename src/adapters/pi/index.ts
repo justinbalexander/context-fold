@@ -361,8 +361,8 @@ export default function contextFold(pi: ExtensionAPI): void {
 			// cut turn's own head (compaction.ts: historyEnd = isSplitTurn ? turnStartIndex :
 			// firstKeptEntryIndex). Pi's native path summarizes the prefix separately; returning a
 			// summary here replaces that path outright, so the prefix is ours to carry or lose. The
-			// ranges are disjoint and in this order chronological. Reading only the first array cost a
-			// live session its whole history on 2026-08-10: the cut landed inside the opening turn, so
+			// ranges are disjoint and in this order chronological. Reading only the first array once cost
+			// a live session its whole history: the cut landed inside the opening turn, so
 			// `messagesToSummarize` was empty and the summary rendered as a bare header.
 			const leaving = [
 				...(prep.messagesToSummarize ?? []),

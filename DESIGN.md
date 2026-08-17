@@ -1,7 +1,7 @@
-# context-fold — architecture
+# context-fold architecture
 
 As built, describing the shipped 0.3.x behavior. `README.md` is the user-facing
-document; this file is for contributors and covers structure, invariants, and the reasoning
+document. This file is for contributors and covers structure, invariants, and the reasoning
 behind them.
 
 ## 1. Core idea
@@ -11,21 +11,21 @@ not stress-tested Anthropic models extensively inside Pi, so treat any compariso
 as untested.
 
 1. **Avoid Destructive Editing.** A folded block stays in the outgoing
-   message array and keeps its `callId`; only its rendered content is swapped, and the message
-   count never moves. A `tool_call`/`tool_result` pair therefore *cannot* orphan. This both
+   message array and keeps its `callId`. Only its rendered content is swapped, and the message
+   count never moves. A `tool_call`/`tool_result` pair therefore cannot orphan. This both
    preserves the stable prefix and retains proper history.
 
 2. **Reversible by default.** Every folded block carries a deterministic `{#<code> FOLDED}` tag.
    The agent reads the code and calls `recall_folded`/`unfold` to get the original back.
 
 3. **Protected working tail.** The newest ~N tokens never fold, so recent reasoning stays at full
-   fidelity. The tail is never empty — the newest block is always protected.
+   fidelity. The tail is never empty, because the newest block is always protected.
 
 The session file is never modified.
 
 ---
 
-## 2. Layout — pure core, thin adapter
+## 2. Layout: pure core, thin adapter
 
 ```
 src/
@@ -47,7 +47,7 @@ src/
     index-store.ts         # seed-index.jsonl emission
     persistence.ts         # event-sourced fold state
     compact.ts             # the deterministic hard-compaction summary
-    handoff.ts             # /fold-handoff - writes a deterministic seed for a fresh session
+    handoff.ts             # /fold-handoff: writes a deterministic seed for a fresh session
     advisor.ts             # cold detection and the reset yellow flag
     cache-telemetry.ts     # measured cacheRead/cacheWrite accounting
     retention.ts           # spool GC
@@ -58,10 +58,10 @@ src/
 The core speaks only its own `AgentMessage`-shaped block model and a
 `conduct(view) → FoldCommand[]` policy interface. The Pi adapter converts Pi's `AgentMessage[]`
 to and from core blocks and owns every Pi API call. An adapter for another harness implements the
-same conversion against that tool's hooks; the core is untouched.
+same conversion against that tool's hooks, and the core is untouched.
 
-**Policy/mechanism split:** `policy/fold-ladder.ts` decides *what and when* to fold — it is the
-policy. `apply.ts` performs the rewrite — it is the mechanism, and it has no opinion about timing.
+**Policy/mechanism split:** `policy/fold-ladder.ts` is the policy and decides what and when to
+fold. `apply.ts` is the mechanism. It performs the rewrite and has no opinion about timing.
 Keeping them apart is what lets fold timing change without touching the rewrite.
 
 ---
@@ -99,16 +99,16 @@ the window, or 25 % when telemetry shows the session has never had a live cache 
 maskable mass is worth at least one ladder step (~12 % of the window). Crossing the budget cap is
 an urgent event regardless of ladder position.
 
-Tool results after the latest assistant response are first-delivery results: that assistant issued
+Tool results after the latest assistant response are first-delivery results. That assistant issued
 their calls, and no provider request has received their output yet. They are held regardless of
 tail size or budget pressure. Parallel results are held together. Once a later assistant response
 exists, they become ordinary ladder candidates.
 
-A committed layer is only ever released by an explicit `unfold`, never by the engine deciding to
-re-plan. An unfold deliberately breaks and re-prefills the prefix once; later turns keep that raw
-block byte-identical.
+Only an explicit `unfold` releases a committed layer. The engine never decides to re-plan one. An
+unfold deliberately breaks and re-prefills the prefix once, and later turns keep that raw block
+byte-identical.
 
-Layers accumulate for the life of the session. Nothing scans them per turn, the engine keeps a
+Layers accumulate for the life of the session. Nothing scans them per turn. The engine keeps a
 flat `id → digestText` map and the newest seq, so there is no bound to enforce and no reason to
 merge them.
 
@@ -120,20 +120,21 @@ Fresh tool results always reach the model at full fidelity. When the ladder late
 the adapter writes each masked block to
 `<sessionDir>/spool/<sessionId>/<code>.json`: a versioned, sha256-verified envelope written
 atomically, with dedup aliases for identical payloads. The frozen digest carries the authoritative
-`{#code FOLDED}` handle. `recall_folded` reads the envelope whole or through bounded grep/line slices;
-`unfold` restores the live block on the next turn.
+`{#code FOLDED}` handle. `recall_folded` reads the envelope whole or through bounded grep/line
+slices, and `unfold` restores the live block on the next turn.
 
 The spool and seed-index record are commit preconditions. The engine prepares a layer, the adapter
 spools and indexes every masked block, and only then does the engine freeze and apply its bytes. A
 durability failure (disk, index, or layer persistence) rejects the entire event and sends that turn
-raw. A fold-code collision is the one per-block exception: the code space is `hash mod 36^6`, so
-two durable ids can rarely share a code, and the second is a permanent per-id condition — that
-block alone is dropped from the event, held raw for the session, and announced on stderr, while
-the rest of the event commits. The spool is therefore the durability floor after hard compaction
-removes the raw message from live history, not an arrival-time masking policy. At hard compaction
+raw. A fold-code collision is the one per-block exception. The code space is `hash mod 36^6`, so two
+durable ids can rarely share a code, and the collision is a permanent condition for the second
+id. That block alone is dropped from the event, held raw for the session, and announced on
+stderr, while the rest of the event commits. The spool is therefore the durability floor after
+hard compaction removes the raw message from live history, rather than an arrival-time masking
+policy. At hard compaction
 itself, every foldable block leaving live history that never folded is spooled then (per-block
-fail-open), so the recall route covers the entire compacted span, not only the blocks earlier
-fold events happened to reach.
+fail-open), so the recall route covers the entire compacted span rather than only the blocks
+earlier fold events reached.
 
 ## 6. Fold-state persistence
 
@@ -143,27 +144,27 @@ its spool file. Legacy `kind:"gate"` records remain readable so handles from ses
 the arrival-time gate's removal still resolve.
 
 Retention: at session start, sibling session spools whose newest file is older than
-`CONTEXTFOLD_SPOOL_RETAIN_DAYS` (default 24 hours — a spool is a working artifact, not an archive;
-Pi's session JSONL keeps the raw payload regardless) are removed whole-directory. A second pass
-applies the same window to sibling *workspace* spool roots, since a workspace's own sweep only
-runs when a session starts there again — without it an abandoned workspace would retain its last
-spools forever. Dedup aliases only ever point at siblings in the same directory, so nothing
+`CONTEXTFOLD_SPOOL_RETAIN_DAYS` (default 24 hours) are removed whole-directory. A spool is a
+working artifact rather than an archive, and Pi's session JSONL keeps the raw payload regardless.
+A second pass applies the same window to sibling workspace spool roots, since a workspace's own
+sweep only runs when a session starts there again. Without it an abandoned workspace would retain
+its last spools forever. Dedup aliases only ever point at siblings in the same directory, so nothing
 dangles, and the current session's spool is never touched.
 
 Freshness is measured by the newest file mtime in the directory, which on its own would judge a
-*live* session by when it last folded. A session that folded early and then ran quietly for longer
+live session by when it last folded. A session that folded early and then ran quietly for longer
 than the retention window would be reaped by a freshly started sibling. Each session therefore
 refreshes a `.alive` heartbeat file in its own spool directory from the `context` hook, throttled
 to at most once an hour, so liveness is recorded independently of folding activity. The remaining
 edge is a session whose process is stopped (SIGSTOP, a suspended terminal) for longer than the
-window — it stops heartbeating and can still be reaped.
+window. It stops heartbeating and can still be reaped.
 
 ---
 
 ## 7. Failure posture
 
 Every hook is fail-open with a bounded blast radius, and every degradation is announced on stderr
-rather than swallowed. A failure should be visible, never silent.
+rather than swallowed.
 
 | failure | cost |
 |---|---|
@@ -174,16 +175,16 @@ rather than swallowed. A failure should be visible, never silent.
 | resume restore throws | prior folds render raw this session |
 | spool missing or corrupt (at restore or mid-session) | a live block still resolves from raw history, through the same recall caps and slices; only a block that also left live history errors |
 
-`CONTEXTFOLD=0` disables the extension entirely for one session — the escape hatch for testing or
-for isolating a suspected fold-related problem.
+`CONTEXTFOLD=0` disables the extension entirely for one session, which is the escape hatch for
+testing or for isolating a suspected fold-related problem.
 
 ---
 
-## 8. Invariants — do not break these
+## 8. Invariants
 
 1. **Only durable ids may be folded.** Ids prefixed `u:`/`a:`/`r:`/`s:` are content-anchored and
    stable; positional `m<i>:…` ids re-point once folding makes the array non-append-only. The
-   `isDurableId` gate is separate from the kind-based `wireFoldable` gate — do not conflate them.
+   `isDurableId` gate is separate from the kind-based `wireFoldable` gate and stays that way.
 2. **The engine is the sole author of the `{#code}` tag.** Strip any tag a policy supplies and
    prepend the authoritative one.
 3. **Single disposition.** No block id in two ops.
@@ -192,19 +193,19 @@ for isolating a suspected fold-related problem.
 5. **Frozen bytes are immutable** for the life of the layer. Only an explicit unfold or a recorded
    layer break releases one.
 6. **Risk lines survive every fidelity level.** The error lexicon is deliberately broad and
-   any-case; a failure signal that vanishes into an elision marker is the bug this project exists
+   any-case. A failure signal that vanishes into an elision marker is the bug this project exists
    to prevent.
 7. **No model call anywhere**, on any path. Folding, digests, compaction and the handoff seed are
    all deterministic, so nothing this extension produces can be a paraphrase or a fabrication.
-8. **Never vendor `typebox` or the `@earendil-works/*` packages** — Pi injects bundled virtual
-   modules at runtime, so a separately installed copy would not be the one the engine uses.
-   Declare them as peer dependencies.
+8. **`typebox` and the `@earendil-works/*` packages are peer dependencies, never vendored.** Pi
+   injects bundled virtual modules at runtime, so a separately installed copy would not be the one
+   the engine uses.
 
 ---
 
 ## 9. Provenance
 
 The pure core is derived from [Accordion](https://github.com/a-Fig/Accordion) (pinned commit
-`0c22434`) — `digest.ts` and `tokens.ts` close to verbatim, `applyPlan` and the block model
-adapted — stripped of all Svelte/Tauri/browser coupling and hardened since. The discrete fold
-ladder, seed index, spool-backed recovery, and advisor layers are original to this project.
+`0c22434`), stripped of all Svelte/Tauri/browser coupling and hardened since. `digest.ts` and
+`tokens.ts` are close to verbatim, and `applyPlan` and the block model are adapted. The discrete
+fold ladder, seed index, spool-backed recovery, and advisor layers are original to this project.
