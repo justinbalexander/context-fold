@@ -63,13 +63,10 @@ export function registerFoldTools(pi: ExtensionAPI, engine: ContextFoldEngine, o
 			"grep=<term> / lines=<a-b>. search=<term> (no codes) is a pointer lookup — it names which " +
 			"folded block holds a known identifier. Read-only: blocks stay folded. If the information " +
 			"is cheaply available another way (rerun the command, read the file), do that instead.",
-		promptSnippet:
-			"recall_folded({codes?, grep?, lines?, search?}) — fallback read of folded content; only when a {#code FOLDED} pointer blocks the current step.",
+		promptSnippet: "fallback read of folded content when a {#code FOLDED} pointer blocks the current step.",
 		promptGuidelines: [
-			"recall_folded is a fallback, not a browsing tool: use it only when a {#<code> FOLDED} marker hides something the current step needs, and prefer rerunning a cheap command or re-reading the file when that answers the question.",
-			"Know the identifier but not which pointer holds it? recall_folded search=<term> names the folded block(s); then slice with grep=<term> or lines=<a-b>.",
+			"recall_folded is a fallback, not a browsing tool. Know the identifier but not which pointer holds it? recall_folded search=<term> names the folded block(s); then slice with grep=<term> or lines=<a-b>.",
 			"If you need most of a broad shell result, rerun a narrower command instead of paging it through many recall_folded calls.",
-			"recall_folded is a one-shot read; the block stays folded. Use unfold only for a block your ongoing work keeps needing.",
 		],
 		parameters: RECALL_PARAMS,
 		async execute(_toolCallId, params) {
@@ -109,10 +106,9 @@ export function registerFoldTools(pi: ExtensionAPI, engine: ContextFoldEngine, o
 			"Re-expand one or more folded context blocks back to full content, identified by the short " +
 			"code in their {#<code> FOLDED} tag. The full content returns to your context from your next " +
 			"turn on (sticky). Use recall_folded instead for a one-time read.",
-		promptSnippet: "unfold({codes}) — permanently re-expand folded blocks back to full content.",
+		promptSnippet: "permanently re-expand folded blocks back to full content.",
 		promptGuidelines: [
-			"Unfold only a block your ongoing work keeps needing — it re-expands permanently and costs its full token weight every turn after. For a one-time read, recall_folded is the right tool.",
-			"The expanded content appears on your next turn, not this one.",
+			"Unfold only a block your ongoing work keeps needing. It re-expands permanently and costs its full token weight every turn after.",
 		],
 		parameters: CODES_PARAMS,
 		async execute(_toolCallId, params) {

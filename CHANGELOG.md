@@ -3,9 +3,16 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
-## Unreleased
+## 0.3.2 — 2026-08-17
 
-A compaction data-loss fix, plus documentation and comment cleanup.
+A compaction data-loss fix, a trim of the injected tool guidance, plus documentation and comment
+cleanup.
+
+- **Shorter `recall_folded` / `unfold` prompt text.** The one-line snippets no longer repeat the
+  tool name and signature Pi already prints, and the guidelines drop to three lines total: recall
+  is a fallback with `search=`/`grep=`/`lines=` slicing, rerun a narrower command rather than page
+  a broad result through recall, and unfold only what ongoing work keeps needing. Behavior is
+  unchanged; this only cuts system-prompt weight.
 
 - **Deterministic compaction no longer drops the turn it cuts through.** Pi hands
   `session_before_compact` two disjoint arrays, and removes both from live history:
