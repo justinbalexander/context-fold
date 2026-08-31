@@ -17,7 +17,7 @@ import type { WireBlock } from "../block";
 /** One recovery pointer: where a folded span's full content durably lives (spec §spans). */
 export interface IndexSpan {
 	blockId: string;
-	/** The in-context recall handle ({#code FOLDED}), when the emitter has one. */
+	/** The in-context recall handle ({#code FOLDED}). */
 	code?: string;
 	tool?: string;
 	turn: number;

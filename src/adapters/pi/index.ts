@@ -343,7 +343,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 				contextWindow: usage?.contextWindow ?? null,
 				tokens: usage?.tokens ?? null,
 			});
-			// The cast is the documented harness seam (core/block.ts): the core's structural AgentMessage
+			// The cast is the pure/effectful boundary (core/block.ts): the core's structural AgentMessage
 			// models exactly the fields the bridge reads, and Pi's real AgentMessage satisfies it.
 			updateFooter(ctx); // reflect a fold committed this turn (and the fresh trigger gauge)
 			if (dumpPath) {

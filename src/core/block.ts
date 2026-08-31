@@ -6,10 +6,10 @@
  * and the tool result that answers it are SEPARATE blocks — shown together but folded
  * independently, because their value to the agent decays at very different rates.
  *
- * This file is PURE and has ZERO harness dependencies. It models only the structural shape
- * of a provider message (`AgentMessage`) — the exact fields `linearize`/`foldOne`
- * read. A harness adapter casts its real message array to `AgentMessage[]` at the boundary;
- * that cast is the documented seam (see adapters/pi/index.ts, the `context` hook).
+ * This file is PURE: no Pi imports, no I/O. It models only the structural shape of a provider
+ * message (`AgentMessage`) — the exact fields `linearize`/`foldOne` read. The Pi adapter casts
+ * Pi's real message array to `AgentMessage[]` at this pure/effectful boundary (see
+ * adapters/pi/index.ts, the `context` hook).
  *
  * Block ids are durable and content-anchored — identical whether derived now or after the
  * message array shifts position:
@@ -72,7 +72,7 @@ export interface FoldOp {
 	digestText: string;
 }
 
-// ── Structural model of a provider message (the harness seam) ────────────────
+// ── Structural model of a provider message (the pure/effectful boundary) ────
 
 export interface TextPart {
 	type: "text";
@@ -91,8 +91,8 @@ export interface ToolCallPart {
 export type MessagePart = TextPart | ThinkingPart | ToolCallPart | { type: string; [k: string]: unknown };
 
 /**
- * The structural shape of one provider message — only the fields the bridge reads. A harness
- * adapter casts its real message array to `AgentMessage[]`; this interface is intentionally
+ * The structural shape of one provider message — only the fields the bridge reads. The Pi
+ * adapter casts Pi's message array to `AgentMessage[]`; this interface is intentionally
  * permissive so that cast is total.
  */
 export interface AgentMessage {
