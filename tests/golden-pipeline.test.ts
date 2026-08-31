@@ -22,7 +22,7 @@ const NOW = 1_722_200_000_000;
 const GOLDEN = {
 	folded: "f759c01722ab2b7eca42453c5ecaf880bbd03298feb754c2087713d3dc67cff2",
 	index: "62b44a3c2dfd2f2d5dbabccd8f11f866d2b08f13abe7b6a33ff2f4939a82cc64",
-	spool: "f7eed2cea81c962caa6cfdcd84e17a0e246529ca77f42566dfec21523284eb6c",
+	spool: "c40035e7521ebdd74372039991582adea9e1ff9a68c5048a1aa8151ddf8227aa",
 	recall: "c038b9a2ff3480f52dc72ecf0b64c574f353a3ed1ffa18c746c8fbc96ad42a36",
 };
 

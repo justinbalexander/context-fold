@@ -108,7 +108,9 @@ spool. Extraction is pure regex: same input, byte-identical output.
 - `recall_folded search=<term>`: one sweep over every folded block, with matching lines grouped by code.
   A detail lost somewhere behind N pointers costs one call, not N.
 - `recall_folded <code>`, with optional `grep=<term>` or `lines=<a-b>`: whole or partial retrieval,
-  token-capped so a recall can never re-flood what folding saved.
+  token-capped so a recall can never re-flood what folding saved. When the tool recorded its own
+  full-output file (a truncated bash result), grep and line reads answer from that file, so recall
+  reaches even the bytes truncation dropped before folding ever saw them.
 - `unfold <code>`: sticky re-expansion. The block stays expanded and is never re-masked.
 
 Recall works live, after resume, and after hard compaction: masked content resolves from the spool

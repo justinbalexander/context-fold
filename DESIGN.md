@@ -123,7 +123,10 @@ the adapter writes each masked block to
 `<sessionDir>/spool/<sessionId>/<code>.json`: a versioned, sha256-verified envelope written
 atomically, with dedup aliases for identical payloads. The frozen digest carries the authoritative
 `{#code FOLDED}` handle. `recall_folded` reads the envelope whole or through bounded grep/line
-slices, and `unfold` restores the live block on the next turn.
+slices, and `unfold` restores the live block on the next turn. The envelope also records the tool
+call's typed input and, when the persisted message's `details` name one (a truncated bash
+result), the tool's own full-output file; grep and line recalls prefer that file over the
+truncated content and fall back to the spool when it is gone.
 
 The spool and seed-index record are commit preconditions. The engine prepares a layer, the adapter
 spools and indexes every masked block, and only then does the engine freeze and apply its bytes. A

@@ -30,6 +30,7 @@ function spoolEntryFor(b: WireBlock, code: string, res: SpoolWriteResult, deps: 
 		isError: b.isError ?? false,
 		bytes: res.envelope.bytes,
 		spoolPath: deps.spool.pathFor(code),
+		fullOutputPath: b.fullOutputPath,
 		dedupOf: res.dedupOf,
 	};
 }
@@ -122,9 +123,10 @@ export function emitFoldIndex(
 				blockId: b.id,
 				code,
 				tool: b.toolName ?? b.kind,
-				input: undefined,
+				input: b.input,
 				isError: b.isError ?? false,
 				content: b.text,
+				fullOutputPath: b.fullOutputPath,
 				now: deps.now,
 			});
 		} catch (err) {
@@ -150,6 +152,7 @@ export function emitFoldIndex(
 				byteEnd: res.envelope.bytes,
 				lines: countLines(b.text),
 			},
+			fullOutputPath: b.fullOutputPath,
 		});
 		// Stage the registry entry; publish it only after the complete index record is durable.
 		newEntries.push(spoolEntryFor(b, code, res, deps));
@@ -210,9 +213,10 @@ export function spoolCompactedBlocks(
 				blockId: b.id,
 				code,
 				tool: b.toolName ?? b.kind,
-				input: undefined,
+				input: b.input,
 				isError: b.isError ?? false,
 				content: b.text,
+				fullOutputPath: b.fullOutputPath,
 				now: deps.now,
 			});
 		} catch {

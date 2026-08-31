@@ -61,6 +61,11 @@ export interface WireBlock {
 	callId?: string;
 	model?: string;
 	isError?: boolean;
+	/** tool_result only: the paired tool call's typed arguments, for the spool envelope. */
+	input?: unknown;
+	/** tool_result only: the tool's own full-output file (e.g. bash truncation), from the
+	 *  persisted message `details` — recall grep/lines prefer it over the truncated content. */
+	fullOutputPath?: string;
 	/** The block's message carries non-text parts (e.g. an image) that linearize cannot see —
 	 *  folding it would silently drop them from the view, so it is never foldable. */
 	opaque?: boolean;
@@ -102,6 +107,9 @@ export interface AgentMessage {
 	toolCallId?: string;
 	toolName?: string;
 	isError?: boolean;
+	/** toolResult only: tool-specific metadata persisted in the session JSONL (bash puts
+	 *  `fullOutputPath` here when output was truncated). */
+	details?: unknown;
 	summary?: string;
 	/** Set once at message creation; primary anchor for user/summary/assistant-fallback ids. */
 	timestamp?: number;
@@ -165,11 +173,15 @@ export function linearize(messages: AgentMessage[]): WireBlock[] {
 	let order = 0;
 	let turn = 0;
 
+	/** callId → the call's typed arguments, filled as assistant messages stream by, so the
+	 *  answering tool_result block can carry its own input. */
+	const argsByCallId = new Map<string, unknown>();
+
 	const push = (
 		id: string,
 		kind: WireBlock["kind"],
 		text: string,
-		extra: Partial<Pick<WireBlock, "toolName" | "callId" | "model" | "isError" | "opaque">> = {},
+		extra: Partial<Pick<WireBlock, "toolName" | "callId" | "model" | "isError" | "input" | "fullOutputPath" | "opaque">> = {},
 	) => {
 		if (!text && kind !== "tool_result") return; // drop empty non-results
 		out.push({ id, kind, turn, order: order++, text, tokens: tokensFor(text), ...extra });
@@ -189,6 +201,7 @@ export function linearize(messages: AgentMessage[]): WireBlock[] {
 					else if (b?.type === "text") push(blockId(m, i, j), "text", (b as TextPart).text || "", { model: m.model });
 					else if (b?.type === "toolCall") {
 						const c = b as ToolCallPart;
+						if (c.id != null && c.arguments !== undefined) argsByCallId.set(c.id, c.arguments);
 						push(blockId(m, i, j), "tool_call", `${c.name} ${JSON.stringify(c.arguments ?? {})}`, {
 							toolName: c.name,
 							callId: c.id,
@@ -200,10 +213,17 @@ export function linearize(messages: AgentMessage[]): WireBlock[] {
 			}
 			case "toolResult": {
 				const hasNonText = Array.isArray(m.content) && (m.content as any[]).some((b) => b && (b as any).type !== "text");
+				const input = m.toolCallId != null ? argsByCallId.get(m.toolCallId) : undefined;
+				const fullOutputPath =
+					m.details && typeof (m.details as { fullOutputPath?: unknown }).fullOutputPath === "string"
+						? ((m.details as { fullOutputPath: string }).fullOutputPath as string)
+						: undefined;
 				push(blockId(m, i), "tool_result", textOf(m.content), {
 					toolName: m.toolName || "tool",
 					callId: m.toolCallId,
 					isError: !!m.isError,
+					...(input !== undefined ? { input } : {}),
+					...(fullOutputPath !== undefined ? { fullOutputPath } : {}),
 					...(hasNonText ? { opaque: true } : {}),
 				});
 				break;

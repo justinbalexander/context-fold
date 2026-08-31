@@ -1,6 +1,6 @@
 # pi-api-review-followups
 
-Date: 2026-08-31   Status: draft
+Date: 2026-08-31   Status: building
 
 ## Problem
 
@@ -100,7 +100,7 @@ Agent calls, stated here:
 
 ## Slices
 
-- [ ] S1 Recall fidelity: thread typed `input` and `details.fullOutputPath` from linearize
+- [x] S1 Recall fidelity: thread typed `input` and `details.fullOutputPath` from linearize
       through spool envelopes and seed-index records; recall grep answers from the full-output
       file when present.
 - [ ] S2 Telemetry correctness: `session_compact`/`session_compact_failed` own the compaction
