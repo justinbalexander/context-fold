@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage as CoreAgentMessage } from "../../core/block";
 import { FoldLadderPolicy } from "../../core/policy/fold-ladder";
-import { ContextFoldEngine } from "./store";
+import { ContextFoldEngine, DEFAULT_CONFIG } from "./store";
 import { SeedIndexStore, emitFoldIndex, emitCompactIndex, spoolCompactedBlocks } from "./index-store";
 import { renderDetCompactionSummary } from "./compact";
 import { registerHandoffCommand } from "./handoff";
@@ -29,7 +29,8 @@ import { spoolRetainMsFromEnv, sweepSpools, sweepWorkspaceSpools, touchHeartbeat
 import { CacheTelemetry, k } from "./cache-telemetry";
 import { advise } from "./advisor";
 
-import { adapterConfigFromEnv, configFromEnv } from "./config";
+import { adapterConfigFromEnv, configFromEnv, type SavedSettings } from "./config";
+import { loadSavedSettings, runSettingsMenu, settingsReport } from "./settings";
 export { adapterConfigFromEnv, configFromEnv };
 
 export default function contextFold(pi: ExtensionAPI): void {
@@ -40,13 +41,31 @@ export default function contextFold(pi: ExtensionAPI): void {
 		process.stderr.write("[context-fold] disabled by CONTEXTFOLD=0 — no folding this session\n");
 		return;
 	}
-	const acfg = adapterConfigFromEnv();
-	const foldCfg = configFromEnv();
+	const savedSettings = loadSavedSettings();
+	const acfg = adapterConfigFromEnv(savedSettings);
+	const foldCfg = configFromEnv(savedSettings);
 	const ladderPolicy = new FoldLadderPolicy(acfg.ladder);
 
 	// Exact originals for ladder folds, shared by fold-index emission and recall.
 	const registry = new MapSpoolRegistry();
 	const engine = new ContextFoldEngine(ladderPolicy, foldCfg, registry);
+
+	// Settings-menu live apply: re-resolve the whole effective config (default < saved < env) so a
+	// cleared knob falls back correctly, then push it into the policy, the engine, and acfg. Frozen
+	// layers keep their bytes; new values steer future folds only.
+	const applySavedSettings = (saved: SavedSettings) => {
+		const a = adapterConfigFromEnv(saved);
+		acfg.ladder = a.ladder;
+		acfg.reconTokens = a.reconTokens;
+		acfg.compact = a.compact;
+		ladderPolicy.setConfig(a.ladder);
+		engine.setConfig({
+			budgetFraction: DEFAULT_CONFIG.budgetFraction,
+			absoluteTokenCap: DEFAULT_CONFIG.absoluteTokenCap,
+			tailTarget: DEFAULT_CONFIG.tailTarget,
+			...configFromEnv(saved),
+		});
+	};
 
 	const debug = process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true";
 	const dumpPath = process.env.CONTEXTFOLD_DUMP?.trim() || null;
@@ -165,7 +184,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 		// Spool GC: reap sibling session spools past the retention window. Independent
 		// of the restore below — the sweep never touches this session's dir, and the restore only
 		// judges this session's own entries.
-		const retainMs = spoolRetainMsFromEnv();
+		const retainMs = spoolRetainMsFromEnv(loadSavedSettings());
 		if (retainMs > 0) {
 			try {
 				const spoolRoot = join(ctx.sessionManager.getSessionDir(), "spool");
@@ -410,10 +429,31 @@ export default function contextFold(pi: ExtensionAPI): void {
 		spoolDirFor: (hctx) => join(hctx.sessionManager.getSessionDir(), "spool", hctx.sessionManager.getSessionId()),
 	});
 
-	// A display-only status command (no-op safe in headless mode — pure text).
+	// Bare: display-only status (no-op safe in headless mode — pure text). `config`/`settings`:
+	// the interactive knob menu (headless falls back to a plain effective-settings listing).
 	pi.registerCommand("context-fold", {
-		description: "Report context-fold status: fold position, cache health, and the reset yellow flag.",
-		handler: async (_args, cmdCtx) => {
+		description: "context-fold status; 'config' opens the settings menu.",
+		handler: async (args, cmdCtx) => {
+			const sub = (args ?? "").trim().toLowerCase();
+			if (sub === "config" || sub === "settings") {
+				const ui = cmdCtx.ui;
+				if (ui?.select && ui.input) {
+					await runSettingsMenu(
+						{
+							select: (title, options) => ui.select(title, options),
+							input: (title, placeholder) => ui.input(title, placeholder),
+							notify: (message, level) => ui.notify?.(message, level),
+						},
+						applySavedSettings,
+					);
+				} else {
+					cmdCtx.ui?.notify?.(
+						`context-fold settings (env over saved over default):\n${settingsReport(loadSavedSettings())}`,
+						"info",
+					);
+				}
+				return;
+			}
 			const s = engine.status;
 			const m = s?.metrics ?? {};
 			const state = s?.text ? s.text : "idle (under budget)";
@@ -429,6 +469,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 				// Both sides of folding, not just the savings — see CacheTelemetry.foldCostLine.
 				...(telemetry.foldCostLine() ? [telemetry.foldCostLine() as string] : []),
 				...adv.flags.map((f) => `⚑ ${f}`),
+				"tune with /context-fold config",
 			];
 			cmdCtx.ui?.notify?.(lines.join("\n"), adv.flags.length ? "warning" : "info");
 		},

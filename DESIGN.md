@@ -52,7 +52,8 @@ src/
     cache-telemetry.ts     # measured cacheRead/cacheWrite accounting
     retention.ts           # spool GC
     unfold-tool.ts         # the recall_folded / unfold tools
-    config.ts              # CONTEXTFOLD_* env parsing
+    config.ts              # the knob table: defaults < saved settings < CONTEXTFOLD_* env
+    settings.ts            # the saved-settings file and the /context-fold config menu
 ```
 
 The core speaks only its own `AgentMessage`-shaped block model and a

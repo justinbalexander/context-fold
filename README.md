@@ -126,7 +126,7 @@ cache read ≈ 0.1× input.
 - **`/context-fold` status**: fold position (usage %, the next-fold gauge), cache hit ratios, and
   flags: folds committed but not observed on the wire, a second forced compaction, irreducible
   context past half the window, cold with a large carry, and recall churn. Advisory only; nothing
-  blocks.
+  blocks. `/context-fold config` opens the settings menu (see [Configuration](#configuration)).
 - **Footer status line (TUI)**: a persistent one-line summary in Pi's footer (`⧉ context-fold ×3
   · ~41k tok masked · next fold: 3.1k/9.6k maskable · cache avg 66%`), updated as fold events fire.
   Purely visual: nothing is added to the transcript or the model's context, and headless modes are
@@ -238,6 +238,17 @@ pi install npm:context-fold
 From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 
 ## Configuration
+
+`/context-fold config` opens an interactive settings menu inside Pi: every knob below (except the
+debug seams and the kill switch) with its effective value and where it came from. Edits persist to
+`<agent dir>/context-fold.json` (normally `~/.pi/agent/context-fold.json`) and, where marked live,
+apply to the running session immediately — already-frozen folds keep their bytes; new values steer
+future folds only. Spool retention takes effect at the next session start. Headless modes print
+the effective settings instead of a menu.
+
+Precedence per knob: built-in default < saved settings file < environment variable. An env var
+keeps working exactly as before and shadows the saved value for that session; the menu flags the
+shadowing when it applies.
 
 | Var | Default | Meaning |
 |---|---|---|
