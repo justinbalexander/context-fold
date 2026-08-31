@@ -90,9 +90,9 @@ describe("yellow flags", () => {
 describe("telemetry everWarm", () => {
 	it("flips only on a real non-zero cache read", () => {
 		const t = new CacheTelemetry();
-		t.record({ input: 1000, output: 10, cacheRead: 0, cacheWrite: 1000, totalTokens: 2010 });
+		t.record({ input: 1000, cacheRead: 0, cacheWrite: 1000 });
 		expect(t.snapshot().everWarm).toBe(false);
-		t.record({ input: 50, output: 10, cacheRead: 2000, cacheWrite: 0, totalTokens: 2060 });
+		t.record({ input: 50, cacheRead: 2000, cacheWrite: 0 });
 		expect(t.snapshot().everWarm).toBe(true);
 	});
 });

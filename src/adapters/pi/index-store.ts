@@ -12,17 +12,17 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { extractIndex, buildIndexRecord, type IndexBlock, type IndexSpan, type SeedIndexRecord } from "../../core/index/seed-index";
+import { extractIndex, buildIndexRecord, type IndexSpan, type SeedIndexRecord } from "../../core/index/seed-index";
 import { foldCode, wireFoldable } from "../../core/digest";
 import { isDurableId, type WireBlock } from "../../core/block";
 import type { FoldEventReport } from "./store";
 import { SpoolError, type SpoolStore, type SpoolWriteResult } from "./spool";
-import type { SpoolEntry, SpoolRegistry } from "../../core/spool-registry";
+import type { SpoolEntry, MapSpoolRegistry } from "../../core/spool-registry";
 
 const INDEX_FILENAME = "seed-index.jsonl";
 const INDEX_HARNESS = "pi-context-fold";
 
-function spoolEntryFor(b: IndexBlock, code: string, res: SpoolWriteResult, deps: { spool: SpoolStore }): SpoolEntry {
+function spoolEntryFor(b: WireBlock, code: string, res: SpoolWriteResult, deps: { spool: SpoolStore }): SpoolEntry {
 	return {
 		blockId: b.id,
 		code,
@@ -80,7 +80,7 @@ export function emitFoldIndex(
 	event: FoldEventReport,
 	deps: {
 		spool: SpoolStore;
-		registry: SpoolRegistry;
+		registry: MapSpoolRegistry;
 		index: SeedIndexStore;
 		sessionId: string;
 		now?: number;
@@ -171,7 +171,7 @@ export function emitFoldIndex(
 		},
 		// Extraction covers only the durably spooled blocks: a dropped collider stays raw in the
 		// live view, so nothing of it is leaving history and nothing of it needs indexing.
-		extractIndex({ masked: spooled as unknown as IndexBlock[], all: event.blocks as unknown as IndexBlock[] }),
+		extractIndex({ masked: spooled, all: event.blocks }),
 		spans,
 	);
 	deps.index.append(record);
@@ -194,7 +194,7 @@ export function spoolCompactedBlocks(
 	blocks: WireBlock[],
 	deps: {
 		spool: SpoolStore;
-		registry: SpoolRegistry;
+		registry: MapSpoolRegistry;
 		now?: number;
 		/** Persist each new spool entry so the durable route survives resume. */
 		persistEntry?: (entry: SpoolEntry) => void;
@@ -234,7 +234,7 @@ export function spoolCompactedBlocks(
 export function emitCompactIndex(
 	blocks: WireBlock[],
 	deps: {
-		registry: SpoolRegistry;
+		registry: MapSpoolRegistry;
 		index: SeedIndexStore;
 		sessionId: string;
 		tokensBefore: number;
@@ -271,7 +271,7 @@ export function emitCompactIndex(
 				fraction: cw > 0 ? Math.round((deps.tokensBefore / cw) * 1000) / 1000 : 0,
 			},
 		},
-		extractIndex({ masked: masked as unknown as IndexBlock[], all: blocks as unknown as IndexBlock[] }),
+		extractIndex({ masked: masked, all: blocks }),
 		spans,
 	);
 	deps.index.append(record);

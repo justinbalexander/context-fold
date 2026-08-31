@@ -27,16 +27,8 @@ export interface SpoolEntry {
 	dedupOf?: string;
 }
 
-export interface SpoolRegistry {
-	has(blockId: string): boolean;
-	get(blockId: string): SpoolEntry | undefined;
-	set(entry: SpoolEntry): void;
-	readonly size: number;
-	entries(): IterableIterator<SpoolEntry>;
-}
-
-/** Default in-memory registry, populated on fold and rebuilt from the session ledger on resume. */
-export class MapSpoolRegistry implements SpoolRegistry {
+/** In-memory registry, populated on fold and rebuilt from the session ledger on resume. */
+export class MapSpoolRegistry {
 	private readonly byId = new Map<string, SpoolEntry>();
 
 	has(blockId: string): boolean {

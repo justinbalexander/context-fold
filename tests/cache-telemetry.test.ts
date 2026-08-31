@@ -7,8 +7,8 @@ import { CacheTelemetry } from "../src/adapters/pi/cache-telemetry";
 describe("CacheTelemetry", () => {
 	it("computes per-turn and aggregate hit ratios", () => {
 		const t = new CacheTelemetry();
-		t.record({ input: 1000, output: 50, cacheRead: 0, cacheWrite: 1000, totalTokens: 2050 });
-		t.record({ input: 100, output: 50, cacheRead: 900, cacheWrite: 100, totalTokens: 1150 });
+		t.record({ input: 1000, cacheRead: 0, cacheWrite: 1000 });
+		t.record({ input: 100, cacheRead: 900, cacheWrite: 100 });
 		const s = t.snapshot();
 		expect(s.turns).toBe(2);
 		expect(s.lastHitRatio).toBeCloseTo(0.9);
@@ -21,7 +21,7 @@ describe("CacheTelemetry", () => {
 		const t = new CacheTelemetry();
 		expect(t.snapshot().hitRatio).toBeNull();
 		expect(t.snapshot().lastHitRatio).toBeNull();
-		t.record({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 });
+		t.record({ input: 0, cacheRead: 0, cacheWrite: 0 });
 		expect(t.snapshot().lastHitRatio).toBeNull();
 		expect(t.snapshot().hitRatio).toBeNull();
 	});
@@ -36,18 +36,18 @@ describe("CacheTelemetry", () => {
 		expect(s.totals.cacheRead).toBe(0);
 	});
 
-	it("bounds the ring while totals keep accumulating", () => {
+	it("keeps only the last turn while totals keep accumulating", () => {
 		const t = new CacheTelemetry();
-		for (let i = 0; i < 75; i++) t.record({ input: 1, output: 0, cacheRead: 1, cacheWrite: 0, totalTokens: 2 });
+		for (let i = 0; i < 75; i++) t.record({ input: 1, cacheRead: i, cacheWrite: 0 });
 		const s = t.snapshot();
-		expect(s.ring.length).toBe(50);
+		expect(s.last).toEqual({ input: 1, cacheRead: 74, cacheWrite: 0 });
 		expect(s.turns).toBe(75);
 		expect(s.totals.input).toBe(75);
 	});
 
 	it("reset clears everything", () => {
 		const t = new CacheTelemetry();
-		t.record({ input: 10, output: 1, cacheRead: 5, cacheWrite: 2, totalTokens: 18 });
+		t.record({ input: 10, cacheRead: 5, cacheWrite: 2 });
 		t.reset();
 		const s = t.snapshot();
 		expect(s.turns).toBe(0);
@@ -58,7 +58,7 @@ describe("CacheTelemetry", () => {
 	it("statusLine reads sanely", () => {
 		const t = new CacheTelemetry();
 		expect(t.statusLine()).toBe("cache: no usage yet");
-		t.record({ input: 100, output: 10, cacheRead: 12_300, cacheWrite: 600, totalTokens: 13_010 });
+		t.record({ input: 100, cacheRead: 12_300, cacheWrite: 600 });
 		expect(t.statusLine()).toBe("cache read 12.3k/wr 600 (hit 99%, last 99%)");
 	});
 
@@ -67,18 +67,18 @@ describe("CacheTelemetry", () => {
 	// to exactly one turn — the first one carrying the new bytes.
 	it("attributes the post-fold turn's cacheWrite to the fold, and only that turn", () => {
 		const t = new CacheTelemetry();
-		t.record({ input: 200, output: 10, cacheRead: 40_000, cacheWrite: 300, totalTokens: 40_510 });
+		t.record({ input: 200, cacheRead: 40_000, cacheWrite: 300 });
 		expect(t.snapshot().foldEvents).toBe(0);
 		expect(t.snapshot().foldNetTokens).toBeNull();
 
 		t.noteFoldEvent(9_000);
 		// The re-prefill turn: read collapses to the surviving head, write covers the rest.
-		t.record({ input: 100, output: 10, cacheRead: 9_000, cacheWrite: 31_000, totalTokens: 40_110 });
+		t.record({ input: 100, cacheRead: 9_000, cacheWrite: 31_000 });
 		expect(t.snapshot().lastTurnAfterFold).toBe(true);
 		// Two ordinary turns after it must not add to the fold's cost.
-		t.record({ input: 100, output: 10, cacheRead: 40_000, cacheWrite: 400, totalTokens: 40_510 });
+		t.record({ input: 100, cacheRead: 40_000, cacheWrite: 400 });
 		expect(t.snapshot().lastTurnAfterFold).toBe(false);
-		t.record({ input: 100, output: 10, cacheRead: 40_400, cacheWrite: 350, totalTokens: 40_860 });
+		t.record({ input: 100, cacheRead: 40_400, cacheWrite: 350 });
 
 		const s = t.snapshot();
 		expect(s.foldEvents).toBe(1);
@@ -91,9 +91,9 @@ describe("CacheTelemetry", () => {
 	it("accumulates across fold events and survives a fold with no measured savings", () => {
 		const t = new CacheTelemetry();
 		t.noteFoldEvent(5_000);
-		t.record({ input: 0, output: 0, cacheRead: 1_000, cacheWrite: 12_000, totalTokens: 13_000 });
+		t.record({ input: 0, cacheRead: 1_000, cacheWrite: 12_000 });
 		t.noteFoldEvent(0);
-		t.record({ input: 0, output: 0, cacheRead: 1_000, cacheWrite: 8_000, totalTokens: 9_000 });
+		t.record({ input: 0, cacheRead: 1_000, cacheWrite: 8_000 });
 		const s = t.snapshot();
 		expect(s.foldEvents).toBe(2);
 		expect(s.foldSavedTokens).toBe(5_000);
@@ -104,12 +104,12 @@ describe("CacheTelemetry", () => {
 		const t = new CacheTelemetry();
 		expect(t.foldCostLine()).toBeNull();
 		t.noteFoldEvent(9_000);
-		t.record({ input: 100, output: 10, cacheRead: 9_000, cacheWrite: 31_000, totalTokens: 40_110 });
+		t.record({ input: 100, cacheRead: 9_000, cacheWrite: 31_000 });
 		expect(t.foldCostLine()).toBe("folds 1: masked 9.0k tok/turn, cost 31.0k re-prefilled · net -31.0k behind");
-		t.record({ input: 100, output: 10, cacheRead: 40_000, cacheWrite: 400, totalTokens: 40_510 });
-		t.record({ input: 100, output: 10, cacheRead: 40_400, cacheWrite: 350, totalTokens: 40_860 });
-		t.record({ input: 100, output: 10, cacheRead: 40_800, cacheWrite: 350, totalTokens: 41_260 });
-		t.record({ input: 100, output: 10, cacheRead: 41_200, cacheWrite: 350, totalTokens: 41_660 });
+		t.record({ input: 100, cacheRead: 40_000, cacheWrite: 400 });
+		t.record({ input: 100, cacheRead: 40_400, cacheWrite: 350 });
+		t.record({ input: 100, cacheRead: 40_800, cacheWrite: 350 });
+		t.record({ input: 100, cacheRead: 41_200, cacheWrite: 350 });
 		// 4 turns × 9k masked = 36k against 31k paid once.
 		expect(t.foldCostLine()).toBe("folds 1: masked 9.0k tok/turn, cost 31.0k re-prefilled · net +5.0k ahead");
 	});
@@ -120,8 +120,8 @@ describe("CacheTelemetry", () => {
 	it("reports the cost as unavailable when the provider never reports a cache write", () => {
 		const t = new CacheTelemetry();
 		t.noteFoldEvent(15_500);
-		t.record({ input: 0, output: 10, cacheRead: 7_680, cacheWrite: 0, totalTokens: 7_690 });
-		t.record({ input: 0, output: 10, cacheRead: 7_680, cacheWrite: 0, totalTokens: 7_690 });
+		t.record({ input: 0, cacheRead: 7_680, cacheWrite: 0 });
+		t.record({ input: 0, cacheRead: 7_680, cacheWrite: 0 });
 		const s = t.snapshot();
 		expect(s.writeReported).toBe(false);
 		expect(s.foldNetTokens).toBeNull();
@@ -131,10 +131,10 @@ describe("CacheTelemetry", () => {
 	it("reports a real zero cost once the provider has proven it reports writes", () => {
 		const t = new CacheTelemetry();
 		// A non-zero write anywhere in the session establishes that this dialect does report them.
-		t.record({ input: 100, output: 10, cacheRead: 0, cacheWrite: 20_000, totalTokens: 20_110 });
+		t.record({ input: 100, cacheRead: 0, cacheWrite: 20_000 });
 		t.noteFoldEvent(9_000);
-		t.record({ input: 100, output: 10, cacheRead: 20_000, cacheWrite: 0, totalTokens: 20_110 });
-		t.record({ input: 100, output: 10, cacheRead: 20_000, cacheWrite: 0, totalTokens: 20_110 });
+		t.record({ input: 100, cacheRead: 20_000, cacheWrite: 0 });
+		t.record({ input: 100, cacheRead: 20_000, cacheWrite: 0 });
 		const s = t.snapshot();
 		expect(s.writeReported).toBe(true);
 		expect(s.foldReprefillTokens).toBe(0);
@@ -147,15 +147,15 @@ describe("CacheTelemetry", () => {
 	it("keeps savings accrued before a later fold in the net", () => {
 		const t = new CacheTelemetry();
 		t.noteFoldEvent(10_000);
-		t.record({ input: 100, output: 10, cacheRead: 5_000, cacheWrite: 20_000, totalTokens: 25_110 });
+		t.record({ input: 100, cacheRead: 5_000, cacheWrite: 20_000 });
 		// Three ordinary turns bank 10k each.
 		for (let i = 0; i < 3; i++) {
-			t.record({ input: 100, output: 10, cacheRead: 25_000, cacheWrite: 300, totalTokens: 25_410 });
+			t.record({ input: 100, cacheRead: 25_000, cacheWrite: 300 });
 		}
 		t.noteFoldEvent(2_000);
-		t.record({ input: 100, output: 10, cacheRead: 10_000, cacheWrite: 8_000, totalTokens: 18_110 });
+		t.record({ input: 100, cacheRead: 10_000, cacheWrite: 8_000 });
 		// One turn after fold 2 banks the combined 12k rate.
-		t.record({ input: 100, output: 10, cacheRead: 18_000, cacheWrite: 300, totalTokens: 18_410 });
+		t.record({ input: 100, cacheRead: 18_000, cacheWrite: 300 });
 		const s = t.snapshot();
 		expect(s.foldReprefillTokens).toBe(28_000);
 		// 3 × 10k before fold 2, plus 1 × 12k after it — the earlier accrual survives.
@@ -165,7 +165,7 @@ describe("CacheTelemetry", () => {
 	it("reset clears fold accounting too", () => {
 		const t = new CacheTelemetry();
 		t.noteFoldEvent(1_000);
-		t.record({ input: 0, output: 0, cacheRead: 0, cacheWrite: 5_000, totalTokens: 5_000 });
+		t.record({ input: 0, cacheRead: 0, cacheWrite: 5_000 });
 		t.reset();
 		const s = t.snapshot();
 		expect(s.foldEvents).toBe(0);
@@ -181,52 +181,52 @@ describe("wire watchdog", () => {
 	it("flags a fold whose next turn read the whole pre-fold prompt from cache", () => {
 		const t = new CacheTelemetry();
 		// Turn N: prompt was 100k (90k cached + 10k fresh).
-		t.record({ input: 10_000, output: 100, cacheRead: 90_000, cacheWrite: 10_000, totalTokens: 100_100 });
+		t.record({ input: 10_000, cacheRead: 90_000, cacheWrite: 10_000 });
 		t.noteFoldEvent(40_000);
 		// Turn N+1 reads ≥ the full pre-fold prompt — impossible if the prefix changed on the wire.
-		t.record({ input: 5_000, output: 100, cacheRead: 100_000, cacheWrite: 5_000, totalTokens: 105_100 });
+		t.record({ input: 5_000, cacheRead: 100_000, cacheWrite: 5_000 });
 		expect(t.snapshot().wireDeferredFolds).toBe(1);
 	});
 
 	it("a fold that landed (cache read drops below the fold point) is clean", () => {
 		const t = new CacheTelemetry();
-		t.record({ input: 10_000, output: 100, cacheRead: 90_000, cacheWrite: 10_000, totalTokens: 100_100 });
+		t.record({ input: 10_000, cacheRead: 90_000, cacheWrite: 10_000 });
 		t.noteFoldEvent(40_000);
 		// Rewrite reached the wire: only the prefix before the earliest masked block is still cached.
-		t.record({ input: 2_000, output: 100, cacheRead: 55_000, cacheWrite: 7_000, totalTokens: 64_100 });
+		t.record({ input: 2_000, cacheRead: 55_000, cacheWrite: 7_000 });
 		expect(t.snapshot().wireDeferredFolds).toBe(0);
 	});
 
 	it("never false-positives on a provider that reports no cache reads at all", () => {
 		const t = new CacheTelemetry();
-		t.record({ input: 100_000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 100_100 });
+		t.record({ input: 100_000, cacheRead: 0, cacheWrite: 0 });
 		t.noteFoldEvent(40_000);
-		t.record({ input: 65_000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 65_100 });
+		t.record({ input: 65_000, cacheRead: 0, cacheWrite: 0 });
 		expect(t.snapshot().wireDeferredFolds).toBe(0);
 	});
 
 	it("judges only the first turn after the fold, and disarms after judging", () => {
 		const t = new CacheTelemetry();
-		t.record({ input: 10_000, output: 100, cacheRead: 90_000, cacheWrite: 10_000, totalTokens: 100_100 });
+		t.record({ input: 10_000, cacheRead: 90_000, cacheWrite: 10_000 });
 		t.noteFoldEvent(40_000);
-		t.record({ input: 2_000, output: 100, cacheRead: 55_000, cacheWrite: 7_000, totalTokens: 64_100 });
+		t.record({ input: 2_000, cacheRead: 55_000, cacheWrite: 7_000 });
 		// Later warm turns re-reading the (new, folded) full prompt must not retro-flag the fold.
-		t.record({ input: 1_000, output: 100, cacheRead: 120_000, cacheWrite: 0, totalTokens: 121_100 });
+		t.record({ input: 1_000, cacheRead: 120_000, cacheWrite: 0 });
 		expect(t.snapshot().wireDeferredFolds).toBe(0);
 	});
 
 	it("a first-turn fold (no prior usage to baseline against) never arms", () => {
 		const t = new CacheTelemetry();
 		t.noteFoldEvent(40_000);
-		t.record({ input: 60_000, output: 100, cacheRead: 0, cacheWrite: 60_000, totalTokens: 120_100 });
+		t.record({ input: 60_000, cacheRead: 0, cacheWrite: 60_000 });
 		expect(t.snapshot().wireDeferredFolds).toBe(0);
 	});
 
 	it("reset clears the watchdog", () => {
 		const t = new CacheTelemetry();
-		t.record({ input: 10_000, output: 100, cacheRead: 90_000, cacheWrite: 0, totalTokens: 100_100 });
+		t.record({ input: 10_000, cacheRead: 90_000, cacheWrite: 0 });
 		t.noteFoldEvent(40_000);
-		t.record({ input: 5_000, output: 100, cacheRead: 100_000, cacheWrite: 0, totalTokens: 105_100 });
+		t.record({ input: 5_000, cacheRead: 100_000, cacheWrite: 0 });
 		expect(t.snapshot().wireDeferredFolds).toBe(1);
 		t.reset();
 		expect(t.snapshot().wireDeferredFolds).toBe(0);

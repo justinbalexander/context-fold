@@ -12,19 +12,7 @@
  */
 import { ERROR_MARKER_SOURCE, errorMarkerRe } from "../policy/ledger";
 import { firstLine, safeSlice } from "../tokens";
-
-/** The structural block surface the extractor reads (WireBlock satisfies it). */
-export interface IndexBlock {
-	id: string;
-	kind: "user" | "text" | "thinking" | "tool_call" | "tool_result";
-	turn: number;
-	order: number;
-	text: string;
-	tokens: number;
-	toolName?: string;
-	callId?: string;
-	isError?: boolean;
-}
+import type { WireBlock } from "../block";
 
 /** One recovery pointer: where a folded span's full content durably lives (spec §spans). */
 export interface IndexSpan {
@@ -68,9 +56,9 @@ const SHELL_TOOLS = new Set(["bash", "shell", "sh", "cmd", "exec", "run", "termi
 
 export interface ExtractInput {
 	/** The blocks being masked by this fold event (content leaving the live view). */
-	masked: IndexBlock[];
+	masked: WireBlock[];
 	/** Every block in the session view this turn — used to pair tool_calls and find user turns. */
-	all: IndexBlock[];
+	all: WireBlock[];
 }
 
 export type ExtractedIndex = Pick<SeedIndexRecord, "files" | "commands" | "errors" | "identifiers" | "userMessages">;
@@ -86,9 +74,9 @@ export function extractIndex(input: ExtractInput): ExtractedIndex {
 	const out: ExtractedIndex = { files: [], commands: [], errors: [], identifiers: [], userMessages: [] };
 	if (masked.length === 0) return out;
 
-	const callsById = new Map<string, IndexBlock>();
+	const callsById = new Map<string, WireBlock>();
 	for (const b of all) if (b.kind === "tool_call" && b.callId) callsById.set(b.callId, b);
-	const pairedCalls: IndexBlock[] = [];
+	const pairedCalls: WireBlock[] = [];
 	for (const b of masked) {
 		if (b.kind === "tool_result" && b.callId) {
 			const call = callsById.get(b.callId);
@@ -211,7 +199,7 @@ const SYMBOL_STOPWORDS = new Set([
 // identifier slots re-listing "Error"/"FAILED" class tokens.
 const ERROR_WORD_RE = new RegExp(`^${ERROR_MARKER_SOURCE}$`);
 
-function harvestIdentifiers(blocks: IndexBlock[]): string[] {
+function harvestIdentifiers(blocks: WireBlock[]): string[] {
 	// value → [length, insertion index]; final order = longer first, then first-seen.
 	const seen = new Map<string, number>();
 	let n = 0;

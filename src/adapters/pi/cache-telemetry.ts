@@ -13,10 +13,8 @@
 
 export interface TurnUsage {
 	input: number;
-	output: number;
 	cacheRead: number;
 	cacheWrite: number;
-	totalTokens: number;
 }
 
 export interface CacheTelemetrySnapshot {
@@ -29,8 +27,6 @@ export interface CacheTelemetrySnapshot {
 	hitRatio: number | null;
 	/** Any non-zero cache read observed this session — the measured "there IS a live cache" bit. */
 	everWarm: boolean;
-	/** The retained ring, oldest first (bounded). */
-	ring: TurnUsage[];
 	/** Fold events committed this session. */
 	foldEvents: number;
 	/** Tokens the fold events removed from the per-turn view (the savings side). */
@@ -63,8 +59,6 @@ export interface CacheTelemetrySnapshot {
 	wireDeferredFolds: number;
 }
 
-const RING_LIMIT = 50;
-
 function ratio(cacheRead: number, input: number): number | null {
 	const denom = cacheRead + input;
 	return denom > 0 ? cacheRead / denom : null;
@@ -76,9 +70,9 @@ export function k(n: number): string {
 }
 
 export class CacheTelemetry {
-	private ring: TurnUsage[] = [];
+	private lastTurn: TurnUsage | null = null;
 	private turns = 0;
-	private totals: TurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+	private totals: TurnUsage = { input: 0, cacheRead: 0, cacheWrite: 0 };
 	/** Fold-event accounting. `pendingFold` arms the next recorded turn as the post-fold turn. */
 	private foldEvents = 0;
 	private foldSavedTokens = 0;
@@ -110,8 +104,7 @@ export class CacheTelemetry {
 		// observing cacheRead ≥ that size proves the rewrite was dropped or deferred downstream.
 		// Only armed when the fold masked something and a prior turn gives a non-zero baseline
 		// (a no-cache provider reports cacheRead 0 and can never false-positive against > 0).
-		const last = this.ring.length ? this.ring[this.ring.length - 1] : null;
-		const promptSize = last ? last.cacheRead + last.input : 0;
+		const promptSize = this.lastTurn ? this.lastTurn.cacheRead + this.lastTurn.input : 0;
 		if (Number.isFinite(savedTokens) && savedTokens > 0 && promptSize > 0) this.pendingWireBaseline = promptSize;
 	}
 
@@ -120,19 +113,14 @@ export class CacheTelemetry {
 		const clean = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
 		const turn: TurnUsage = {
 			input: clean(usage?.input),
-			output: clean(usage?.output),
 			cacheRead: clean(usage?.cacheRead),
 			cacheWrite: clean(usage?.cacheWrite),
-			totalTokens: clean(usage?.totalTokens),
 		};
 		this.turns += 1;
-		this.ring.push(turn);
-		if (this.ring.length > RING_LIMIT) this.ring.shift();
+		this.lastTurn = turn;
 		this.totals.input += turn.input;
-		this.totals.output += turn.output;
 		this.totals.cacheRead += turn.cacheRead;
 		this.totals.cacheWrite += turn.cacheWrite;
-		this.totals.totalTokens += turn.totalTokens;
 		this.lastTurnAfterFold = this.pendingFold;
 		if (this.pendingFold) {
 			this.foldReprefillTokens += turn.cacheWrite;
@@ -147,9 +135,9 @@ export class CacheTelemetry {
 	}
 
 	reset(): void {
-		this.ring = [];
+		this.lastTurn = null;
 		this.turns = 0;
-		this.totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+		this.totals = { input: 0, cacheRead: 0, cacheWrite: 0 };
 		this.foldEvents = 0;
 		this.foldSavedTokens = 0;
 		this.foldReprefillTokens = 0;
@@ -161,7 +149,7 @@ export class CacheTelemetry {
 	}
 
 	snapshot(): CacheTelemetrySnapshot {
-		const last = this.ring.length ? this.ring[this.ring.length - 1] : null;
+		const last = this.lastTurn;
 		return {
 			turns: this.turns,
 			last,
@@ -169,7 +157,6 @@ export class CacheTelemetry {
 			totals: { ...this.totals },
 			hitRatio: ratio(this.totals.cacheRead, this.totals.input),
 			everWarm: this.totals.cacheRead > 0,
-			ring: [...this.ring],
 			foldEvents: this.foldEvents,
 			foldSavedTokens: this.foldSavedTokens,
 			foldReprefillTokens: this.foldReprefillTokens,

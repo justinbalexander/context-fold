@@ -6,11 +6,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { linearize } from "../src/core/block";
-import { extractIndex, buildIndexRecord, type IndexBlock } from "../src/core/index/seed-index";
+import { extractIndex, buildIndexRecord } from "../src/core/index/seed-index";
+import type { WireBlock } from "../src/core/block";
 import { user, assistantWithCalls, toolResult } from "./helpers";
 
-function blocksOf(messages: Parameters<typeof linearize>[0]): IndexBlock[] {
-	return linearize(messages) as unknown as IndexBlock[];
+function blocksOf(messages: Parameters<typeof linearize>[0]): WireBlock[] {
+	return linearize(messages) as unknown as WireBlock[];
 }
 
 /** A flood with load-bearing facts buried in the middle — nowhere near head or tail. */

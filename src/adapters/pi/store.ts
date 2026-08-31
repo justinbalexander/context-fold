@@ -18,7 +18,7 @@ import { blockId, linearize, isDurableId } from "../../core/block";
 import { applyPlan } from "../../core/apply";
 import { digest, wireFoldable, foldCode, substTokens } from "../../core/digest";
 import { estTokens, safeSlice, BLOCK_OVERHEAD } from "../../core/tokens";
-import { MapSpoolRegistry, type SpoolRegistry, type SpoolEntry } from "../../core/spool-registry";
+import { MapSpoolRegistry, type SpoolEntry } from "../../core/spool-registry";
 import { readEnvelopeAt, SpoolError } from "./spool";
 import { readFileSync } from "node:fs";
 
@@ -166,7 +166,7 @@ export class ContextFoldEngine {
 	private readonly host: PolicyHost;
 
 	// Exact originals for folded blocks; recall reads the spool by entry path.
-	private readonly spools: SpoolRegistry;
+	private readonly spools: MapSpoolRegistry;
 
 	// ── recall-churn accounting (display-only; feeds the reset yellow flag) ──────────────────────
 	/** Total recall/search tool invocations this session. */
@@ -187,7 +187,7 @@ export class ContextFoldEngine {
 	 *  collision) and commits the rest. Dropped ids are held for the session. */
 	onFoldEvent: ((event: FoldEventReport) => unknown) | null = null;
 
-	constructor(policy: FoldPolicy, cfg: Partial<FoldConfig> = {}, spools: SpoolRegistry = new MapSpoolRegistry()) {
+	constructor(policy: FoldPolicy, cfg: Partial<FoldConfig> = {}, spools: MapSpoolRegistry = new MapSpoolRegistry()) {
 		this.cfg = { ...DEFAULT_CONFIG, ...cfg };
 		this.policy = policy;
 		this.spools = spools;
