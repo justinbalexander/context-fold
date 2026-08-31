@@ -1,5 +1,5 @@
 /*
- * block.ts — the harness-agnostic block model + the message↔block bridge.
+ * block.ts — the pure block model + the message↔block bridge.
  *
  * The atomic unit is a BLOCK: a typed slice of a single message. One assistant message
  * explodes into several blocks (its thinking, its reply text, each tool call). A tool call

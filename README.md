@@ -3,8 +3,7 @@
 Deterministic, reversible context compaction for the [Pi coding agent](https://github.com/earendil-works/pi).
 Long agentic sessions stay under budget by folding stale content (mostly long chains of tool
 calls) out of the model's view. Every fold is reversible, indexed, and computed without a model
-call. The core is written to be harness-agnostic and can be adapted to other coding harnesses with
-some work.
+call. Built for Pi and supported on Pi only.
 
 **Requirements:** Node ≥ 22.19.0 and Pi ≥ 0.80.4.
 

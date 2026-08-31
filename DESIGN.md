@@ -29,7 +29,7 @@ The session file is never modified.
 
 ```
 src/
-  core/                    # No Pi dependencies; adaptable to any harness
+  core/                    # No Pi dependencies, no clock/randomness/I/O — pure and testable
     tokens.ts              # estTokens = ceil(len/4), BLOCK_OVERHEAD, clip, firstLine, safeSlice
     digest.ts              # the {#code FOLDED} tag, foldCode (FNV-1a), per-kind digests
     contract.ts            # PolicyView / FoldCommand / ViewBlock
@@ -58,8 +58,9 @@ src/
 
 The core speaks only its own `AgentMessage`-shaped block model and a
 `conduct(view) → FoldCommand[]` policy interface. The Pi adapter converts Pi's `AgentMessage[]`
-to and from core blocks and owns every Pi API call. An adapter for another harness implements the
-same conversion against that tool's hooks, and the core is untouched.
+to and from core blocks and owns every Pi API call. The split is a pure/effectful boundary, not a
+porting seam: context-fold serves Pi only (ADR 0001), and the core stays free of clock,
+randomness, and I/O because that is what keeps deterministic, reversible folding testable.
 
 **Policy/mechanism split:** `policy/fold-ladder.ts` is the policy and decides what and when to
 fold. `apply.ts` is the mechanism. It performs the rewrite and has no opinion about timing.

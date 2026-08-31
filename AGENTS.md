@@ -22,12 +22,13 @@ disposition per block, frozen-layer immutability). Read it before touching fold 
 
 ## Layout
 
-- `src/core/`: harness-agnostic. The block model, digests, the fold ladder policy, seed-index
+- `src/core/`: pure. The block model, digests, the fold ladder policy, seed-index
   extraction. No Pi imports belong here.
 - `src/adapters/pi/`: every Pi API call and all disk I/O, meaning hooks, tools, the spool,
   persistence, telemetry.
 
-Porting to another harness means writing a second adapter rather than editing the core.
+context-fold serves Pi only (`docs/adr/0001-pi-only.md`). The split survives as a pure/effectful
+boundary: keeping the core free of effects is what keeps deterministic folding testable.
 
 ## Build and test
 
