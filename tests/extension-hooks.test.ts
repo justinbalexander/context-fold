@@ -10,7 +10,7 @@
  * injects at runtime — see vitest.config.ts).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { user, assistantText, assistantWithCalls, bigResult, toolResult } from "./helpers";
@@ -55,6 +55,7 @@ const ENV_KEYS = [
 	"CONTEXTFOLD_TAIL",
 	"CONTEXTFOLD_L0",
 	"CONTEXTFOLD_L0_THRESHOLD",
+	"PI_CODING_AGENT_DIR",
 ];
 
 beforeEach(() => {
@@ -219,6 +220,46 @@ describe.skipIf(!PI_PRESENT)("session_start hook", () => {
 
 		const res = await s.tools.get("recall_folded")!.execute("t1", { codes: [code] });
 		expect(res.content.map((c) => c.text).join("")).toContain("no folded block with that code");
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("/context-fold config command", () => {
+	it("a menu edit persists under the agent dir and live-applies (compact → native declines det compaction)", async () => {
+		delete process.env.CONTEXTFOLD_COMPACT;
+		process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+
+		const steps: (string | undefined)[] = ["Hard compaction", "native", "Done"];
+		const cmdCtx = {
+			...ctx,
+			ui: {
+				select: async (_t: string, opts: string[]) => {
+					const want = steps.shift();
+					return want === undefined ? undefined : opts.find((o) => o.startsWith(want));
+				},
+				input: async () => steps.shift(),
+				notify: () => {},
+			},
+		};
+		await s.commands.get("context-fold")!.handler("config", cmdCtx);
+
+		const file = join(dir, "agent", "context-fold.json");
+		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ compact: "native" });
+		const out = await s.hooks.get("session_before_compact")!(
+			{ preparation: { messagesToSummarize: heavySession(), turnPrefixMessages: [], tokensBefore: 40_000, firstKeptEntryId: "e9" } },
+			ctx,
+		);
+		expect(out).toBeUndefined();
+	});
+
+	it("without interactive UI the command prints the effective settings instead", async () => {
+		process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
+		const s = await load();
+		const { ctx, notices } = ctxFor();
+		await s.commands.get("context-fold")!.handler("config", ctx as never);
+		expect(notices.join("\n")).toContain("context-fold settings");
+		expect(notices.join("\n")).toContain("Fold threshold: 0.45");
 	});
 });
 
