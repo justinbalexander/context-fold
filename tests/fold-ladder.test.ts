@@ -65,6 +65,17 @@ describe("discrete fold events", () => {
 		expect(committed.length).toBe(0);
 	});
 
+	it("setConfig lowers the threshold live: the same view that stayed raw now folds", () => {
+		const { e, policy, committed } = ladderEngine();
+		const { messages } = session(3); // ~15k live → ~0.19 of an 80k window
+		expect(e.process(messages, { contextWindow: 80_000, tokens: null })).toBe(messages);
+		expect(committed.length).toBe(0);
+
+		policy.setConfig({ ...LADDER_DEFAULTS, foldAt: 0.1, coldFoldAt: 0.1 });
+		e.process(messages, { contextWindow: 80_000, tokens: null });
+		expect(committed.length).toBe(1);
+	});
+
 	it("crossing the threshold fires ONE fold event: observations mask, intent and actions stay", () => {
 		const { e, committed, events } = ladderEngine();
 		const { messages, callIds } = session(8); // ~39k live

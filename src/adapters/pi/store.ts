@@ -199,6 +199,11 @@ export class ContextFoldEngine {
 		this.policy.attach?.(this.host);
 	}
 
+	/** Live-apply seam (settings menu): budget knobs change for future turns; frozen layers keep their bytes. */
+	setConfig(partial: Partial<FoldConfig>): void {
+		Object.assign(this.cfg, partial);
+	}
+
 	get status() {
 		return this.lastStatus;
 	}

@@ -29,6 +29,13 @@ describe("absolute budget cap", () => {
 		expect(engine().viewFor(msgs, null).budget).toBe(150_000);
 	});
 
+	it("setConfig re-frames the budget live: 200k × 0.5 = 100k on the next view", () => {
+		const e = engine();
+		expect(e.viewFor(msgs, 200_000).budget).toBe(150_000);
+		e.setConfig({ budgetFraction: 0.5 });
+		expect(e.viewFor(msgs, 200_000).budget).toBe(100_000);
+	});
+
 	it("cap 0 disables the ceiling entirely", () => {
 		expect(engine({ absoluteTokenCap: 0 }).viewFor(msgs, 1_000_000).budget).toBe(750_000);
 	});

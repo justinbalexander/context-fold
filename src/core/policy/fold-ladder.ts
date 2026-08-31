@@ -47,7 +47,12 @@ export class FoldLadderPolicy implements FoldPolicy {
 	/** No live cache read observed yet (adapter feeds this from measured telemetry each turn). */
 	private cold = false;
 
-	constructor(private readonly cfg: LadderConfig = LADDER_DEFAULTS) {}
+	constructor(private cfg: LadderConfig = LADDER_DEFAULTS) {}
+
+	/** Live-apply seam (settings menu): new thresholds steer future fold decisions only. */
+	setConfig(cfg: LadderConfig): void {
+		this.cfg = cfg;
+	}
 
 	attach(host: PolicyHost): void {
 		this.host = host;
