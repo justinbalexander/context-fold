@@ -19,26 +19,16 @@
 /** The block kinds, mirrored here so this contract has zero engine dependency. */
 export type PolicyBlockKind = "user" | "text" | "thinking" | "tool_call" | "tool_result";
 
-/** JSON-shaped telemetry payloads a policy may attach to display-only status. */
-export type JSONValue = null | boolean | number | string | JSONValue[] | { [key: string]: JSONValue };
-
 /** One block as the policy sees it — pure serializable data. */
 export interface ViewBlock {
 	id: string;
 	kind: PolicyBlockKind;
-	turn: number;
-	order: number;
 	/** Token cost at full fidelity. */
 	tokens: number;
 	/** Token cost if folded — digest size for a foldable kind, full tokens for a non-foldable kind. */
 	foldedTokens: number;
-	toolName?: string;
-	callId?: string;
-	isError?: boolean;
 	/** The agent unfolded this block; it is protected from re-folding for the rest of the session. */
 	held: boolean;
-	/** Currently rendered folded in the view. */
-	folded: boolean;
 	/**
 	 * Frozen by a committed prefix-stable layer: this block's substitution bytes are fixed for the
 	 * session (they extend the byte-stable head that keeps the provider's prompt cache warm).
@@ -47,8 +37,6 @@ export interface ViewBlock {
 	frozen?: boolean;
 	/** Inside the protected working tail — the newest blocks, never folded. */
 	protected: boolean;
-	/** Full content. */
-	text?: string;
 }
 
 /**
@@ -68,10 +56,6 @@ export interface PolicyView {
 	reportedTokens?: number;
 	/** The real model-window threshold corresponding to `budgetFraction`. */
 	reportedBudget?: number;
-	/** Index of the first block in the protected working tail. `blocks.length` ⇒ no tail. */
-	protectedFromIndex: number;
-	/** The protected-tail token target driving `protectedFromIndex`. */
-	protectTokens: number;
 }
 
 /**
@@ -92,7 +76,7 @@ export interface FoldCommand {
 /** Engine services available to a policy. */
 export interface PolicyHost {
 	/** Surface display-only status to the human; `null` clears the message. */
-	setStatus(text: string | null, metrics?: Record<string, number | string | boolean>, details?: JSONValue): void;
+	setStatus(text: string | null, metrics?: Record<string, number | string | boolean>): void;
 }
 
 /**

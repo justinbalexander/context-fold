@@ -11,7 +11,7 @@
  * That state is persisted separately as an event-sourced ledger (persistence.ts) so it survives
  * resume.
  */
-import type { FoldCommand, PolicyHost, PolicyView, JSONValue, ViewBlock } from "../../core/contract";
+import type { FoldCommand, PolicyHost, PolicyView, ViewBlock } from "../../core/contract";
 import type { FoldPolicy } from "../../core/contract";
 import type { AgentMessage, FoldOp, WireBlock } from "../../core/block";
 import { blockId, linearize, isDurableId } from "../../core/block";
@@ -161,7 +161,7 @@ export class ContextFoldEngine {
 	 *  this the full risk-line regex sweep re-runs over every foldable block on every model call. */
 	private readonly detCache = new Map<string, { len: number; digest: string; tokens: number }>();
 	/** Last status the policy published (display-only). */
-	private lastStatus: { text: string | null; metrics?: Record<string, number | string | boolean>; details?: JSONValue } | null = null;
+	private lastStatus: { text: string | null; metrics?: Record<string, number | string | boolean> } | null = null;
 
 	private readonly host: PolicyHost;
 
@@ -192,8 +192,8 @@ export class ContextFoldEngine {
 		this.policy = policy;
 		this.spools = spools;
 		this.host = {
-			setStatus: (text, metrics, details) => {
-				this.lastStatus = { text, metrics, details };
+			setStatus: (text, metrics) => {
+				this.lastStatus = { text, metrics };
 			},
 		};
 		this.policy.attach?.(this.host);
@@ -618,18 +618,11 @@ export class ContextFoldEngine {
 			return {
 				id: b.id,
 				kind: b.kind,
-				turn: b.turn,
-				order: b.order,
 				tokens: b.tokens,
 				foldedTokens,
-				toolName: b.toolName,
-				callId: b.callId,
-				isError: b.isError,
 				held: this.unfolded.has(b.id) || firstDelivery.has(b.id) || this.spoolRejected.has(b.id),
-				folded: frozen,
 				frozen,
 				protected: i >= protectFrom,
-				text: b.text,
 			};
 		});
 		return {
@@ -639,8 +632,6 @@ export class ContextFoldEngine {
 			liveTokens,
 			reportedTokens: reportedTokens ?? undefined,
 			reportedBudget: reportedTokens === null ? undefined : budget,
-			protectedFromIndex: protectFrom,
-			protectTokens: tailTarget,
 		};
 	}
 
