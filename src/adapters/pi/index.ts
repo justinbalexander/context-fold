@@ -120,7 +120,8 @@ export default function contextFold(pi: ExtensionAPI): void {
 		if (!setStatus) return;
 		const s = telemetry.snapshot();
 		const parts = [
-			s.foldEvents === 0 ? "⧉ context-fold idle" : `⧉ context-fold ×${s.foldEvents} · ~${k(s.foldSavedTokens)} tok masked`,
+			// The footer labels this line with the extension key, so the text stays name-free.
+			s.foldEvents === 0 ? "⧉ idle" : `⧉ ×${s.foldEvents} · ~${k(s.foldSavedTokens)} tok masked`,
 		];
 		const gauge = foldGauge(engine.status?.metrics ?? {});
 		if (gauge) parts.push(gauge);
