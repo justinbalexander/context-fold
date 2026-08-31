@@ -136,5 +136,7 @@ describe("saved settings flow into the config builders", () => {
 	it("spoolRetainMsFromEnv honors the saved value under no env", () => {
 		setEnv("CONTEXTFOLD_SPOOL_RETAIN_DAYS", undefined);
 		expect(spoolRetainMsFromEnv(savedCfg)).toBe(2 * 86_400_000);
+		// The documented default, as a literal: one day.
+		expect(spoolRetainMsFromEnv()).toBe(86_400_000);
 	});
 });

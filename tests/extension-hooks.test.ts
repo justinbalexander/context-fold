@@ -233,6 +233,7 @@ describe.skipIf(!PI_PRESENT)("/context-fold config command", () => {
 		const steps: (string | undefined)[] = ["Hard compaction", "native", "Done"];
 		const cmdCtx = {
 			...ctx,
+			hasUI: true,
 			ui: {
 				select: async (_t: string, opts: string[]) => {
 					const want = steps.shift();
@@ -253,11 +254,17 @@ describe.skipIf(!PI_PRESENT)("/context-fold config command", () => {
 		expect(out).toBeUndefined();
 	});
 
-	it("without interactive UI the command prints the effective settings instead", async () => {
+	it("without interactive UI (hasUI false, dialogs stubbed) the command prints the effective settings instead", async () => {
 		process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
 		const s = await load();
 		const { ctx, notices } = ctxFor();
-		await s.commands.get("context-fold")!.handler("config", ctx as never);
+		// Headless Pi still defines select/input; they just answer undefined. hasUI is what gates.
+		const headless = {
+			...ctx,
+			hasUI: false,
+			ui: { ...ctx.ui, select: async () => undefined, input: async () => undefined },
+		};
+		await s.commands.get("context-fold")!.handler("config", headless as never);
 		expect(notices.join("\n")).toContain("context-fold settings");
 		expect(notices.join("\n")).toContain("Fold threshold: 0.45");
 	});

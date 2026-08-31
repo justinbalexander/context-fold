@@ -437,15 +437,24 @@ export default function contextFold(pi: ExtensionAPI): void {
 			const sub = (args ?? "").trim().toLowerCase();
 			if (sub === "config" || sub === "settings") {
 				const ui = cmdCtx.ui;
-				if (ui?.select && ui.input) {
-					await runSettingsMenu(
-						{
-							select: (title, options) => ui.select(title, options),
-							input: (title, placeholder) => ui.input(title, placeholder),
-							notify: (message, level) => ui.notify?.(message, level),
-						},
-						applySavedSettings,
-					);
+				// Headless ui.select is a stub that answers undefined, so gate on hasUI rather than
+				// method presence; fail-open — a bad settings write costs a notice, never the command.
+				if (cmdCtx.hasUI && ui?.select && ui.input) {
+					try {
+						await runSettingsMenu(
+							{
+								select: (title, options) => ui.select(title, options),
+								input: (title, placeholder) => ui.input(title, placeholder),
+								notify: (message, level) => ui.notify?.(message, level),
+							},
+							applySavedSettings,
+						);
+					} catch (err) {
+						ui.notify?.(
+							`context-fold settings error (nothing else affected): ${err instanceof Error ? err.message : String(err)}`,
+							"error",
+						);
+					}
 				} else {
 					cmdCtx.ui?.notify?.(
 						`context-fold settings (env over saved over default):\n${settingsReport(loadSavedSettings())}`,

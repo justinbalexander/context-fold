@@ -7,7 +7,7 @@
  * degrades to defaults instead of breaking a session. Env vars stay a per-session override on
  * top of whatever is saved; the menu flags that shadowing rather than hiding it.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -35,9 +35,12 @@ export function loadSavedSettings(path = settingsFilePath()): SavedSettings {
 	}
 }
 
+/** Atomic replace (temp file + rename) so a concurrent reader never sees a truncated file. */
 function writeSettings(saved: SavedSettings, path: string): void {
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(saved, null, "\t")}\n`);
+	const tmp = `${path}.${process.pid}.tmp`;
+	writeFileSync(tmp, `${JSON.stringify(saved, null, "\t")}\n`);
+	renameSync(tmp, path);
 }
 
 export function writeSavedSetting(key: KnobKey, value: KnobValue, path = settingsFilePath()): void {
