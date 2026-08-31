@@ -24,12 +24,14 @@
  */
 import { existsSync, readdirSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync, type Dirent } from "node:fs";
 import { join, resolve } from "node:path";
+import { knob, resolveKnob, type SavedSettings } from "./config";
 
-/** Default retention window: 24 hours. A spool is a working artifact for the session that made it
- *  (plus a same-day resume), not an archive — Pi's session JSONL keeps the raw payload forever,
- *  so a reaped spool loses only the recall-optimized copy. Reviving genuinely stale sessions is
- *  not a supported workflow; raise CONTEXTFOLD_SPOOL_RETAIN_DAYS if a machine needs one. */
-export const SPOOL_RETAIN_DAYS_DEFAULT = 1;
+/** Default retention window: 24 hours (the `spoolRetainDays` knob). A spool is a working artifact
+ *  for the session that made it (plus a same-day resume), not an archive — Pi's session JSONL
+ *  keeps the raw payload forever, so a reaped spool loses only the recall-optimized copy.
+ *  Reviving genuinely stale sessions is not a supported workflow; raise the retention on a
+ *  machine that needs one. */
+export const SPOOL_RETAIN_DAYS_DEFAULT = knob("spoolRetainDays").def as number;
 const DAY_MS = 86_400_000;
 
 /** Liveness marker refreshed by a running session; counts as a normal file to the sweep. */
@@ -77,15 +79,11 @@ export function resetHeartbeatThrottle(): void {
 }
 
 /**
- * Resolve CONTEXTFOLD_SPOOL_RETAIN_DAYS to a retention window in ms. `0`/`off`/`false` disables
- * GC entirely (returns 0); unset or unparsable → the default.
+ * Resolve the spool retention window in ms (env over saved settings over default, via the knob
+ * table). `0`/`off`/`false` disables GC entirely (returns 0); unset or unparsable → the default.
  */
-export function spoolRetainMsFromEnv(): number {
-	const raw = process.env.CONTEXTFOLD_SPOOL_RETAIN_DAYS?.trim().toLowerCase();
-	if (raw === "0" || raw === "off" || raw === "false") return 0;
-	const n = Number(raw);
-	const days = raw && Number.isFinite(n) && n > 0 ? n : SPOOL_RETAIN_DAYS_DEFAULT;
-	return days * DAY_MS;
+export function spoolRetainMsFromEnv(saved: SavedSettings = {}): number {
+	return (resolveKnob(knob("spoolRetainDays"), saved).value as number) * DAY_MS;
 }
 
 export interface SweepResult {
