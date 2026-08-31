@@ -23,7 +23,7 @@ import { categorize } from "./policy/ledger";
  * result) and a `user` block (intent) is never folded. ONLY these kinds get a `{#code FOLDED}`
  * tag — so the agent is never shown a handle for a block it can't actually unfold.
  */
-export const FOLDABLE_KINDS: ReadonlySet<BlockKind> = new Set<BlockKind>(["text", "thinking", "tool_result"]);
+const FOLDABLE_KINDS: ReadonlySet<BlockKind> = new Set<BlockKind>(["text", "thinking", "tool_result"]);
 
 /**
  * The ONE foldability predicate, shared by the view and the wire: a block may be folded iff its
@@ -136,7 +136,7 @@ function lineRisk(line: string): { risk: boolean; error: boolean } {
  * Collect the verbatim lines of `text` that carry a risk flag, deduped, errors first, then other
  * risk lines — capped by both line count and total characters.
  */
-export function collectRiskLines(text: string, opts: { maxLines: number; maxChars: number }): string[] {
+function collectRiskLines(text: string, opts: { maxLines: number; maxChars: number }): string[] {
 	const errors: string[] = [];
 	const others: string[] = [];
 	const seen = new Set<string>();

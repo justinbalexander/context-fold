@@ -48,11 +48,9 @@ function spoolOne(content: string, callId = "c1", fullOutputPath?: string): { re
 	registry.set({
 		blockId,
 		code,
-		fullTokens: written.envelope.estTokens + 4,
 		tool: "read",
 		isError: false,
 		bytes: written.envelope.bytes,
-		fullEstTokens: written.envelope.estTokens,
 		spoolPath: store.pathFor(code),
 		fullOutputPath,
 	});
@@ -91,7 +89,7 @@ describe("spool recall — byte integrity within the re-flood cap", () => {
 			const code = foldCode(blockId);
 			const content = floodWith(`BURIED marker unique ${i} value ${i * 111}`);
 			const written = store.write({ blockId, code, tool: "read", input: undefined, isError: false, content });
-			registry.set({ blockId, code, fullTokens: written.envelope.estTokens + 4, tool: "read", isError: false, bytes: written.envelope.bytes, fullEstTokens: written.envelope.estTokens, spoolPath: store.pathFor(code) });
+			registry.set({ blockId, code, tool: "read", isError: false, bytes: written.envelope.bytes, spoolPath: store.pathFor(code) });
 			contents[code] = content;
 		}
 		const { matches } = engineWith(registry).resolveRecall(Object.keys(contents));

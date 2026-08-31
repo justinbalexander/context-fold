@@ -62,11 +62,9 @@ function spoolEntry(store: SpoolStore, callId: string, content: string): SpoolEn
 	return {
 		blockId,
 		code,
-		fullTokens: written.envelope.estTokens + 4,
 		tool: "read",
 		isError: false,
 		bytes: written.envelope.bytes,
-		fullEstTokens: written.envelope.estTokens,
 		spoolPath: store.pathFor(code),
 	};
 }
@@ -74,8 +72,8 @@ function spoolEntry(store: SpoolStore, callId: string, content: string): SpoolEn
 describe("fold ledger round-trip", () => {
 	it("restores current spool records, unfolds, and legacy gate records", () => {
 		const ledger = new FakeLedger();
-		const first = { blockId: "r:c1", code: "aaa", fullTokens: 100, tool: "read", isError: false, bytes: 1, fullEstTokens: 90, spoolPath: "/x/aaa.json" };
-		const second = { blockId: "r:c2", code: "bbb", fullTokens: 200, tool: "read", isError: false, bytes: 2, fullEstTokens: 180, spoolPath: "/x/bbb.json" };
+		const first = { blockId: "r:c1", code: "aaa", tool: "read", isError: false, bytes: 1, spoolPath: "/x/aaa.json" };
+		const second = { blockId: "r:c2", code: "bbb", tool: "read", isError: false, bytes: 2, spoolPath: "/x/bbb.json" };
 		recordSpoolEntry(ledger, first);
 		ledger.appendEntry(FOLD_CUSTOM_TYPE, { kind: "gate", entry: second });
 		recordUnfold(ledger, ["r:c1"]);

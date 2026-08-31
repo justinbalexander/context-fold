@@ -224,8 +224,13 @@ export function configFromEnv(saved: SavedSettings = {}): Partial<FoldConfig> {
 	if (cap.source !== "default") cfg.absoluteTokenCap = cap.value as number;
 	const tail = resolveKnob(knob("tail"), saved);
 	if (tail.source !== "default") cfg.tailTarget = tail.value as number;
-	if (process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true") cfg.debug = true;
+	if (debugEnabled()) cfg.debug = true;
 	return cfg;
+}
+
+/** One spelling of the debug switch for both the engine config and adapter diagnostics. */
+export function debugEnabled(): boolean {
+	return process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true";
 }
 
 export function adapterConfigFromEnv(saved: SavedSettings = {}): AdapterConfig {

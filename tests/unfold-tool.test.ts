@@ -39,11 +39,9 @@ function spoolBacked(): { tools: Map<string, StubTool>; code: string } {
 	registry.set({
 		blockId,
 		code,
-		fullTokens: written.envelope.estTokens + 4,
 		tool: "read",
 		isError: false,
 		bytes: written.envelope.bytes,
-		fullEstTokens: written.envelope.estTokens,
 		spoolPath: store.pathFor(code),
 	});
 

@@ -96,11 +96,8 @@ export class FoldLadderPolicy implements FoldPolicy {
 			{
 				fold_event: true,
 				trigger,
-				folds: eligible.length,
 				tokens_saved: savings,
 				live_tokens: projected,
-				budget: view.budget,
-				cap: view.budget,
 				usage_fraction: round3(fraction),
 				fold_at: round3(foldAt),
 				// Post-fold position: every eligible block is in this command, so nothing maskable
@@ -125,8 +122,6 @@ export class FoldLadderPolicy implements FoldPolicy {
 			maskable_tokens: savings,
 			step_tokens: stepTokens,
 			live_tokens: view.liveTokens,
-			budget: view.budget,
-			cap: view.budget,
 			over_budget: false,
 			irreducible_floor: irreducibleFloor(view.blocks),
 		});
@@ -142,8 +137,6 @@ export class FoldLadderPolicy implements FoldPolicy {
 				maskable_tokens: 0,
 				step_tokens: stepTokens,
 				live_tokens: view.liveTokens,
-				budget: view.budget,
-				cap: view.budget,
 				over_budget: overCap,
 				irreducible_floor: irreducibleFloor(view.blocks),
 			},

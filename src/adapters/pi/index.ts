@@ -29,9 +29,8 @@ import { spoolRetainMsFromEnv, sweepSpools, sweepWorkspaceSpools, touchHeartbeat
 import { CacheTelemetry, k } from "./cache-telemetry";
 import { advise } from "./advisor";
 
-import { adapterConfigFromEnv, configFromEnv, type SavedSettings } from "./config";
+import { adapterConfigFromEnv, configFromEnv, debugEnabled, type SavedSettings } from "./config";
 import { loadSavedSettings, runSettingsMenu, settingsReport } from "./settings";
-export { adapterConfigFromEnv, configFromEnv };
 
 export default function contextFold(pi: ExtensionAPI): void {
 	// MASTER kill switch: CONTEXTFOLD=0/off/false disables the whole extension — no hooks, no
@@ -67,7 +66,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 		});
 	};
 
-	const debug = process.env.CONTEXTFOLD_DEBUG === "1" || process.env.CONTEXTFOLD_DEBUG === "true";
+	const debug = debugEnabled();
 	const dumpPath = process.env.CONTEXTFOLD_DUMP?.trim() || null;
 	const telemetry = new CacheTelemetry();
 	engine.onLayerCommit = (layer) => {

@@ -13,16 +13,12 @@ export interface SpoolEntry {
 	blockId: string;
 	/** The 6-char fold code (= foldCode(blockId)); the pointer's {#code FOLDED} handle. */
 	code: string;
-	/** Full-fidelity token weight, retained for backward-compatible session records. */
-	fullTokens: number;
 	tool: string;
 	/** Original tool arguments when available in a legacy spool record. */
 	input?: unknown;
 	isError: boolean;
 	/** Byte length of the full spooled content. */
 	bytes: number;
-	/** Estimated tokens in the full spooled content. */
-	fullEstTokens: number;
 	/** Absolute spool file path. */
 	spoolPath: string;
 	/** A tool-owned full-output file, when an older record supplied one. */

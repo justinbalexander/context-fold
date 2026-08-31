@@ -14,14 +14,25 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { extractIndex, buildIndexRecord, type IndexBlock, type IndexSpan, type SeedIndexRecord } from "../../core/index/seed-index";
 import { foldCode, wireFoldable } from "../../core/digest";
-import { BLOCK_OVERHEAD } from "../../core/tokens";
 import { isDurableId, type WireBlock } from "../../core/block";
 import type { FoldEventReport } from "./store";
 import { SpoolError, type SpoolStore, type SpoolWriteResult } from "./spool";
 import type { SpoolEntry, SpoolRegistry } from "../../core/spool-registry";
 
-export const INDEX_FILENAME = "seed-index.jsonl";
-export const INDEX_HARNESS = "pi-context-fold";
+const INDEX_FILENAME = "seed-index.jsonl";
+const INDEX_HARNESS = "pi-context-fold";
+
+function spoolEntryFor(b: IndexBlock, code: string, res: SpoolWriteResult, deps: { spool: SpoolStore }): SpoolEntry {
+	return {
+		blockId: b.id,
+		code,
+		tool: b.toolName ?? b.kind,
+		isError: b.isError ?? false,
+		bytes: res.envelope.bytes,
+		spoolPath: deps.spool.pathFor(code),
+		dedupOf: res.dedupOf,
+	};
+}
 
 export class SeedIndexStore {
 	private ensured = false;
@@ -141,19 +152,7 @@ export function emitFoldIndex(
 			},
 		});
 		// Stage the registry entry; publish it only after the complete index record is durable.
-		const entry: SpoolEntry = {
-			blockId: b.id,
-			code,
-			fullTokens: b.tokens + BLOCK_OVERHEAD,
-			tool: b.toolName ?? b.kind,
-			input: undefined,
-			isError: b.isError ?? false,
-			bytes: res.envelope.bytes,
-			fullEstTokens: res.envelope.estTokens,
-			spoolPath: deps.spool.pathFor(code),
-			dedupOf: res.dedupOf,
-		};
-		newEntries.push(entry);
+		newEntries.push(spoolEntryFor(b, code, res, deps));
 		spooled.push(b);
 	}
 
@@ -219,18 +218,7 @@ export function spoolCompactedBlocks(
 		} catch {
 			continue;
 		}
-		const entry: SpoolEntry = {
-			blockId: b.id,
-			code,
-			fullTokens: b.tokens + BLOCK_OVERHEAD,
-			tool: b.toolName ?? b.kind,
-			input: undefined,
-			isError: b.isError ?? false,
-			bytes: res.envelope.bytes,
-			fullEstTokens: res.envelope.estTokens,
-			spoolPath: deps.spool.pathFor(code),
-			dedupOf: res.dedupOf,
-		};
+		const entry = spoolEntryFor(b, code, res, deps);
 		deps.persistEntry?.(entry);
 		deps.registry.set(entry);
 		added.push(entry);

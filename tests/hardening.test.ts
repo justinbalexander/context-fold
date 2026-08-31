@@ -133,7 +133,7 @@ describe("recall lines= is capped (no re-flood path)", () => {
 		const store = new SpoolStore(dir);
 		const code = foldCode("r:cL");
 		const written = store.write({ blockId: "r:cL", code, tool: "read", input: undefined, isError: false, content: flood });
-		reg.set({ blockId: "r:cL", code, fullTokens: 10_000, tool: "read", isError: false, bytes: written.envelope.bytes, fullEstTokens: written.envelope.estTokens, spoolPath: store.pathFor(code) });
+		reg.set({ blockId: "r:cL", code, tool: "read", isError: false, bytes: written.envelope.bytes, spoolPath: store.pathFor(code) });
 		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg);
 
 		const { matches } = engine.resolveRecall([code], { lines: "1-999999" });

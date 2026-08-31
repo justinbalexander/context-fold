@@ -40,11 +40,9 @@ function setup() {
 	registry.set({
 		blockId,
 		code,
-		fullTokens: written.envelope.estTokens + 4,
 		tool: "exec",
 		isError: false,
 		bytes: written.envelope.bytes,
-		fullEstTokens: written.envelope.estTokens,
 		spoolPath: spool.pathFor(code),
 	});
 	const messages: AgentMessage[] = [
