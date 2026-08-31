@@ -32,7 +32,6 @@ function foldOne(m: AgentMessage, i: number, byId: Map<string, FoldOp>, mark: ()
 				parts ??= (m.content as any[]).slice();
 				parts[j] = { ...b, thinking: op.digestText };
 			}
-			// tool_call or any other kind → ignored (never fold / id mis-map)
 		});
 		if (parts) {
 			mark();
@@ -48,7 +47,7 @@ function foldOne(m: AgentMessage, i: number, byId: Map<string, FoldOp>, mark: ()
 		}
 		return m;
 	}
-	return m; // user / other: never folded
+	return m;
 }
 
 /** The foldable positions' ids for one message — the exact set foldOne would look up. */

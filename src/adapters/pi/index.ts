@@ -440,17 +440,23 @@ export default function contextFold(pi: ExtensionAPI): void {
 				// Headless ui.select is a stub that answers undefined, so gate on hasUI rather than
 				// method presence; fail-open — a bad settings write costs a notice, never the command.
 				if (cmdCtx.hasUI && ui?.select && ui.input) {
+					// A throwing notify must not reject the command — it is the error channel itself.
+					const say = (message: string, level: "info" | "warning" | "error") => {
+						try {
+							ui.notify?.(message, level);
+						} catch {}
+					};
 					try {
 						await runSettingsMenu(
 							{
 								select: (title, options) => ui.select(title, options),
 								input: (title, placeholder) => ui.input(title, placeholder),
-								notify: (message, level) => ui.notify?.(message, level),
+								notify: say,
 							},
 							applySavedSettings,
 						);
 					} catch (err) {
-						ui.notify?.(
+						say(
 							`context-fold settings error (nothing else affected): ${err instanceof Error ? err.message : String(err)}`,
 							"error",
 						);

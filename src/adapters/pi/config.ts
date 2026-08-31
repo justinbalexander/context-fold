@@ -49,6 +49,7 @@ const fraction = (raw: string): number | undefined => {
 	return Number.isFinite(n) && n > 0 && n <= 1 ? n : undefined;
 };
 const nonNegative = (raw: string): number | undefined => {
+	if (raw === "") return undefined; // Number("") is 0, and blank is not a spelling of zero
 	const n = Number(raw);
 	return Number.isFinite(n) && n >= 0 ? n : undefined;
 };

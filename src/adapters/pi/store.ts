@@ -118,7 +118,7 @@ export interface CodeError {
 	message: string;
 }
 
-/** Partial-retrieval options for spool-backed recall (ignored for in-memory-only folds). */
+/** Partial-retrieval options for recall — honored on both the spool and live-history routes. */
 export interface RecallOptions {
 	/** Return only lines matching this term (case-insensitive substring), with line numbers. */
 	grep?: string;

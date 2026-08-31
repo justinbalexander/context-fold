@@ -63,6 +63,14 @@ describe("knob parsers", () => {
 		expect(knob("budgetCap").parse("-5")).toBeUndefined();
 	});
 
+	it("blank is not a spelling of zero for non-negative knobs", () => {
+		// Number("") coerces to 0; a blank env var must yield to saved/default, not disable the knob.
+		expect(knob("budgetCap").parse("")).toBeUndefined();
+		expect(knob("tail").parse("")).toBeUndefined();
+		setEnv("CONTEXTFOLD_TAIL", "   ");
+		expect(resolveKnob(knob("tail"), { tail: 10_000 })).toEqual({ value: 10_000, source: "saved" });
+	});
+
 	it("compact accepts only det/native (any case)", () => {
 		expect(knob("compact").parse("NATIVE")).toBe("native");
 		expect(knob("compact").parse("det")).toBe("det");
