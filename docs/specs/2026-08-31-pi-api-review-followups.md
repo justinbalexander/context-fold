@@ -109,12 +109,21 @@ Agent calls, stated here:
 - [x] S3 Handoff switch: `/fold-handoff` writes the seed, confirms, and seeds a replacement
       session via `newSession({parentSession, setup})`, landing idle; headless and "no" paths
       keep today's behavior.
-- [ ] S4 Spool-redundancy prototype (throwaway): real session, cheap model; verify raw tool
+- [x] S4 Spool-redundancy prototype (throwaway): real session, cheap model; verify raw tool
       results in `getEntries()` after hard compaction, after resume, and after a second
       compaction; record the verdict below. Code is discarded.
 
 ## Open questions
 
-- Spool-redundancy verdict (filled by S4): _pending_. A "yes" opens a redesign spec that must
-  also answer cross-session handoff reads and bounded recall before touching the spool;
-  a "no" closes item 1 permanently with the evidence cited here.
+- Spool-redundancy verdict (filled by S4, 2026-08-31): **yes — raw tool results survive in
+  `getEntries()`**. Probe extension on Pi 0.84.4 (`-ne`, no context-fold loaded), gpt-5.6-sol,
+  `reserveTokens` tuned so a ~52 KB `cat` flood trips threshold compaction mid-run. Observed:
+  after the first compaction, after quitting and resuming the session, after a second
+  compaction, and after a second resume, both 51,900-byte raw `toolResult` entries were present
+  and intact in `sessionManager.getEntries()` (planted needles found inside the toolResult
+  entries, not the summaries), while `sessionManager.buildContextEntries()` excluded them — it
+  renders the compacted view. So the spool duplicates Pi's ledger as a *durability* floor. A
+  redesign spec may now be opened, and must still answer what the spool provides beyond
+  durability before removing it: cross-session handoff reads (seed pointers a fresh session
+  resolves), sha-verified bounded slicing, per-code addressing, and dedup. Prototype script and
+  raw snapshots live in the session scratchpad (`spool-proto/`), throwaway per the spec.
