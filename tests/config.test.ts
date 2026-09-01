@@ -12,7 +12,6 @@ import {
 	adapterConfigFromEnv,
 	type SavedSettings,
 } from "../src/adapters/pi/config";
-import { spoolRetainMsFromEnv } from "../src/adapters/pi/retention";
 
 const TOUCHED = KNOBS.map((s) => s.env);
 const saved: Record<string, string | undefined> = {};
@@ -82,9 +81,8 @@ describe("knob parsers", () => {
 		expect(knob("reconTokens").parse("0")).toBeUndefined();
 	});
 
-	it("spool retention treats 0/off/false as 0 and allows fractional days", () => {
-		for (const raw of ["0", "off", "FALSE"]) expect(knob("spoolRetainDays").parse(raw)).toBe(0);
-		expect(knob("spoolRetainDays").parse("0.5")).toBe(0.5);
+	it("the removed spool-retention knob is gone from the table", () => {
+		expect(KNOBS.some((s) => s.env === "CONTEXTFOLD_SPOOL_RETAIN_DAYS")).toBe(false);
 	});
 });
 
@@ -114,7 +112,6 @@ describe("saved settings flow into the config builders", () => {
 		foldAt: 0.35,
 		reconTokens: 9_000,
 		compact: "native",
-		spoolRetainDays: 2,
 	};
 
 	it("configFromEnv layers saved under env", () => {
@@ -139,12 +136,5 @@ describe("saved settings flow into the config builders", () => {
 		expect(acfg.ladder.foldStep).toBe(0.12);
 		expect(acfg.compact).toBe("native");
 		expect(acfg.reconTokens).toBe(9_000);
-	});
-
-	it("spoolRetainMsFromEnv honors the saved value under no env", () => {
-		setEnv("CONTEXTFOLD_SPOOL_RETAIN_DAYS", undefined);
-		expect(spoolRetainMsFromEnv(savedCfg)).toBe(2 * 86_400_000);
-		// The documented default, as a literal: one day.
-		expect(spoolRetainMsFromEnv()).toBe(86_400_000);
 	});
 });

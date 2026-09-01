@@ -12,7 +12,7 @@
  * on the automatic path. Fully autonomous (no UI prompts) — runs identically headless.
  */
 import { writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage as CoreAgentMessage } from "../../core/block";
 import { FoldLadderPolicy } from "../../core/policy/fold-ladder";
@@ -25,7 +25,6 @@ import { registerFoldTools } from "./unfold-tool";
 import { MapFoldRegistry } from "../../core/fold-registry";
 import { LedgerReader } from "./ledger";
 import { recordFoldEntry, recordLayer, recordUnfold, restoreFoldState } from "./persistence";
-import { spoolRetainMsFromEnv, sweepSpools, sweepWorkspaceSpools, touchHeartbeat } from "./retention";
 import { CacheTelemetry, k } from "./cache-telemetry";
 import { advise } from "./advisor";
 
@@ -164,10 +163,15 @@ export default function contextFold(pi: ExtensionAPI): void {
 		engine.attachLedger(new LedgerReader(() => ctx.sessionManager.getEntries() as { type?: string; message?: unknown }[]));
 	};
 
+	// The extension's on-disk home: append-only text (seed index, handoff seeds) measured in
+	// kilobytes, retained like Pi's own session files — no GC.
+	const artifactDirFor = (ctx: { sessionManager: { getSessionDir(): string; getSessionId(): string } }): string =>
+		join(ctx.sessionManager.getSessionDir(), "context-fold", ctx.sessionManager.getSessionId());
+
 	let indexStore: SeedIndexStore | null = null;
 	let indexKey = "";
 	const indexFor = (ctx: { sessionManager: { getSessionDir(): string; getSessionId(): string } }): SeedIndexStore => {
-		const dir = join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId());
+		const dir = artifactDirFor(ctx);
 		if (!indexStore || indexKey !== dir) {
 			indexStore = new SeedIndexStore(dir);
 			indexKey = dir;
@@ -185,26 +189,6 @@ export default function contextFold(pi: ExtensionAPI): void {
 		if (restoredFor === sid) return;
 		const isSwitch = restoredFor !== "";
 		restoredFor = sid;
-
-		// Spool GC: reap sibling session spools past the retention window. Independent
-		// of the restore below — the sweep never touches this session's dir, and the restore only
-		// judges this session's own entries.
-		const retainMs = spoolRetainMsFromEnv(loadSavedSettings());
-		if (retainMs > 0) {
-			try {
-				const spoolRoot = join(ctx.sessionManager.getSessionDir(), "spool");
-				const swept = sweepSpools(spoolRoot, sid, retainMs);
-				// Abandoned-workspace pass: sibling workspaces' spool roots age out under the same
-				// window, since their own sweep only runs when a session starts there again.
-				const wsSwept = sweepWorkspaceSpools(dirname(ctx.sessionManager.getSessionDir()), spoolRoot, retainMs);
-				const reaped = swept.reaped.length + wsSwept.reaped.length;
-				if (debug && reaped) {
-					process.stderr.write(`[context-fold] spool-gc: reaped ${reaped} stale session spool dir(s)\n`);
-				}
-			} catch (err) {
-				process.stderr.write(`[context-fold] spool-gc failed (skipped): ${err instanceof Error ? err.message : String(err)}\n`);
-			}
-		}
 
 		if (isSwitch) {
 			registry.clear();
@@ -310,10 +294,6 @@ export default function contextFold(pi: ExtensionAPI): void {
 	// The make-or-break hook: rewrite the outgoing context before each model call.
 	pi.on("context", (event, ctx) => {
 		try {
-			// Liveness for the GC sweep: mark this session's spool as belonging to a running session,
-			// so a quiet-but-live session is not reaped by a sibling's session_start sweep. Throttled
-			// internally to once an hour and inert until this session has actually spooled something.
-			touchHeartbeat(join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId()));
 			ensureLedger(ctx);
 			lastContextWindow = ctx.getContextUsage()?.contextWindow ?? lastContextWindow;
 			// Ladder cold branch: no live cache read observed after a few turns ⇒ there is no warm
@@ -479,6 +459,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 	registerFoldTools(pi, engine, (ids) => recordUnfold(pi, ids));
 	registerHandoffCommand(pi, {
 		indexFor: (hctx) => indexFor(hctx as Parameters<typeof indexFor>[0]),
+		seedDirFor: (hctx) => artifactDirFor(hctx as Parameters<typeof artifactDirFor>[0]),
 	});
 
 	// Bare: display-only status (no-op safe in headless mode — pure text). `config`/`settings`:

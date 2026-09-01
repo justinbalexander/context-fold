@@ -124,7 +124,7 @@ Agent calls, stated here:
       ones; commit precondition is record + index only. (Landed with S1 in one commit: the
       registry shape and the record shape are one contract, and a spool-writing intermediate
       would have been throwaway.)
-- [ ] S3 Deletion and relocation: remove `spool.ts`, `retention.ts`, heartbeat, GC, env var,
+- [x] S3 Deletion and relocation: remove `spool.ts`, `retention.ts`, heartbeat, GC, env var,
       dedup; move `seed-index.jsonl` and handoff seeds to `<sessionDir>/context-fold/<id>/`;
       seed header gains the parent session path.
 - [ ] S4 Docs: DESIGN.md §5 (ledger-backed recovery) and §8 (invariants recast), README

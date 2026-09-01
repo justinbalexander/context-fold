@@ -24,7 +24,6 @@ export interface SavedSettings {
 	tail?: number;
 	compact?: CompactMode;
 	reconTokens?: number;
-	spoolRetainDays?: number;
 }
 
 export type KnobKey = keyof SavedSettings;
@@ -143,21 +142,6 @@ export const KNOBS: readonly KnobSpec[] = [
 			return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 		},
 		format: plain,
-	},
-	{
-		key: "spoolRetainDays",
-		env: "CONTEXTFOLD_SPOOL_RETAIN_DAYS",
-		label: "Spool retention",
-		hint: "days before session-start GC deletes old spools; 'off' or 0 keeps forever",
-		def: 1,
-		live: false,
-		parse: (raw) => {
-			const m = raw.toLowerCase();
-			if (m === "0" || m === "off" || m === "false") return 0;
-			const n = Number(m);
-			return Number.isFinite(n) && n > 0 ? n : undefined;
-		},
-		format: offOrNumber,
 	},
 ];
 

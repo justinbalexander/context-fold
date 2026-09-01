@@ -50,7 +50,6 @@ const savedEnv: Record<string, string | undefined> = {};
 const ENV_KEYS = [
 	"CONTEXTFOLD",
 	"CONTEXTFOLD_COMPACT",
-	"CONTEXTFOLD_SPOOL_RETAIN_DAYS",
 	"CONTEXTFOLD_FOLD_AT",
 	"CONTEXTFOLD_TAIL",
 	"CONTEXTFOLD_L0",
@@ -61,8 +60,6 @@ const ENV_KEYS = [
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "cf-hooks-"));
 	for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
-	// Spool GC reaps by mtime across sibling sessions; keep it inert so it can't touch a fixture.
-	process.env.CONTEXTFOLD_SPOOL_RETAIN_DAYS = "0";
 });
 afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
@@ -172,7 +169,7 @@ describe.skipIf(!PI_PRESENT)("context hook", () => {
 		expect(out.messages).toBe(messages); // fail-open: the same array, unfolded
 	});
 
-	it("keeps a fold raw when its spool cannot be written", async () => {
+	it("keeps a fold raw when its seed index cannot be written", async () => {
 		const s = await load();
 		const blocker = join(dir, "not-a-directory");
 		writeFileSync(blocker, "x");
@@ -737,7 +734,7 @@ describe.skipIf(!PI_PRESENT)("compaction lifecycle events own the count and the 
 		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
 
 		const { SeedIndexStore } = await import("../src/adapters/pi/index-store");
-		const index = new SeedIndexStore(join(dir, "spool", "s1"));
+		const index = new SeedIndexStore(join(dir, "context-fold", "s1"));
 		const before = index.readAll();
 		expect(before.some((r) => r.trigger === "compact")).toBe(false);
 
@@ -760,8 +757,30 @@ describe.skipIf(!PI_PRESENT)("compaction lifecycle events own the count and the 
 		await s.hooks.get("session_compact")!({ reason: "threshold", fromExtension: true }, ctx);
 
 		const { SeedIndexStore } = await import("../src/adapters/pi/index-store");
-		const index = new SeedIndexStore(join(dir, "spool", "s1"));
+		const index = new SeedIndexStore(join(dir, "context-fold", "s1"));
 		expect(index.readAll().some((r) => r.trigger === "compact")).toBe(true);
+	});
+
+	// The spool-removal claim, asserted at the hook level: a full fold → compact → resume cycle
+	// leaves the seed index as the only artifact, under context-fold/<sid>/ — never a spool/ dir.
+	it("a fold → compact → resume cycle creates no spool directory", async () => {
+		process.env.CONTEXTFOLD_COMPACT = "det";
+		const s = await load();
+		const messages = heavySession();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null }, messages });
+		await s.hooks.get("session_start")!({}, ctx);
+		await s.hooks.get("context")!({ messages }, ctx);
+		await s.hooks.get("session_before_compact")!({ preparation: prep() }, ctx);
+		await s.hooks.get("session_compact")!({ reason: "threshold", fromExtension: true }, ctx);
+
+		// Resume in a fresh process from the recorded entries.
+		const resumed = await load();
+		const ledger = s.entries.map((e) => ({ customType: e.customType, data: e.data }));
+		const resumedCtx = ctxFor({ entries: ledger, messages, usage: { contextWindow: 80_000, tokens: null } }).ctx;
+		await resumed.hooks.get("session_start")!({}, resumedCtx);
+
+		expect(existsSync(join(dir, "spool"))).toBe(false);
+		expect(existsSync(join(dir, "context-fold", "s1", "seed-index.jsonl"))).toBe(true);
 	});
 });
 
@@ -865,7 +884,7 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 		expect(text).toContain("finish the migration");
 		expect(text).toContain("extracted verbatim");
 		// The seed file is still written for the record.
-		expect(existsSync(join(dir, "handoff-s1.md"))).toBe(true);
+		expect(existsSync(join(dir, "context-fold", "s1", "handoff-s1.md"))).toBe(true);
 		expect(notices.join("\n")).toContain("handoff seed written");
 	});
 
@@ -876,7 +895,7 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 		await s.commands.get("fold-handoff")!.handler("goal", ctx);
 
 		expect(calls.length).toBe(0);
-		expect(existsSync(join(dir, "handoff-s1.md"))).toBe(true);
+		expect(existsSync(join(dir, "context-fold", "s1", "handoff-s1.md"))).toBe(true);
 		expect(notices.join("\n")).toContain("/new");
 	});
 
@@ -887,7 +906,7 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 		await s.commands.get("fold-handoff")!.handler("goal", ctx);
 
 		expect(calls.length).toBe(0);
-		expect(existsSync(join(dir, "handoff-s1.md"))).toBe(true);
+		expect(existsSync(join(dir, "context-fold", "s1", "handoff-s1.md"))).toBe(true);
 	});
 
 	it("a throwing newSession degrades to the manual flow, not a command failure", async () => {
@@ -913,6 +932,6 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 		expect(all).toContain("falling back to the manual flow");
 		expect(all).toContain("/new");
 		expect(all).not.toContain("fold-handoff failed");
-		expect(existsSync(join(dir, "handoff-s1.md"))).toBe(true);
+		expect(existsSync(join(dir, "context-fold", "s1", "handoff-s1.md"))).toBe(true);
 	});
 });

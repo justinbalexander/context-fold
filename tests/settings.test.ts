@@ -124,6 +124,6 @@ describe("settingsReport", () => {
 		const report = settingsReport({ foldAt: 0.6 });
 		expect(report).toContain("Fold threshold: 0.6 (saved)");
 		expect(report).toContain("Protected tail: 1000 (env)");
-		expect(report).toContain("Spool retention: 1 [next session]");
+		expect(report).not.toContain("Spool retention");
 	});
 });

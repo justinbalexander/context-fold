@@ -10,7 +10,7 @@
  * persisted user message and the new session lands IDLE — no kickoff turn, no tokens spent until
  * the user acts. Declining (or running headless) keeps the write-review-paste flow.
  */
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { renderDetCompactionSummary } from "./compact";
@@ -19,13 +19,16 @@ import type { SeedIndexStore } from "./index-store";
 const PREAMBLE = [
 	"> Everything below is extracted verbatim from the session — no model wrote any of it, so",
 	"> exact identifiers, paths, commands, and error strings are preserved as they appeared.",
-	"> Each recovery pointer names the on-disk artifact holding the full content.",
+	"> Fold codes below are provenance from the parent session, not live handles here: full",
+	"> content lives in the parent session file named above and in the seed index beside it.",
 ].join("\n");
 
-/** Assemble the handoff seed (pure). */
-export function buildHandoffSeed(opts: { goal: string; indexBody: string; at: string }): string {
+/** Assemble the handoff seed (pure). The parent session file is the seed's ground truth: fold
+ *  codes in the body resolve against THAT ledger, not the new session's. */
+export function buildHandoffSeed(opts: { goal: string; indexBody: string; at: string; parentSessionPath?: string }): string {
 	return [
 		`# Session handoff seed — ${opts.at}`,
+		...(opts.parentSessionPath ? [`Parent session: ${opts.parentSessionPath}`] : []),
 		"",
 		PREAMBLE,
 		"",
@@ -55,7 +58,7 @@ interface HandoffCtx {
 
 export function registerHandoffCommand(
 	pi: ExtensionAPI,
-	deps: { indexFor(ctx: HandoffCtx): SeedIndexStore },
+	deps: { indexFor(ctx: HandoffCtx): SeedIndexStore; seedDirFor(ctx: HandoffCtx): string },
 ): void {
 	pi.registerCommand("fold-handoff", {
 		description:
@@ -72,8 +75,11 @@ export function registerHandoffCommand(
 					goal: typeof args === "string" ? args : "",
 					indexBody,
 					at: new Date().toISOString(),
+					parentSessionPath: ctx.sessionManager.getSessionFile?.(),
 				});
-				const out = join(ctx.sessionManager.getSessionDir(), `handoff-${ctx.sessionManager.getSessionId()}.md`);
+				const seedDir = deps.seedDirFor(ctx);
+				mkdirSync(seedDir, { recursive: true });
+				const out = join(seedDir, `handoff-${ctx.sessionManager.getSessionId()}.md`);
 				writeFileSync(out, seed, "utf8");
 
 				// Confirm-then-switch (interactive only): the seed file above is the reviewable record
