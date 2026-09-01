@@ -1,6 +1,6 @@
 # spool-removal
 
-Date: 2026-08-31   Status: agreed, ready to build
+Date: 2026-08-31   Status: done
 
 ## Problem
 
