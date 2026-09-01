@@ -1,4 +1,4 @@
-# Seed index format (v1)
+# Seed index format (v2)
 
 The seed index is the deterministic, lexical bridge back into a session's full
 history after context has been folded, compacted, or the session has ended.
@@ -18,27 +18,32 @@ Design constraints it answers:
   (summary-boundary loss), and error strings including the lowercase forms
   (`failed`, `npm ERR!`, `fatal`, `Segmentation fault`, `Permission denied`).
 - Recall must work in spans rather than per-pointer paging (recall churn is the
-  measured failure mode), so every record carries offsets into durable
-  on-disk artifacts.
+  measured failure mode), so every record carries recovery pointers into the
+  durable ground truth.
+
+## Ground truth
+
+The full content behind a span lives in the Pi session file itself, an
+append-only JSONL whose entries are never modified or deleted. A reader
+recovers a span's content by finding the session entry whose message carries
+the span's anchor (`r:<toolCallId>` names a `toolResult` message's
+`toolCallId`; `a:<responseId>:p<n>` names part *n* of the assistant message
+with that `responseId`) and verifying the text against the span's `sha256`.
+The index itself carries only metadata.
 
 ## Transport
 
 One JSONL file per session, append-only: one record per fold event (plus one
 final record at hard compaction), at
-`<sessionDir>/spool/<sessionId>/seed-index.jsonl`. Readers must tolerate
-unknown extra fields and records with a higher `v` they do not understand.
-
-A spool directory is not exclusively envelopes. Resolve artifacts by the paths
-records actually name (`log.path`, and one `aliasOf` hop) rather than by
-enumerating the directory, because context-fold keeps bookkeeping files
-alongside the data: `.alive` is a liveness heartbeat its garbage collector
-reads. Readers should ignore anything they do not recognize.
+`<sessionDir>/context-fold/<sessionId>/seed-index.jsonl`. Handoff seeds are
+written beside it. Readers must tolerate unknown extra fields and records with
+a higher `v` they do not understand.
 
 ## Record shape
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "kind": "fold-index",
   "harness": "pi-context-fold",
   "session": "<session id>",
@@ -61,7 +66,8 @@ reads. Readers should ignore anything they do not recognize.
       "code": "k3f9a2",
       "tool": "bash",
       "turn": 7,
-      "log": { "path": "/…/spool/<sid>/k3f9a2.json", "byteStart": 0, "byteEnd": 48211, "lines": 1204 },
+      "log": { "bytes": 48211, "lines": 1204 },
+      "sha256": "…64 hex chars over the block text…",
       "fullOutputPath": "/…/tool-output/call_abc123.txt"
     }
   ]
@@ -73,7 +79,7 @@ Field semantics:
 - `seq`: the fold event's sequence number, monotonic per session (the
   frozen-layer seq). The file is append-only and never rewritten, so a reader
   resolving a seq that appears more than once takes the latest record for it.
-  A line of the form `{ "v": 1, "kind": "fold-retract", "seq": 3, "at": "…" }`
+  A line of the form `{ "v": 2, "kind": "fold-retract", "seq": 3, "at": "…" }`
   voids the `fold-index` records with that seq appended before it (a compaction
   that failed after its record was emitted); a record appended after the
   retraction may reuse the seq and stands on its own.
@@ -94,23 +100,28 @@ Field semantics:
   capped at 64 per record favoring rarer/longer tokens.
 - `userMessages`: first line (≤ 200 chars) of each user message in the
   folded span, with turn number. User intent is never folded away silently.
-- `spans`: the recovery pointers. Each names the durable artifact holding the
-  folded content, and the extent of that content. `log.path` is the
-  ground-truth store for the span, and `code` is the in-context recall handle.
+- `spans`: the recovery pointers. Each names a folded block by its durable
+  `blockId` (the anchor into the session ledger; see Ground truth), its
+  in-context recall handle `code`, and the extent of its content: `log.bytes`
+  is the UTF-8 byte length of the block text and `log.lines` its line count.
+  `sha256` is the hex sha256 of the block text at fold time; a reader verifies
+  the re-located ledger text against it before trusting the bytes. A span
+  restored from a pre-v2 record may lack `sha256`, in which case the content
+  is served unverified. `fullOutputPath`, when present, names the tool's own
+  full-output file (e.g. a truncated bash result), which holds *more* than the
+  block text.
 
-  A span is not a byte range into a flat file: `log.path` is a spool
-  envelope, a JSON object at
-  `<spoolDir>/<code>.json` whose `content` field holds the folded text, with
-  `sha256` over that text. `byteStart`/`byteEnd` are offsets within the
-  decoded `content` string (so `byteStart` is 0 and `byteEnd` is the content's
-  byte length) rather than offsets into the `.json` file, so parse the envelope,
-  then slice.
+## Changes from v1
 
-  One envelope shape needs special handling: when two folded blocks had
-  byte-identical content, the second is written as an alias: `content` is
-  `""` and an `aliasOf` field names the code whose envelope holds the bytes.
-  A reader that finds `aliasOf` follows exactly one hop to
-  `<spoolDir>/<aliasOf>.json` and reads `content` there. Aliases never chain.
+v1 spans carried `log.path`/`log.byteStart`/`log.byteEnd` addressing a
+per-session spool of sha256-verified content envelopes. The spool duplicated
+Pi's append-only ledger byte for byte and is removed; spans now anchor into
+the session file directly, `log` keeps `bytes` and `lines`, and the envelope's
+sha moved onto the span as `sha256`. The file also moved from
+`<sessionDir>/spool/<sessionId>/` to `<sessionDir>/context-fold/<sessionId>/`.
+Readers of old sessions may still encounter v1 records and spool files; the
+records remain readable under the tolerance rules above, and the spool files
+are inert.
 
 ## Consumption contract
 
@@ -120,4 +131,5 @@ Field semantics:
 - The index is ground truth extracted verbatim; any narrative a reader layers
   on top of it is the reader's own.
 - Records are advisory for context reconstruction, so readers verify claims
-  against the artifacts (`log.path`) before relying on them.
+  against the session ledger (via `blockId` and `sha256`) before relying on
+  them.

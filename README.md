@@ -58,7 +58,7 @@ so Pi's LLM summarization never runs. `CONTEXTFOLD_COMPACT=native` opts back int
 behavior.
 
 At this stage the raw messages do leave live context; that is what compaction is. What survives is
-the index, the spool, and Pi's session file, all on disk and all reachable through `recall_folded`. The
+the index and Pi's session file, both on disk and both reachable through `recall_folded`. The
 loss is bounded and reversible rather than lossy and final. There is no paraphrase step and nothing
 that can hallucinate. The extension warns you after a second forced compaction; it is worth running
 a handoff well before that, at a definable task finish line.
@@ -90,21 +90,24 @@ prompt-cache suffix, so mutations are batched at points where that cost is paid 
 - Each further event needs at least a ladder step (~12 % of the window) of maskable mass. Crossing
   the absolute budget cap (`min(200k, 0.75 × window)`) folds immediately.
 
-### Spool-backed recovery
+### Ledger-backed recovery
 
-Every committed ladder fold writes the exact masked block to a versioned, sha256-verified spool
-envelope before the raw message can leave live history. The model sees a deterministic
-`{#code FOLDED}` digest and can retrieve the original through `recall_folded` or restore it through
-`unfold`. This happens only when context pressure folds stale material; context-fold never hides a
-fresh result before its first delivery.
+Pi's session file is append-only: every raw payload stays in it for the life of the session,
+through hard compaction and resume. A committed ladder fold therefore stores no copy — it records
+the masked block's identity and a sha256 of its exact bytes, and recall re-locates the original
+in the session ledger and verifies it against that sha before serving it. The model sees a
+deterministic `{#code FOLDED}` digest and can retrieve the original through `recall_folded` or
+restore it through `unfold`. This happens only when context pressure folds stale material;
+context-fold never hides a fresh result before its first delivery.
 
 ### The seed index
 
-Every fold event appends one deterministic record to `seed-index.jsonl` in the session spool
-directory (spec: `docs/SEED_INDEX_SPEC.md`): files touched, commands run, error lines in every
-spelling the lexicon knows (lowercase `failed`, `npm ERR!`, …), exact identifiers and numbers
-harvested from the masked output, first lines of user messages, and byte-extent spans into the
-spool. Extraction is pure regex: same input, byte-identical output.
+Every fold event appends one deterministic record to `seed-index.jsonl` under
+`<sessionDir>/context-fold/<sessionId>/` (spec: `docs/SEED_INDEX_SPEC.md`): files touched,
+commands run, error lines in every spelling the lexicon knows (lowercase `failed`, `npm ERR!`,
+…), exact identifiers and numbers harvested from the masked output, first lines of user
+messages, and recovery spans naming each folded block's ledger anchor, extent, and fold-time
+sha256. Extraction is pure regex: same input, byte-identical output.
 
 ### Getting detail back
 
@@ -116,8 +119,8 @@ spool. Extraction is pure regex: same input, byte-identical output.
   reaches even the bytes truncation dropped before folding ever saw them.
 - `unfold <code>`: sticky re-expansion. The block stays expanded and is never re-masked.
 
-Recall works live, after resume, and after hard compaction: masked content resolves from the spool
-even once the raw message has left history.
+Recall works live, after resume, and after hard compaction: masked content resolves from Pi's
+append-only session file even once the raw message has left live context.
 
 ### Status and advisories
 
@@ -155,9 +158,9 @@ cache read ≈ 0.1× input.
 
 - **History is never mutated.** Folding exists only in the per-call outgoing copy; the session file
   keeps every raw payload.
-- **Nothing is destroyed.** Ground truth lives in the session file and the spool. Every `{#code}`
-  handle resolves through `recall_folded`/`unfold` until spool GC ages it out (default 24 hours; the
-  session file keeps the raw payload regardless).
+- **Nothing is destroyed.** Ground truth is Pi's session file, and the extension writes no copy of
+  it. Every `{#code}` handle resolves through `recall_folded`/`unfold` for as long as the session
+  file exists, verified against a sha256 recorded at fold time.
 - **Tool pairs cannot orphan.** Folding is in-place content substitution and never changes the
   message count, so a `tool_call` can never lose its `tool_result`. Structural, not policed.
 - **Failure signals survive compression** at every fidelity level; the error lexicon is
@@ -181,12 +184,6 @@ cache read ≈ 0.1× input.
 - **The tool names are global.** The extension registers `recall_folded` and `unfold` as global
   tools. If another extension registers the same names, one will shadow the other (`unfold` is the
   generic one; `recall_folded` was named to avoid this collision).
-- **Spool GC judges other sessions by file age.** The sweep at session start deletes sibling spool
-  directories (in this workspace and in sibling workspaces' spool roots) whose newest file is
-  older than the retention window. Live sessions refresh a heartbeat file each turn, so an
-  idle-but-running session is safe; a session whose process is suspended for longer than the
-  window can still lose its spool to a freshly started sibling.
-  `CONTEXTFOLD_SPOOL_RETAIN_DAYS=0` disables the sweep.
 - **Primarily exercised against one model family.** Development and testing have mostly used
   `gpt-5.6-sol` via the openai-codex provider. Folding only reads Pi's usage numbers and message
   shapes, so other providers should work; fold cost accounting is the one feature with a known
@@ -210,7 +207,7 @@ extension watches provider usage for that outcome.
   against the server-held previous response, so a fold's rewrite of older history stays local for
   the rest of that tool chain. At the next user message there is no pending tool output, the
   changed prefix forces a full resend, and provider-reported input drops all at once. Folding still
-  works (recall, the spool, and compaction are unaffected), but a long autonomous tool chain can
+  works (recall, the fold records, and compaction are unaffected), but a long autonomous tool chain can
   approach the provider's context limit before any fold takes effect on the wire.
 - **`codex-lite` does not rewrite context.** Its dialect mode replaces Pi's stock tools and appends
   prompt guidance. There is no fold bypass in that pairing; fresh shell output reaches the model
@@ -247,8 +244,7 @@ From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 debug seams and the kill switch) with its effective value and where it came from. Edits persist to
 `<agent dir>/context-fold.json` (normally `~/.pi/agent/context-fold.json`) and, where marked live,
 apply to the running session immediately — already-frozen folds keep their bytes; new values steer
-future folds only. Spool retention takes effect at the next session start. Headless modes print
-the effective settings instead of a menu.
+future folds only. Headless modes print the effective settings instead of a menu.
 
 Precedence per knob: built-in default < saved settings file < environment variable. An env var
 keeps working exactly as before and shadows the saved value for that session; the menu flags the
@@ -265,7 +261,6 @@ shadowing when it applies.
 | `CONTEXTFOLD_TAIL` | `20000` | Protected-tail target: the newest ~N tokens never fold (clamped to half the budget). |
 | `CONTEXTFOLD_COMPACT` | `det` | Hard-compaction answer: `det` = deterministic seed-index summary; `native` = Pi stock. |
 | `CONTEXTFOLD_RECON_TOKENS` | `18000` | Reconstruction estimate used by the reset flag (input-token equivalents). |
-| `CONTEXTFOLD_SPOOL_RETAIN_DAYS` | `1` | Spool GC window at session start (fractional days allowed). `0`/`off` = never delete. |
 | `CONTEXTFOLD_DEBUG` | _(off)_ | One-line fold/cache summary to stderr each turn. |
 | `CONTEXTFOLD_DUMP` | _(unset)_ | Debug/e2e seam: write each turn's outgoing (folded) view to this JSON path. |
 
@@ -308,7 +303,7 @@ injects them at runtime; never bundle a copy.
 
 MIT. The pure core is ported from [Accordion](https://github.com/a-Fig/Accordion) (pinned commit
 `0c22434`), stripped of UI coupling and hardened since; the discrete fold ladder, seed index,
-spool-backed recovery, and advisor layers are original to this project.
+ledger-backed recovery, and advisor layers are original to this project.
 
 Much of this documentation was drafted with an LLM and edited by hand. The design decisions,
 thresholds, and measurements are mine.

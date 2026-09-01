@@ -115,7 +115,7 @@ export function registerFoldTools(pi: ExtensionAPI, engine: ContextFoldEngine, o
 			const { matches, missing, compacted } = engine.markUnfold(params.codes);
 			onUnfold?.(matches.flatMap((m) => m.ids)); // persist the unfold so it survives resume
 			// A compacted code is real but un-expandable: its raw message left live history at hard
-			// compaction. Point at recall, which still serves the spooled content.
+			// compaction. Point at recall, which still serves the content from the session ledger.
 			const compactedLines = compacted.map(
 				(c) => `⚠ ${c} — compacted out of live history; nothing to re-expand. Use recall_folded ${c} (grep=<term> / lines=<a-b>) to read it.`,
 			);

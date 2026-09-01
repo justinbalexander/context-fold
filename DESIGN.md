@@ -35,7 +35,7 @@ src/
     contract.ts            # PolicyView / FoldCommand / ViewBlock
     block.ts               # the WireBlock model, linearize(), blockId(), isDurableId()
     apply.ts               # applyPlan(messages, ops)
-    spool-registry.ts      # folded block id → exact-content spool location
+    fold-registry.ts       # folded block id → code, extent, fold-time sha256
     index/seed-index.ts    # deterministic extraction of the seed index record
     policy/
       fold-ladder.ts       # the shipped fold policy
@@ -43,14 +43,13 @@ src/
   adapters/pi/             # every Pi API call and all disk I/O
     index.ts               # the extension entry point: hooks, tools, commands
     store.ts               # the engine
-    spool.ts               # sha256-verified fold envelopes on disk
+    ledger.ts              # the ledger read route: re-locate a block in getEntries(), sha verify
     index-store.ts         # seed-index.jsonl emission
     persistence.ts         # event-sourced fold state
     compact.ts             # the deterministic hard-compaction summary
     handoff.ts             # /fold-handoff: writes a deterministic seed for a fresh session
     advisor.ts             # cold detection and the reset yellow flag
     cache-telemetry.ts     # measured cacheRead/cacheWrite accounting
-    retention.ts           # spool GC
     unfold-tool.ts         # the recall_folded / unfold tools
     config.ts              # the knob table: defaults < saved settings < CONTEXTFOLD_* env
     settings.ts            # the saved-settings file and the /context-fold config menu
@@ -116,53 +115,48 @@ merge them.
 
 ---
 
-## 5. Spool-backed recovery
+## 5. Ledger-backed recovery
 
-Fresh tool results always reach the model at full fidelity. When the ladder later commits a fold,
-the adapter writes each masked block to
-`<sessionDir>/spool/<sessionId>/<code>.json`: a versioned, sha256-verified envelope written
-atomically, with dedup aliases for identical payloads. The frozen digest carries the authoritative
-`{#code FOLDED}` handle. `recall_folded` reads the envelope whole or through bounded grep/line
-slices, and `unfold` restores the live block on the next turn. The envelope also records the tool
-call's typed input and, when the persisted message's `details` name one (a truncated bash
-result), the tool's own full-output file; grep and line recalls prefer that file over the
-truncated content and fall back to the spool when it is gone.
+Fresh tool results always reach the model at full fidelity. The durability floor behind every
+fold is Pi's own session ledger: the session file is append-only ("Entries cannot be modified or
+deleted", per `SessionManager`), so the raw payload of a folded block survives hard compaction,
+resume, and re-compaction in `sessionManager.getEntries()`. When the ladder commits a fold, the
+adapter records per masked block a fold entry naming its durable id, its `{#code FOLDED}` handle,
+its byte extent, and a sha256 of the block text at fold time. No copy of the content is written
+anywhere.
 
-The spool and seed-index record are commit preconditions. The engine prepares a layer, the adapter
-spools and indexes every masked block, and only then does the engine freeze and apply its bytes. A
-durability failure (disk, index, or layer persistence) rejects the entire event and sends that turn
-raw. A fold-code collision is the one per-block exception. The code space is `hash mod 36^6`, so two
-durable ids can rarely share a code, and the collision is a permanent condition for the second
-id. That block alone is dropped from the event, held raw for the session, and announced on
-stderr, while the rest of the event commits. The spool is therefore the durability floor after
-hard compaction removes the raw message from live history, rather than an arrival-time masking
-policy. At hard compaction
-itself, every foldable block leaving live history that never folded is spooled then (per-block
-fail-open), so the recall route covers the entire compacted span rather than only the blocks
-earlier fold events reached.
+`recall_folded` re-locates the block by re-linearizing the ledger's message entries with the same
+durable-id formula that named it, verifies the text against the recorded sha256, and serves it
+whole or through bounded grep/line slices; `unfold` restores the live block on the next turn.
+Linearization is cached per session and invalidated by entry count, so recall does not re-walk
+the file on every call. When the persisted message's `details` name a tool-owned full-output file
+(a truncated bash result), grep and line recalls prefer that file over the truncated content and
+fall back to the ledger text when it is gone. A block the ledger cannot serve, or whose text
+fails the sha check, is a typed error naming the code; if the block is still live in raw history
+it is served from the snapshot instead, through the same caps.
+
+The fold record and seed-index record are commit preconditions. The engine prepares a layer, the
+adapter appends both records durably, and only then does the engine freeze and apply its bytes. A
+durability failure (record, index, or layer persistence) rejects the entire event and sends that
+turn raw. A fold-code collision is the one per-block exception. The code space is
+`hash mod 36^6`, so two durable ids can rarely share a code, and the collision is a permanent
+condition for the second id. That block alone is dropped from the event, held raw for the
+session, and announced on stderr, while the rest of the event commits. At hard compaction, every
+foldable block leaving live history that never folded gets a code and a fold record then
+(per-block fail-open), so the recall route covers the entire compacted span rather than only the
+blocks earlier fold events reached.
 
 ## 6. Fold-state persistence
 
-Spool locations, agent unfold decisions, and committed layers are event-sourced as custom entries
-(`contextfold.fold`) and replayed on `session_start`. Each restored location is revalidated against
-its spool file. Legacy `kind:"gate"` records remain readable so handles from sessions created before
-the arrival-time gate's removal still resolve.
+Fold entries, agent unfold decisions, and committed layers are event-sourced as custom entries
+(`contextfold.fold`) and replayed on `session_start`. Legacy `kind:"spool"`/`kind:"gate"` records
+(from sessions created before the spool's removal) degrade to fold entries without a fold-time
+sha256: recall serves them from the ledger unverified and says so, and a block absent from the
+ledger reports unavailable. No crash, no silent token creep.
 
-Retention: at session start, sibling session spools whose newest file is older than
-`CONTEXTFOLD_SPOOL_RETAIN_DAYS` (default 24 hours) are removed whole-directory. A spool is a
-working artifact rather than an archive, and Pi's session JSONL keeps the raw payload regardless.
-A second pass applies the same window to sibling workspace spool roots, since a workspace's own
-sweep only runs when a session starts there again. Without it an abandoned workspace would retain
-its last spools forever. Dedup aliases only ever point at siblings in the same directory, so nothing
-dangles, and the current session's spool is never touched.
-
-Freshness is measured by the newest file mtime in the directory, which on its own would judge a
-live session by when it last folded. A session that folded early and then ran quietly for longer
-than the retention window would be reaped by a freshly started sibling. Each session therefore
-refreshes a `.alive` heartbeat file in its own spool directory from the `context` hook, throttled
-to at most once an hour, so liveness is recorded independently of folding activity. The remaining
-edge is a session whose process is stopped (SIGSTOP, a suspended terminal) for longer than the
-window. It stops heartbeating and can still be reaped.
+The extension's own on-disk artifacts, the seed index and handoff seeds, live in
+`<sessionDir>/context-fold/<sessionId>/`: append-only text measured in kilobytes, retained like
+Pi's own session files, with no garbage collection.
 
 ---
 
@@ -174,11 +168,11 @@ rather than swallowed.
 | failure | cost |
 |---|---|
 | fold pass throws | that one turn's context goes out raw |
-| spool, seed-index, or layer persistence throws | that fold event is rejected; the turn goes out raw |
+| fold-record, seed-index, or layer persistence throws | that fold event is rejected; the turn goes out raw |
 | fold-code collision on one block | that block alone stays raw for the session; the rest of the event folds |
 | deterministic compaction throws | Pi's own compaction runs instead |
 | resume restore throws | prior folds render raw this session |
-| spool missing or corrupt (at restore or mid-session) | a live block still resolves from raw history, through the same recall caps and slices; only a block that also left live history errors |
+| ledger cannot serve a block (absent, or sha mismatch) | a live block still resolves from raw history, through the same recall caps and slices; only a block that also left live history errors |
 
 `CONTEXTFOLD=0` disables the extension entirely for one session, which is the escape hatch for
 testing or for isolating a suspected fold-related problem.
@@ -190,6 +184,8 @@ testing or for isolating a suspected fold-related problem.
 1. **Only durable ids may be folded.** Ids prefixed `u:`/`a:`/`r:`/`s:` are content-anchored and
    stable; positional `m<i>:…` ids re-point once folding makes the array non-append-only. The
    `isDurableId` gate is separate from the kind-based `wireFoldable` gate and stays that way.
+   Recovery depends on it: the ledger route re-locates a folded block by recomputing exactly
+   these ids over `getEntries()`, so an id that could drift would strand its content.
 2. **The engine is the sole author of the `{#code}` tag.** Strip any tag a policy supplies and
    prepend the authoritative one.
 3. **Single disposition.** No block id in two ops.
@@ -213,4 +209,4 @@ testing or for isolating a suspected fold-related problem.
 The pure core is derived from [Accordion](https://github.com/a-Fig/Accordion) (pinned commit
 `0c22434`), stripped of all Svelte/Tauri/browser coupling and hardened since. `digest.ts` and
 `tokens.ts` are close to verbatim, and `applyPlan` and the block model are adapted. The discrete
-fold ladder, seed index, spool-backed recovery, and advisor layers are original to this project.
+fold ladder, seed index, ledger-backed recovery, and advisor layers are original to this project.

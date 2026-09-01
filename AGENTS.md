@@ -24,8 +24,8 @@ disposition per block, frozen-layer immutability). Read it before touching fold 
 
 - `src/core/`: pure. The block model, digests, the fold ladder policy, seed-index
   extraction. No Pi imports belong here.
-- `src/adapters/pi/`: every Pi API call and all disk I/O, meaning hooks, tools, the spool,
-  persistence, telemetry.
+- `src/adapters/pi/`: every Pi API call and all disk I/O, meaning hooks, tools, the ledger
+  read route, persistence, telemetry.
 
 context-fold serves Pi only (`docs/adr/0001-pi-only.md`). The split survives as a pure/effectful
 boundary: keeping the core free of effects is what keeps deterministic folding testable.

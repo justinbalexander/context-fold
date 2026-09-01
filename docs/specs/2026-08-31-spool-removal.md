@@ -127,7 +127,7 @@ Agent calls, stated here:
 - [x] S3 Deletion and relocation: remove `spool.ts`, `retention.ts`, heartbeat, GC, env var,
       dedup; move `seed-index.jsonl` and handoff seeds to `<sessionDir>/context-fold/<id>/`;
       seed header gains the parent session path.
-- [ ] S4 Docs: DESIGN.md §5 (ledger-backed recovery) and §8 (invariants recast), README
+- [x] S4 Docs: DESIGN.md §5 (ledger-backed recovery) and §8 (invariants recast), README
       (known issues pruned, recovery section rewritten), SEED_INDEX_SPEC v2, ADR 0002
       superseding spool-backed recovery (cites the S4 verdict and Pi's append-only contract),
       CHANGELOG entry.

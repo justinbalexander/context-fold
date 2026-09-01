@@ -280,7 +280,7 @@ export class ContextFoldEngine {
 
 		const ops: FoldOp[] = cmds != null && cmds.length > 0 ? this.lower(cmds, blocks, protectFrom, firstDelivery) : [];
 
-		// Commit only after the adapter has durably spooled and indexed the event.
+		// Commit only after the adapter has durably recorded and indexed the event.
 		let committedOps: FoldOp[] = [];
 		if (ops.length > 0) {
 			const used = frame.tokens ?? view.liveTokens;
@@ -309,7 +309,7 @@ export class ContextFoldEngine {
 
 	/**
 	 * Commit this fold event's substitutions as a new frozen layer, then report the event so the
-	 * adapter can spool the masked blocks and append their seed-index record.
+	 * adapter can record the masked blocks and append their seed-index record.
 	 *
 	 * Ids owned by an earlier layer are skipped: their bytes are committed and are not this event's
 	 * to change. One layer per event, numbered from 1 — the seq is the seed index's key, so it must
@@ -807,7 +807,7 @@ function capWholeRecall(content: string): { text: string; note?: string } {
 /**
  * Grep `content` for a case-insensitive substring, returning matching lines with 1-based numbers,
  * capped at ~the pointer budget with a "narrow your query" nudge past the cap. The caller resolves
- * WHICH haystack (full output vs spool) so
+ * WHICH haystack (full output vs ledger) so
  * grep and lines= always share one numbering space.
  */
 function grepContent(haystack: string, term: string, source: string): { text: string; note?: string } {
@@ -841,7 +841,7 @@ function joinTexts(blocks: WireBlock[]): string {
 	return blocks.map((b) => b.text).join("\n\n");
 }
 
-/** Bounded read of live-history text — the same caps and slicing as the spool route. */
+/** Bounded read of live-history text — the same caps and slicing as the ledger route. */
 function sliceLiveText(text: string, opts: RecallOptions): { text: string; note?: string } {
 	if (opts.lines) return sliceByLines(text, opts.lines, "live block");
 	if (opts.grep) return grepContent(text, opts.grep, "live block");

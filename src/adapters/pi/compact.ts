@@ -6,7 +6,7 @@
  * failure signals). Instead we hand Pi a summary RENDERED VERBATIM from the seed index: files,
  * commands, error lines, exact identifiers, user intents, and recovery pointers. No model call,
  * no paraphrase, nothing that can hallucinate — and everything it lists is a lexical hook the
- * agent can pull back through `recall` (spool + session log stay on disk).
+ * agent can pull back through `recall` (Pi's append-only session file keeps every raw payload).
  *
  * Pure rendering: no Pi imports, no disk, no clock. Fully unit-testable.
  */

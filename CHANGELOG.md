@@ -3,6 +3,31 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
+## Unreleased
+
+The spool is gone: Pi's own append-only session file is the durability floor behind every fold.
+
+- **Ledger-backed recovery replaces the spool.** A paid probe confirmed what Pi's contract
+  states: raw tool results survive hard compaction, resume, and re-compaction in
+  `sessionManager.getEntries()`. A fold now records only metadata — the block's durable id, its
+  code, its extent, and a sha256 of the block text — and `recall_folded` re-locates the original
+  in the session ledger and verifies it against that sha. No copy of any tool result is written
+  anywhere. `spool.ts`, `retention.ts`, the GC sweep, the `.alive` heartbeat, dedup aliasing,
+  and the `CONTEXTFOLD_SPOOL_RETAIN_DAYS` knob are deleted, and with them both documented
+  spool-GC known issues (the race against a quiet-but-live session, and the 24-hour recall
+  cliff). ADR 0002 records the decision.
+- **Seed index v2.** Spans anchor into the session ledger instead of spool envelopes:
+  `spans[].log` drops `path`/`byteStart`/`byteEnd`, keeps `bytes` and `lines`, and each span
+  gains a fold-time `sha256`. The JSONL moves from `<sessionDir>/spool/<sessionId>/` to
+  `<sessionDir>/context-fold/<sessionId>/`, and handoff seeds are written beside it.
+- **Handoff seeds name their parent session.** The seed header carries the parent session file
+  path, and the preamble states that fold codes in the seed are provenance from that session,
+  not live handles in the new one (Pi lineage does not carry entries across sessions).
+- **Pre-redesign sessions resume fail-open.** Legacy `spool`/`gate` records degrade to fold
+  entries without a sha: recall serves them from the ledger with an unverified note where the
+  block is present, and reports unavailable where it is not. Old spool files are inert; delete
+  them freely.
+
 ## 0.3.2 — 2026-08-17
 
 A compaction data-loss fix, a trim of the injected tool guidance, plus documentation and comment
