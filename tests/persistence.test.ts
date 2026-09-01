@@ -1,37 +1,26 @@
 /*
  * persistence.test.ts — event-sourced fold state across restarts.
  *
- * A fresh engine rebuilds spool locations, frozen layers, and unfolds from custom session entries.
- * Legacy `kind:"gate"` records remain readable so handles from pre-removal sessions still resolve.
+ * A fresh engine rebuilds the fold registry, frozen layers, and unfolds from custom session
+ * entries. Legacy `kind:"spool"`/`kind:"gate"` records degrade to fold entries without a
+ * fold-time sha256 (recall serves them unverified), and unknown kinds are ignored.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	FOLD_CUSTOM_TYPE,
+	recordFoldEntry,
 	recordLayer,
-	recordSpoolEntry,
 	recordUnfold,
 	restoreFoldState,
-	revalidateSpools,
 	type EntryAppender,
 } from "../src/adapters/pi/persistence";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { SpoolStore } from "../src/adapters/pi/spool";
+import { LedgerReader, sha256Hex } from "../src/adapters/pi/ledger";
 import { linearize, type AgentMessage } from "../src/core/block";
 import { digest, foldCode } from "../src/core/digest";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapSpoolRegistry, type SpoolEntry } from "../src/core/spool-registry";
+import { MapFoldRegistry, type FoldEntry } from "../src/core/fold-registry";
 import { assistantWithCalls, toolResult, user } from "./helpers";
-
-let dir: string;
-beforeEach(() => {
-	dir = mkdtempSync(join(tmpdir(), "cf-persist-"));
-});
-afterEach(() => {
-	rmSync(dir, { recursive: true, force: true });
-});
 
 class FakeLedger implements EntryAppender {
 	entries: { type: string; customType: string; data: unknown }[] = [];
@@ -55,49 +44,80 @@ function twoReadSession(a: string, b: string): AgentMessage[] {
 	];
 }
 
-function spoolEntry(store: SpoolStore, callId: string, content: string): SpoolEntry {
+function foldEntry(callId: string, content: string): FoldEntry {
 	const blockId = `r:${callId}`;
-	const code = foldCode(blockId);
-	const written = store.write({ blockId, code, tool: "read", input: undefined, isError: false, content });
 	return {
 		blockId,
-		code,
+		code: foldCode(blockId),
 		tool: "read",
 		isError: false,
-		bytes: written.envelope.bytes,
-		spoolPath: store.pathFor(code),
+		bytes: Buffer.byteLength(content, "utf8"),
+		sha256: sha256Hex(content),
 	};
 }
 
-describe("fold ledger round-trip", () => {
-	it("restores current spool records, unfolds, and legacy gate records", () => {
+/** A LedgerReader over a plain message array shaped like Pi's session entries. */
+function readerOver(messages: AgentMessage[]): LedgerReader {
+	return new LedgerReader(() => messages.map((m) => ({ type: "message", message: m })));
+}
+
+describe("fold record round-trip", () => {
+	it("restores fold records, unfolds, and legacy spool/gate records", () => {
 		const ledger = new FakeLedger();
-		const first = { blockId: "r:c1", code: "aaa", tool: "read", isError: false, bytes: 1, spoolPath: "/x/aaa.json" };
-		const second = { blockId: "r:c2", code: "bbb", tool: "read", isError: false, bytes: 2, spoolPath: "/x/bbb.json" };
-		recordSpoolEntry(ledger, first);
-		ledger.appendEntry(FOLD_CUSTOM_TYPE, { kind: "gate", entry: second });
+		const first = foldEntry("c1", "alpha content");
+		recordFoldEntry(ledger, first);
+		// Legacy records carry spool baggage and no sha; restore keeps only ledger-relevant fields.
+		ledger.appendEntry(FOLD_CUSTOM_TYPE, {
+			kind: "gate",
+			entry: { blockId: "r:c2", code: "bbb", tool: "read", isError: false, bytes: 2, spoolPath: "/x/bbb.json", dedupOf: "aaa" },
+		});
+		ledger.appendEntry(FOLD_CUSTOM_TYPE, {
+			kind: "spool",
+			entry: { blockId: "r:c3", code: "ccc", tool: "bash", isError: true, bytes: 3, spoolPath: "/x/ccc.json" },
+		});
 		recordUnfold(ledger, ["r:c1"]);
 
-		const { spoolEntries, unfoldedIds } = restoreFoldState(ledger.entries);
-		expect(spoolEntries.map((entry) => entry.blockId).sort()).toEqual(["r:c1", "r:c2"]);
+		const { foldEntries, unfoldedIds } = restoreFoldState(ledger.entries);
+		expect(foldEntries.map((entry) => entry.blockId).sort()).toEqual(["r:c1", "r:c2", "r:c3"]);
 		expect([...unfoldedIds]).toEqual(["r:c1"]);
+
+		const byId = new Map(foldEntries.map((entry) => [entry.blockId, entry] as const));
+		expect(byId.get("r:c1")!.sha256).toBe(first.sha256);
+		expect(byId.get("r:c2")!.sha256).toBeUndefined();
+		expect(byId.get("r:c2")).not.toHaveProperty("spoolPath");
+		expect(byId.get("r:c2")).not.toHaveProperty("dedupOf");
+		expect(byId.get("r:c3")!.isError).toBe(true);
 	});
 
-	it("ignores unrelated custom entries", () => {
-		const entries = [{ type: "custom", customType: "someone.else", data: { kind: "spool" } }];
-		expect(restoreFoldState(entries).spoolEntries).toEqual([]);
+	it("keeps the latest record per block", () => {
+		const ledger = new FakeLedger();
+		const stale = { ...foldEntry("c1", "old"), tool: "old-tool" };
+		recordFoldEntry(ledger, stale);
+		const fresh = foldEntry("c1", "new content");
+		recordFoldEntry(ledger, fresh);
+		const { foldEntries } = restoreFoldState(ledger.entries);
+		expect(foldEntries).toHaveLength(1);
+		expect(foldEntries[0].sha256).toBe(fresh.sha256);
+		expect(foldEntries[0].tool).toBe("read");
+	});
+
+	it("ignores unrelated custom entries and unknown kinds", () => {
+		const entries = [
+			{ type: "custom", customType: "someone.else", data: { kind: "fold" } },
+			{ type: "custom", customType: FOLD_CUSTOM_TYPE, data: { kind: "mystery", entry: { blockId: "r:cz" } } },
+		];
+		expect(restoreFoldState(entries).foldEntries).toEqual([]);
 	});
 });
 
 describe("resume restores folds and recall", () => {
-	it("rebuilds frozen layers while every persisted handle still resolves", () => {
+	it("rebuilds frozen layers while every persisted handle still resolves from the ledger", () => {
 		const a = flood("ALPHA");
 		const b = flood("BETA");
 		const messages = twoReadSession(a, b);
 		const blocks = linearize(messages);
 		const ledger = new FakeLedger();
-		const store = new SpoolStore(dir);
-		for (const [callId, content] of [["c1", a], ["c2", b]] as const) recordSpoolEntry(ledger, spoolEntry(store, callId, content));
+		for (const [callId, content] of [["c1", a], ["c2", b]] as const) recordFoldEntry(ledger, foldEntry(callId, content));
 		recordLayer(ledger, {
 			seq: 1,
 			entries: blocks
@@ -107,11 +127,10 @@ describe("resume restores folds and recall", () => {
 		recordUnfold(ledger, ["r:c1"]);
 
 		const restored = restoreFoldState(ledger.entries);
-		const { valid, dropped } = revalidateSpools(restored.spoolEntries);
-		expect(dropped).toEqual([]);
-		const registry = new MapSpoolRegistry();
-		for (const entry of valid) registry.set(entry);
+		const registry = new MapFoldRegistry();
+		for (const entry of restored.foldEntries) registry.set(entry);
 		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, registry);
+		engine.attachLedger(readerOver(messages));
 		engine.restoreLayers(restored.layers);
 		engine.restoreUnfolded(restored.unfoldedIds);
 
@@ -124,14 +143,30 @@ describe("resume restores folds and recall", () => {
 		expect(b.startsWith(engine.resolveRecall([foldCode("r:c2")]).matches[0].text)).toBe(true);
 	});
 
-	it("drops a restored entry whose spool vanished", () => {
+	it("degrades a legacy record to an unverified ledger read, and errors when the block is gone", () => {
+		const content = flood("GAMMA");
+		const messages = twoReadSession(content, flood("DELTA"));
 		const ledger = new FakeLedger();
-		const entry = spoolEntry(new SpoolStore(dir), "c1", flood("GAMMA"));
-		recordSpoolEntry(ledger, entry);
-		rmSync(dir, { recursive: true, force: true });
+		ledger.appendEntry(FOLD_CUSTOM_TYPE, {
+			kind: "spool",
+			entry: { blockId: "r:c1", code: foldCode("r:c1"), tool: "read", isError: false, bytes: 42, spoolPath: "/gone/x.json" },
+		});
+		const restored = restoreFoldState(ledger.entries);
+		const registry = new MapFoldRegistry();
+		for (const entry of restored.foldEntries) registry.set(entry);
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, registry);
 
-		const { valid, dropped } = revalidateSpools(restoreFoldState(ledger.entries).spoolEntries);
-		expect(valid).toEqual([]);
-		expect(dropped[0].code).toBe(foldCode("r:c1"));
+		// Block present in the ledger: served, but flagged unverified (no fold-time sha).
+		engine.attachLedger(readerOver(messages));
+		const served = engine.resolveRecall([foldCode("r:c1")]);
+		expect(served.errors).toEqual([]);
+		expect(content.startsWith(served.matches[0].text)).toBe(true);
+		expect(served.matches[0].note).toContain("unverified");
+
+		// Block absent from the ledger: a typed error naming the code, not a crash.
+		engine.attachLedger(readerOver([user("unrelated session")]));
+		const gone = engine.resolveRecall([foldCode("r:c1")]);
+		expect(gone.matches).toEqual([]);
+		expect(gone.errors[0].message).toContain("not found in the session ledger");
 	});
 });

@@ -1,7 +1,8 @@
 /*
- * index-emission.test.ts — the adapter's fold-event → seed-index pipeline: masked blocks are
- * spooled durably (sha256-verified), spans point at readable envelopes, the JSONL record carries
- * the planted mid-output identifiers, and resume keeps appending instead of rewriting.
+ * index-emission.test.ts — the adapter's fold-event → seed-index pipeline: masked blocks get
+ * fold records (sha256 anchored to the block text), spans carry the extent and fold-time sha,
+ * the JSONL record carries the planted mid-output identifiers, and resume keeps appending
+ * instead of rewriting.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,10 +10,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapSpoolRegistry } from "../src/core/spool-registry";
-import { SpoolStore, readEnvelopeAt } from "../src/adapters/pi/spool";
+import { MapFoldRegistry } from "../src/core/fold-registry";
+import { sha256Hex } from "../src/adapters/pi/ledger";
 import { SeedIndexStore, emitFoldIndex } from "../src/adapters/pi/index-store";
-import type { AgentMessage } from "../src/core/block";
+import { linearize, type AgentMessage } from "../src/core/block";
 import { user, assistantText, assistantWithCalls, bigResult, toolResult } from "./helpers";
 
 let dir: string;
@@ -20,12 +21,11 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 function setup() {
 	dir = mkdtempSync(join(tmpdir(), "contextfold-index-"));
-	const registry = new MapSpoolRegistry();
-	const spool = new SpoolStore(dir);
+	const registry = new MapFoldRegistry();
 	const index = new SeedIndexStore(dir);
 	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
-	e.onFoldEvent = (ev) => emitFoldIndex(ev, { spool, registry, index, sessionId: "s-test", now: 1_722_200_000_000 });
-	return { e, registry, spool, index };
+	e.onFoldEvent = (ev) => emitFoldIndex(ev, { registry, index, sessionId: "s-test", now: 1_722_200_000_000 });
+	return { e, registry, index };
 }
 
 function bigSession(): AgentMessage[] {
@@ -46,9 +46,10 @@ function bigSession(): AgentMessage[] {
 }
 
 describe("seed-index emission at fold events", () => {
-	it("writes one record per event with spans that resolve to sha-verified spool envelopes", () => {
+	it("writes one record per event with spans whose sha256 anchors the masked block text", () => {
 		const { e, index } = setup();
-		e.process(bigSession(), { contextWindow: 80_000, tokens: null });
+		const messages = bigSession();
+		e.process(messages, { contextWindow: 80_000, tokens: null });
 
 		const records = index.readAll();
 		expect(records.length).toBe(1);
@@ -58,10 +59,13 @@ describe("seed-index emission at fold events", () => {
 		expect(rec.trigger).toBe("threshold");
 		expect(rec.spans.length).toBeGreaterThan(0);
 
-		// Every span's log path is a readable, integrity-checked envelope with the full content.
+		// Every span's sha256 verifies against the source block text, and its extent matches.
+		const byId = new Map(linearize(messages).map((b) => [b.id, b] as const));
 		for (const span of rec.spans) {
-			const env = readEnvelopeAt(span.log.path);
-			expect(env.bytes).toBe(span.log.byteEnd);
+			const block = byId.get(span.blockId);
+			expect(block).toBeDefined();
+			expect(span.sha256).toBe(sha256Hex(block!.text));
+			expect(span.log.bytes).toBe(Buffer.byteLength(block!.text, "utf8"));
 		}
 	});
 
@@ -77,16 +81,18 @@ describe("seed-index emission at fold events", () => {
 		expect(rec.userMessages[0].firstLine).toContain("capacity limit");
 	});
 
-	it("a masked block's span content is recoverable byte-exact from the spool", () => {
-		const { e, index } = setup();
+	it("a masked block's registry entry names its extent and fold-time sha", () => {
+		const { e, registry, index } = setup();
 		const messages = bigSession();
 		e.process(messages, { contextWindow: 80_000, tokens: null });
 		const rec = index.readAll()[0];
 		const span = rec.spans.find((s) => s.blockId === "r:cx");
 		expect(span).toBeDefined();
-		const env = readEnvelopeAt(span!.log.path);
-		expect(env.content).toContain("CAP_X9_LIMIT=52418");
-		expect(env.content.split("\n").length).toBe(span!.log.lines);
+		const entry = registry.get("r:cx");
+		expect(entry).toBeDefined();
+		const text = linearize(messages).find((b) => b.id === "r:cx")!.text;
+		expect(entry!.sha256).toBe(sha256Hex(text));
+		expect(text.split("\n").length).toBe(span!.log.lines);
 	});
 
 	it("appends across events — earlier records are never rewritten", () => {
@@ -104,10 +110,9 @@ describe("seed-index emission at fold events", () => {
 		expect(records[0].seq).toBe(1); // first record intact
 	});
 
-	it("publishes registry entries only after index and spool-ledger persistence succeed", () => {
+	it("publishes registry entries only after index and fold-record persistence succeed", () => {
 		dir = mkdtempSync(join(tmpdir(), "contextfold-index-"));
-		const registry = new MapSpoolRegistry();
-		const spool = new SpoolStore(dir);
+		const registry = new MapFoldRegistry();
 		const index = new SeedIndexStore(dir);
 		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
 		let event: Parameters<typeof emitFoldIndex>[0] | undefined;
@@ -123,13 +128,12 @@ describe("seed-index emission at fold events", () => {
 			throw new Error("index unavailable");
 		};
 		expect(() =>
-			emitFoldIndex(event!, { spool, registry, index: unavailableIndex, sessionId: "s-test" }),
+			emitFoldIndex(event!, { registry, index: unavailableIndex, sessionId: "s-test" }),
 		).toThrow("index unavailable");
 		expect(registry.size).toBe(0);
 
 		expect(() =>
 			emitFoldIndex(event!, {
-				spool,
 				registry,
 				index,
 				sessionId: "s-test",
@@ -142,7 +146,6 @@ describe("seed-index emission at fold events", () => {
 
 		const persisted: string[] = [];
 		emitFoldIndex(event!, {
-			spool,
 			registry,
 			index,
 			sessionId: "s-test",

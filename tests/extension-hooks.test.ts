@@ -73,7 +73,15 @@ afterEach(() => {
 });
 
 /** A ctx shaped like Pi's, backed by a real on-disk session dir. */
-function ctxFor(opts: { sessionId?: string; entries?: unknown[]; usage?: { contextWindow: number; tokens: number | null } | null } = {}) {
+function ctxFor(
+	opts: {
+		sessionId?: string;
+		entries?: unknown[];
+		/** Message payloads for the session ledger, wrapped as Pi's SessionMessageEntry shape. */
+		messages?: AgentMessage[];
+		usage?: { contextWindow: number; tokens: number | null } | null;
+	} = {},
+) {
 	const notices: string[] = [];
 	const statuses: Record<string, string | undefined> = {};
 	return {
@@ -84,7 +92,7 @@ function ctxFor(opts: { sessionId?: string; entries?: unknown[]; usage?: { conte
 			sessionManager: {
 				getSessionDir: () => dir,
 				getSessionId: () => opts.sessionId ?? "s1",
-				getEntries: () => opts.entries ?? [],
+				getEntries: () => [...(opts.messages ?? []).map((m) => ({ type: "message", message: m })), ...(opts.entries ?? [])],
 			},
 			getContextUsage: () => opts.usage ?? { contextWindow: 200_000, tokens: null },
 			ui: {
@@ -194,7 +202,7 @@ describe.skipIf(!PI_PRESENT)("session_start hook", () => {
 		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
 		const messages = heavySession();
 		await first.hooks.get("context")!({ messages }, ctx);
-		expect(first.entries.some((entry) => (entry.data as { kind?: string }).kind === "spool")).toBe(true);
+		expect(first.entries.some((entry) => (entry.data as { kind?: string }).kind === "fold")).toBe(true);
 		expect(first.entries.some((entry) => (entry.data as { kind?: string }).kind === "layer")).toBe(true);
 
 		// A fresh process: only the recorded ledger entries survive.
@@ -212,8 +220,8 @@ describe.skipIf(!PI_PRESENT)("session_start hook", () => {
 		const firstCtx = ctxFor({ sessionId: "s1", usage: { contextWindow: 80_000, tokens: null } }).ctx;
 		await s.hooks.get("session_start")!({}, firstCtx);
 		await s.hooks.get("context")!({ messages: heavySession() }, firstCtx);
-		const spoolRecord = s.entries.find((entry) => (entry.data as { kind?: string }).kind === "spool")!;
-		const code = (spoolRecord.data as { entry: { code: string } }).entry.code;
+		const foldRecord = s.entries.find((entry) => (entry.data as { kind?: string }).kind === "fold")!;
+		const code = (foldRecord.data as { entry: { code: string } }).entry.code;
 
 		// Switch sessions in the same process, carrying no ledger into the new one.
 		await s.hooks.get("session_start")!({}, ctxFor({ sessionId: "s2", entries: [] }).ctx);
@@ -326,7 +334,6 @@ describe.skipIf(!PI_PRESENT)("session_before_compact hook", () => {
 	it("covers turnPrefixMessages, the mid-turn half Pi also drops", async () => {
 		process.env.CONTEXTFOLD_COMPACT = "det";
 		const s = await load();
-		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
 
 		// Exactly the live shape that lost a session's history: the cut fell inside the opening turn, so
 		// everything the session had done sat in the turn prefix and nothing preceded it.
@@ -336,6 +343,8 @@ describe.skipIf(!PI_PRESENT)("session_before_compact hook", () => {
 			toolResult("tp0", `SENTINEL_PREFIX_BODY\n${"line of prefix output\n".repeat(400)}`),
 			assistantText("the prefix turn reached this conclusion"),
 		];
+		// The session ledger keeps the raw prefix messages — that is where recall re-locates them.
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null }, messages: prefix });
 
 		const out = (await s.hooks.get("session_before_compact")!(
 			{ preparation: { messagesToSummarize: [], turnPrefixMessages: prefix, tokensBefore: 40_000, firstKeptEntryId: "e9" } },

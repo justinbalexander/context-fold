@@ -22,8 +22,9 @@ const CAP_PREVIOUS_SUMMARY_CHARS = 4_000;
 
 export interface DetCompactionInput {
 	records: SeedIndexRecord[];
-	/** The session spool directory (named so the agent can grep it directly if tools allow). */
-	spoolDir: string;
+	/** The session's JSONL file — the append-only ledger holding every raw payload (named so the
+	 *  agent can grep it directly if tools allow). */
+	sessionFilePath?: string;
 	/** Pi's previous compaction summary, carried verbatim as untrusted narrative. */
 	previousSummary?: string;
 }
@@ -49,7 +50,7 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
 		"Everything below is extracted VERBATIM from the session; nothing is paraphrased.",
 		"Full history is preserved on disk. To recover detail: `recall_folded search=<term>` sweeps every",
 		"folded block in one call; `recall_folded <code>` / `recall_folded <code> lines=<a-b>` pulls a specific one.",
-		`Ground truth: ${input.spoolDir}`,
+		`Ground truth: the session ledger${input.sessionFilePath ? ` at ${input.sessionFilePath}` : ""}`,
 	];
 
 	if (userMessages.length) {

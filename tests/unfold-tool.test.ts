@@ -6,46 +6,37 @@
  * the registered `execute` functions the way Pi does, rather than calling the engine directly, so
  * the parameter handling (search vs codes, the grep fallback, the empty call) is covered too.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapSpoolRegistry } from "../src/core/spool-registry";
+import { MapFoldRegistry } from "../src/core/fold-registry";
 import { foldCode } from "../src/core/digest";
-import { SpoolStore } from "../src/adapters/pi/spool";
+import { LedgerReader, sha256Hex } from "../src/adapters/pi/ledger";
 import { registerFoldTools } from "../src/adapters/pi/unfold-tool";
 import type { AgentMessage } from "../src/core/block";
 import { user, assistantWithCalls, bigResult, toolResult } from "./helpers";
 
-let spoolDir: string;
-beforeEach(() => {
-	spoolDir = mkdtempSync(join(tmpdir(), "cf-tools-"));
-});
-afterEach(() => {
-	rmSync(spoolDir, { recursive: true, force: true });
-});
-
 /**
- * A spool-backed fold plus the registered tools. Partial retrieval reads the exact spool envelope.
+ * A ledger-backed fold plus the registered tools. Partial retrieval reads the block re-located
+ * in the session ledger (the block is NOT in the live snapshot — the post-compaction shape).
  */
-function spoolBacked(): { tools: Map<string, StubTool>; code: string } {
-	const registry = new MapSpoolRegistry();
-	const store = new SpoolStore(spoolDir);
+function ledgerBacked(): { tools: Map<string, StubTool>; code: string } {
+	const registry = new MapFoldRegistry();
 	const blockId = "r:c0";
 	const code = foldCode(blockId);
-	const written = store.write({ blockId, code, tool: "read", input: undefined, isError: false, content: needleBody() });
+	const content = needleBody();
 	registry.set({
 		blockId,
 		code,
 		tool: "read",
 		isError: false,
-		bytes: written.envelope.bytes,
-		spoolPath: store.pathFor(code),
+		bytes: Buffer.byteLength(content, "utf8"),
+		sha256: sha256Hex(content),
 	});
 
 	const engine = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
+	const messages: AgentMessage[] = [user("read it"), assistantWithCalls([{ id: "c0", name: "read" }]), toolResult("c0", content)];
+	engine.attachLedger(new LedgerReader(() => messages.map((m) => ({ type: "message", message: m }))));
 	const tools = new Map<string, StubTool>();
 	registerFoldTools({ registerTool: (t: StubTool) => tools.set(t.name, t) } as never, engine, () => {});
 	return { tools, code };
@@ -58,7 +49,7 @@ interface StubTool {
 
 /** A folded session plus the registered tools, wired exactly as the extension wires them. */
 function foldedSession(): { tools: Map<string, StubTool>; engine: ContextFoldEngine; messages: AgentMessage[]; unfoldedIds: string[] } {
-	const engine = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapSpoolRegistry());
+	const engine = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, new MapFoldRegistry());
 	const messages: AgentMessage[] = [user("build the thing")];
 	for (let i = 0; i < 8; i++) {
 		messages.push(assistantWithCalls([{ id: `c${i}`, name: "read" }]));
@@ -108,8 +99,8 @@ describe("recall tool", () => {
 		expect(block.content[0].text).toContain("FOLDED");
 	});
 
-	it("slices a spool-backed fold with grep instead of returning the whole result", async () => {
-		const { tools, code } = spoolBacked();
+	it("slices a ledger-backed fold with grep instead of returning the whole result", async () => {
+		const { tools, code } = ledgerBacked();
 		const res = await tools.get("recall_folded")!.execute("t1", { codes: [code], grep: "SPECIFIC_NEEDLE_XYZ" });
 		const body = text(res);
 
@@ -129,7 +120,7 @@ describe("recall tool", () => {
 	});
 
 	it("with codes AND search but no grep, search becomes the slice term", async () => {
-		const { tools, code } = spoolBacked();
+		const { tools, code } = ledgerBacked();
 		const res = await tools.get("recall_folded")!.execute("t1", { codes: [code], search: "SPECIFIC_NEEDLE_XYZ" });
 		const body = text(res);
 
@@ -159,9 +150,9 @@ describe("recall tool", () => {
 });
 
 describe("unfold tool", () => {
-	it("names the compacted state for a spool-only code instead of claiming it does not exist", async () => {
-		// spoolBacked never runs process(): the snapshot is empty, exactly the post-compaction shape.
-		const { tools, code } = spoolBacked();
+	it("names the compacted state for a registry-only code instead of claiming it does not exist", async () => {
+		// ledgerBacked never runs process(): the snapshot is empty, exactly the post-compaction shape.
+		const { tools, code } = ledgerBacked();
 		const res = await tools.get("unfold")!.execute("t1", { codes: [code] });
 		expect(text(res)).toContain("compacted out of live history");
 		expect(text(res)).toContain(`recall_folded ${code}`);

@@ -9,25 +9,29 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapSpoolRegistry } from "../src/core/spool-registry";
-import { SpoolStore } from "../src/adapters/pi/spool";
-import { SeedIndexStore, emitFoldIndex, emitCompactIndex, spoolCompactedBlocks } from "../src/adapters/pi/index-store";
+import { MapFoldRegistry } from "../src/core/fold-registry";
+import { LedgerReader } from "../src/adapters/pi/ledger";
+import { SeedIndexStore, emitFoldIndex, emitCompactIndex, recordCompactedBlocks } from "../src/adapters/pi/index-store";
 import { renderDetCompactionSummary } from "../src/adapters/pi/compact";
 import { linearize, type WireBlock } from "../src/core/block";
 import type { AgentMessage } from "../src/core/block";
 import { user, assistantText, assistantWithCalls, bigResult, toolResult } from "./helpers";
+
+/** A LedgerReader over a plain message array shaped like Pi's session entries. */
+function readerOver(messages: AgentMessage[]): LedgerReader {
+	return new LedgerReader(() => messages.map((m) => ({ type: "message", message: m })));
+}
 
 let dir: string;
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 function setup() {
 	dir = mkdtempSync(join(tmpdir(), "contextfold-compact-"));
-	const registry = new MapSpoolRegistry();
-	const spool = new SpoolStore(dir);
+	const registry = new MapFoldRegistry();
 	const index = new SeedIndexStore(dir);
 	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
-	e.onFoldEvent = (ev) => emitFoldIndex(ev, { spool, registry, index, sessionId: "s-compact", now: 1_722_200_000_000 });
-	return { e, registry, spool, index };
+	e.onFoldEvent = (ev) => emitFoldIndex(ev, { registry, index, sessionId: "s-compact", now: 1_722_200_000_000 });
+	return { e, registry, index };
 }
 
 function needled(): { messages: AgentMessage[]; needle: string } {
@@ -47,10 +51,11 @@ function needled(): { messages: AgentMessage[]; needle: string } {
 }
 
 describe("recall survives hard compaction", () => {
-	it("a ladder-masked block resolves from the spool once its raw message left history", () => {
+	it("a ladder-masked block resolves from the ledger once its raw message left history", () => {
 		const { e, index } = setup();
 		const { messages, needle } = needled();
-		e.process(messages, { contextWindow: 80_000, tokens: null }); // fold event → spool + registry
+		e.attachLedger(readerOver(messages)); // the append-only session ledger keeps every raw message
+		e.process(messages, { contextWindow: 80_000, tokens: null }); // fold event → record + registry
 
 		const rec = index.readAll()[0];
 		const span = rec.spans.find((s) => s.blockId === "r:cx");
@@ -66,8 +71,8 @@ describe("recall survives hard compaction", () => {
 		expect(matches[0].text).toContain(needle);
 	});
 
-	it("spool-at-compaction makes a NEVER-folded block recallable after it leaves history", () => {
-		const { e, registry, spool, index } = setup();
+	it("record-at-compaction makes a NEVER-folded block recallable after it leaves history", () => {
+		const { e, registry, index } = setup();
 		// A short session compacted before any fold event: nothing is in the registry yet.
 		const needle = "UNFOLDED_NEEDLE_Z7=140072";
 		const lines = Array.from({ length: 200 }, (_, j) => `u${j}: ${"w".repeat(30)}`);
@@ -79,10 +84,11 @@ describe("recall survives hard compaction", () => {
 			assistantText("done", "after-cu"),
 		];
 		expect(registry.size).toBe(0);
+		e.attachLedger(readerOver(messages));
 
-		// Hard compaction: spool the leaving span, then emit the compact record.
+		// Hard compaction: record the leaving span, then emit the compact record.
 		const blocks = linearize(messages) as unknown as WireBlock[];
-		const added = spoolCompactedBlocks(blocks, { spool, registry, now: 1_722_200_200_000 });
+		const added = recordCompactedBlocks(blocks, { registry });
 		expect(added.map((a) => a.blockId)).toContain("r:cu");
 		const rec = emitCompactIndex(blocks, {
 			registry, index, sessionId: "s-compact", tokensBefore: 5_000, contextWindow: 80_000, now: 1_722_200_200_000,
@@ -122,7 +128,7 @@ describe("compact index record + deterministic summary", () => {
 
 		const summary = renderDetCompactionSummary({
 			records: index.readAll(),
-			spoolDir: dir,
+			sessionFilePath: join(dir, "session.jsonl"),
 			previousSummary: "Earlier narrative summary.",
 		});
 		expect(summary).toContain("deterministic seed index — no model involved");
@@ -137,8 +143,9 @@ describe("compact index record + deterministic summary", () => {
 
 	it("renders a usable (if sparse) summary even with no records", () => {
 		dir = mkdtempSync(join(tmpdir(), "contextfold-compact-"));
-		const summary = renderDetCompactionSummary({ records: [], spoolDir: dir });
+		const file = join(dir, "session.jsonl");
+		const summary = renderDetCompactionSummary({ records: [], sessionFilePath: file });
 		expect(summary).toContain("deterministic seed index");
-		expect(summary).toContain(dir);
+		expect(summary).toContain(file);
 	});
 });

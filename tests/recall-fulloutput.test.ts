@@ -3,9 +3,9 @@
  *
  * A toolResult message that carries `details.fullOutputPath` (bash's truncation escape hatch,
  * persisted in the session JSONL) must thread that path — and the paired tool call's typed
- * input — through linearize, the spool envelope, the registry entry, and the seed-index span,
- * so recall grep/lines answer from the tool's own full-output file instead of the truncated
- * content. Expected values are independent literals, never recomputed the way the code does.
+ * input — through linearize, the registry entry, and the seed-index span, so recall grep/lines
+ * answer from the tool's own full-output file instead of the truncated content. Expected values
+ * are independent literals, never recomputed the way the code does.
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,8 +14,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { linearize, type AgentMessage } from "../src/core/block";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapSpoolRegistry } from "../src/core/spool-registry";
-import { SpoolStore, readEnvelopeAt } from "../src/adapters/pi/spool";
+import { MapFoldRegistry } from "../src/core/fold-registry";
+import { LedgerReader } from "../src/adapters/pi/ledger";
 import { SeedIndexStore, emitFoldIndex } from "../src/adapters/pi/index-store";
 import { foldCode } from "../src/core/digest";
 import { user, assistantText, assistantWithCalls, bigResult, toolResult } from "./helpers";
@@ -57,15 +57,14 @@ describe("linearize carries typed input and details.fullOutputPath (pure)", () =
 	});
 });
 
-describe("fold event threads input + fullOutputPath to envelope, registry, span, and recall", () => {
+describe("fold event threads fullOutputPath to registry, span, and recall", () => {
 	function setup() {
 		const d = mkdtempSync(join(tmpdir(), "contextfold-fullout-"));
 		dir = d;
-		const registry = new MapSpoolRegistry();
-		const spool = new SpoolStore(d);
+		const registry = new MapFoldRegistry();
 		const index = new SeedIndexStore(d);
 		const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
-		e.onFoldEvent = (ev) => emitFoldIndex(ev, { spool, registry, index, sessionId: "s-fullout", now: 1_722_200_000_000 });
+		e.onFoldEvent = (ev) => emitFoldIndex(ev, { registry, index, sessionId: "s-fullout", now: 1_722_200_000_000 });
 		return { e, registry, index, dir: d };
 	}
 
@@ -84,19 +83,17 @@ describe("fold event threads input + fullOutputPath to envelope, registry, span,
 		return messages;
 	}
 
-	it("envelope + registry + span carry the metadata, and grep answers from the full-output file", () => {
-		const { e, registry, index, dir: d } = setup();
-		// The full-output file holds a needle the truncated (spooled) content does NOT contain.
+	it("registry + span carry the metadata, and grep answers from the full-output file", () => {
+		const { e, registry, index } = setup();
+		// The full-output file holds a needle the truncated (in-ledger) content does NOT contain.
 		const fullPath = join(mkdtempSync(join(tmpdir(), "contextfold-fulloutlog-")), "pi-bash-cbash.log");
 		writeFileSync(fullPath, ["head line", "NEEDLE_ONLY_IN_FULL_OUTPUT=77", "tail line"].join("\n"), "utf8");
 
-		e.process(sessionWithFullOutput(fullPath), { contextWindow: 80_000, tokens: null });
+		const messages = sessionWithFullOutput(fullPath);
+		e.attachLedger(new LedgerReader(() => messages.map((m) => ({ type: "message", message: m }))));
+		e.process(messages, { contextWindow: 80_000, tokens: null });
 
 		const code = foldCode("r:cbash");
-		const env = readEnvelopeAt(join(d, `${code}.json`));
-		expect(env.input).toEqual({ command: "make bench" });
-		expect(env.fullOutputPath).toBe(fullPath);
-
 		expect(registry.get("r:cbash")?.fullOutputPath).toBe(fullPath);
 
 		const span = index

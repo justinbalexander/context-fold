@@ -104,7 +104,7 @@ describe("seed-index extraction", () => {
 		expect(new Set(idx.identifiers).size).toBe(idx.identifiers.length);
 	});
 
-	it("assembles a complete v1 record", () => {
+	it("assembles a complete v2 record", () => {
 		const { all, masked } = fixture();
 		const rec = buildIndexRecord(
 			{
@@ -122,11 +122,12 @@ describe("seed-index extraction", () => {
 					code: "abc123",
 					tool: "bash",
 					turn: masked[0].turn,
-					log: { path: "/tmp/spool/abc123.json", byteStart: 0, byteEnd: 100, lines: 5 },
+					log: { bytes: 100, lines: 5 },
+					sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 				},
 			],
 		);
-		expect(rec.v).toBe(1);
+		expect(rec.v).toBe(2);
 		expect(rec.kind).toBe("fold-index");
 		expect(rec.spans).toHaveLength(1);
 		expect(rec.errors.length).toBeGreaterThan(0);

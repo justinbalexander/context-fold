@@ -14,19 +14,21 @@ import { ERROR_MARKER_SOURCE, errorMarkerRe } from "../policy/ledger";
 import { firstLine, safeSlice } from "../tokens";
 import type { WireBlock } from "../block";
 
-/** One recovery pointer: where a folded span's full content durably lives (spec §spans). */
+/** One recovery pointer: names a folded block in the session ledger and its extent (spec §spans). */
 export interface IndexSpan {
 	blockId: string;
 	/** The in-context recall handle ({#code FOLDED}). */
 	code?: string;
 	tool?: string;
 	turn: number;
-	log: { path: string; byteStart: number; byteEnd: number; lines: number };
+	log: { bytes: number; lines: number };
+	/** sha256 (hex) of the block text at fold time — what recall verifies the ledger bytes against. */
+	sha256?: string;
 	fullOutputPath?: string;
 }
 
 export interface SeedIndexRecord {
-	v: 1;
+	v: number;
 	kind: "fold-index";
 	harness: string;
 	session: string;
@@ -141,7 +143,7 @@ export function buildIndexRecord(
 	extracted: ExtractedIndex,
 	spans: IndexSpan[],
 ): SeedIndexRecord {
-	return { v: 1, kind: "fold-index", ...envelope, ...extracted, spans };
+	return { v: 2, kind: "fold-index", ...envelope, ...extracted, spans };
 }
 
 // ── extraction internals ─────────────────────────────────────────────────────

@@ -17,14 +17,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage as CoreAgentMessage } from "../../core/block";
 import { FoldLadderPolicy } from "../../core/policy/fold-ladder";
 import { ContextFoldEngine, DEFAULT_CONFIG } from "./store";
-import { SeedIndexStore, emitFoldIndex, emitCompactIndex, spoolCompactedBlocks } from "./index-store";
+import { SeedIndexStore, emitFoldIndex, emitCompactIndex, recordCompactedBlocks } from "./index-store";
 import { renderDetCompactionSummary } from "./compact";
 import { registerHandoffCommand } from "./handoff";
 import { linearize, type WireBlock } from "../../core/block";
 import { registerFoldTools } from "./unfold-tool";
-import { MapSpoolRegistry } from "../../core/spool-registry";
-import { SpoolStore } from "./spool";
-import { recordSpoolEntry, recordLayer, recordUnfold, restoreFoldState, revalidateSpools } from "./persistence";
+import { MapFoldRegistry } from "../../core/fold-registry";
+import { LedgerReader } from "./ledger";
+import { recordFoldEntry, recordLayer, recordUnfold, restoreFoldState } from "./persistence";
 import { spoolRetainMsFromEnv, sweepSpools, sweepWorkspaceSpools, touchHeartbeat } from "./retention";
 import { CacheTelemetry, k } from "./cache-telemetry";
 import { advise } from "./advisor";
@@ -45,8 +45,8 @@ export default function contextFold(pi: ExtensionAPI): void {
 	const foldCfg = configFromEnv(savedSettings);
 	const ladderPolicy = new FoldLadderPolicy(acfg.ladder);
 
-	// Exact originals for ladder folds, shared by fold-index emission and recall.
-	const registry = new MapSpoolRegistry();
+	// Fold metadata for ladder folds, shared by fold-index emission and recall.
+	const registry = new MapFoldRegistry();
 	const engine = new ContextFoldEngine(ladderPolicy, foldCfg, registry);
 
 	// Settings-menu live apply: re-resolve the whole effective config (default < saved < env) so a
@@ -154,18 +154,18 @@ export default function contextFold(pi: ExtensionAPI): void {
 		setStatus("context-fold", parts.join(" · "));
 	};
 
-	let spool: SpoolStore | null = null;
-	let spoolKey = "";
+	// Recall's ledger route: one cached reader per session, attached on every hook that carries a
+	// ctx so recall works regardless of hook arrival order.
+	let ledgerKey = "";
+	const ensureLedger = (ctx: { sessionManager: { getSessionId(): string; getEntries(): unknown[] } }): void => {
+		const sid = ctx.sessionManager.getSessionId();
+		if (ledgerKey === sid) return;
+		ledgerKey = sid;
+		engine.attachLedger(new LedgerReader(() => ctx.sessionManager.getEntries() as { type?: string; message?: unknown }[]));
+	};
+
 	let indexStore: SeedIndexStore | null = null;
 	let indexKey = "";
-	const spoolFor = (ctx: { sessionManager: { getSessionDir(): string; getSessionId(): string } }): SpoolStore => {
-		const dir = join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId());
-		if (!spool || spoolKey !== dir) {
-			spool = new SpoolStore(dir);
-			spoolKey = dir;
-		}
-		return spool;
-	};
 	const indexFor = (ctx: { sessionManager: { getSessionDir(): string; getSessionId(): string } }): SeedIndexStore => {
 		const dir = join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId());
 		if (!indexStore || indexKey !== dir) {
@@ -175,10 +175,10 @@ export default function contextFold(pi: ExtensionAPI): void {
 		return indexStore;
 	};
 
-	// On resume, rebuild the spool registry, unfold set, and frozen layers from the event-sourced
-	// fold ledger. Revalidate every spool before exposing it to recall.
+	// On resume, rebuild the fold registry, unfold set, and frozen layers from the event-sourced
+	// fold records, and point recall's ledger route at this session's entries.
 	// Keyed by SESSION ID: a session switch inside one process re-restores for the new session and
-	// clears the previous session's registry (stale codes must never serve another session's spool).
+	// clears the previous session's registry (stale codes must never serve another session's blocks).
 	let restoredFor = "";
 	pi.on("session_start", (_event, ctx) => {
 		const sid = ctx.sessionManager.getSessionId();
@@ -219,6 +219,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			warnedWireDeferral = false;
 			ctxUsageIsEstimate = false;
 		}
+		ensureLedger(ctx);
 		updateFooter(ctx);
 
 		// Seq continuity across resume: a compact index record claims max(index)+1, and restoring
@@ -233,10 +234,9 @@ export default function contextFold(pi: ExtensionAPI): void {
 		}
 
 		try {
-			const { spoolEntries, unfoldedIds, layers } = restoreFoldState(ctx.sessionManager.getEntries() as unknown as { customType?: string; data?: unknown }[]);
-			if (spoolEntries.length === 0 && unfoldedIds.size === 0 && layers.length === 0) return;
-			const { valid, dropped } = revalidateSpools(spoolEntries);
-			for (const e of valid) registry.set(e);
+			const { foldEntries, unfoldedIds, layers } = restoreFoldState(ctx.sessionManager.getEntries() as unknown as { customType?: string; data?: unknown }[]);
+			if (foldEntries.length === 0 && unfoldedIds.size === 0 && layers.length === 0) return;
+			for (const e of foldEntries) registry.set(e);
 			engine.restoreUnfolded(unfoldedIds);
 			// Layers restore byte-verbatim — the persisted substitution bytes are replayed rather
 			// than recomputed, so a resumed session's context head is byte-identical to the one
@@ -244,7 +244,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			engine.restoreLayers(layers);
 			if (debug)
 				process.stderr.write(
-					`[context-fold] resume: restored ${valid.length} spool entries, ${unfoldedIds.size} unfolds, ${layers.length} layers${dropped.length ? `, dropped ${dropped.length} (missing spool)` : ""}\n`,
+					`[context-fold] resume: restored ${foldEntries.length} fold entries, ${unfoldedIds.size} unfolds, ${layers.length} layers\n`,
 				);
 		} catch (err) {
 			// Fail-open: a restore failure just means prior folds render raw this session — but say so,
@@ -314,6 +314,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			// so a quiet-but-live session is not reaped by a sibling's session_start sweep. Throttled
 			// internally to once an hour and inert until this session has actually spooled something.
 			touchHeartbeat(join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId()));
+			ensureLedger(ctx);
 			lastContextWindow = ctx.getContextUsage()?.contextWindow ?? lastContextWindow;
 			// Ladder cold branch: no live cache read observed after a few turns ⇒ there is no warm
 			// prefix to protect, so the ladder folds earlier and more freely (measured, not assumed).
@@ -323,11 +324,10 @@ export default function contextFold(pi: ExtensionAPI): void {
 			engine.onFoldEvent = (foldEvent) => {
 				try {
 					const { record: rec, droppedIds } = emitFoldIndex(foldEvent, {
-						spool: spoolFor(ctx),
 						registry,
 						index: indexFor(ctx),
 						sessionId: ctx.sessionManager.getSessionId(),
-						persistEntry: (entry) => recordSpoolEntry(pi, entry),
+						persistEntry: (entry) => recordFoldEntry(pi, entry),
 					});
 					if (droppedIds.length)
 						process.stderr.write(
@@ -380,6 +380,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 		if (acfg.compact !== "det") return;
 		try {
 			const prep = (event as { preparation: { messagesToSummarize: unknown[]; turnPrefixMessages: unknown[]; tokensBefore: number; firstKeptEntryId: string; previousSummary?: string } }).preparation;
+			ensureLedger(ctx);
 			const index = indexFor(ctx);
 			// Pi hands a mid-turn cut over in TWO arrays and drops BOTH from live history:
 			// `messagesToSummarize` is the whole turns before the cut turn, `turnPrefixMessages` is the
@@ -394,15 +395,15 @@ export default function contextFold(pi: ExtensionAPI): void {
 				...(prep.turnPrefixMessages ?? []),
 			] as unknown as CoreAgentMessage[];
 			const blocks = linearize(leaving) as unknown as WireBlock[];
-			// Spool-at-compaction: blocks leaving live history that never folded become recallable
-			// too — the compact record below then carries recovery spans for the whole span.
-			const spooledNow = spoolCompactedBlocks(blocks, {
-				spool: spoolFor(ctx),
+			// Record-at-compaction: blocks leaving live history that never folded get codes and fold
+			// records too — the compact record below then carries recovery spans for the whole span,
+			// and recall resolves them from the ledger.
+			const recordedNow = recordCompactedBlocks(blocks, {
 				registry,
-				persistEntry: (entry) => recordSpoolEntry(pi, entry),
+				persistEntry: (entry) => recordFoldEntry(pi, entry),
 			});
-			if (debug && spooledNow.length)
-				process.stderr.write(`[context-fold] compaction: spooled ${spooledNow.length} unfolded block(s) leaving history\n`);
+			if (debug && recordedNow.length)
+				process.stderr.write(`[context-fold] compaction: recorded ${recordedNow.length} unfolded block(s) leaving history\n`);
 			const compactRecord = emitCompactIndex(blocks, {
 				registry,
 				index,
@@ -416,7 +417,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			pendingCompactSeq = compactRecord.seq;
 			const summary = renderDetCompactionSummary({
 				records: index.readAll(),
-				spoolDir: join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId()),
+				sessionFilePath: ctx.sessionManager.getSessionFile?.(),
 				previousSummary: prep.previousSummary,
 			});
 			if (debug)
@@ -478,7 +479,6 @@ export default function contextFold(pi: ExtensionAPI): void {
 	registerFoldTools(pi, engine, (ids) => recordUnfold(pi, ids));
 	registerHandoffCommand(pi, {
 		indexFor: (hctx) => indexFor(hctx as Parameters<typeof indexFor>[0]),
-		spoolDirFor: (hctx) => join(hctx.sessionManager.getSessionDir(), "spool", hctx.sessionManager.getSessionId()),
 	});
 
 	// Bare: display-only status (no-op safe in headless mode — pure text). `config`/`settings`:

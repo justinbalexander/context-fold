@@ -55,7 +55,7 @@ interface HandoffCtx {
 
 export function registerHandoffCommand(
 	pi: ExtensionAPI,
-	deps: { indexFor(ctx: HandoffCtx): SeedIndexStore; spoolDirFor(ctx: HandoffCtx): string },
+	deps: { indexFor(ctx: HandoffCtx): SeedIndexStore },
 ): void {
 	pi.registerCommand("fold-handoff", {
 		description:
@@ -66,7 +66,7 @@ export function registerHandoffCommand(
 			try {
 				const indexBody = renderDetCompactionSummary({
 					records: deps.indexFor(ctx).readAll(),
-					spoolDir: deps.spoolDirFor(ctx),
+					sessionFilePath: ctx.sessionManager.getSessionFile?.(),
 				});
 				const seed = buildHandoffSeed({
 					goal: typeof args === "string" ? args : "",

@@ -1,25 +1,19 @@
 /*
- * recall-reflood.test.ts — regression for a live recall failure: a spooled
+ * recall-reflood.test.ts — regression for a live recall failure: a folded
  * payload whose content is ONE enormous line (shell wrappers echoing a file as a single string,
  * minified JS, JSONL, base64) must not ride through any recall cap on an "always keep at least
  * one line" rule. Measured live: `recall {code} lines=2-2` returned a 40KB line and re-flooded
  * the folded payload. Every recall surface — whole, lines=, grep=, search= — must hold
  * its cap against this input class, while grep stays USEFUL: the match is windowed, not cut off.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapSpoolRegistry } from "../src/core/spool-registry";
-import { SpoolStore } from "../src/adapters/pi/spool";
+import { MapFoldRegistry } from "../src/core/fold-registry";
+import { LedgerReader, sha256Hex } from "../src/adapters/pi/ledger";
 import { foldCode } from "../src/core/digest";
 import type { AgentMessage } from "../src/core/block";
 import { user, assistantText, assistantWithCalls, toolResult } from "./helpers";
-
-let dir: string;
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 // ~48KB in THREE lines: a small header, one enormous middle line with a needle buried deep
 // (char ~30k), and a small footer — the exact shape of the live failure.
@@ -31,19 +25,16 @@ const PAYLOAD = ["header line", HUGE_LINE, "footer line"].join("\n");
 const FLOOD_CEILING_CHARS = 9_000;
 
 function setup() {
-	dir = mkdtempSync(join(tmpdir(), "contextfold-reflood-"));
-	const registry = new MapSpoolRegistry();
-	const spool = new SpoolStore(dir);
+	const registry = new MapFoldRegistry();
 	const blockId = "r:call-1";
 	const code = foldCode(blockId);
-	const written = spool.write({ blockId, code, tool: "exec", input: undefined, isError: false, content: PAYLOAD });
 	registry.set({
 		blockId,
 		code,
 		tool: "exec",
 		isError: false,
-		bytes: written.envelope.bytes,
-		spoolPath: spool.pathFor(code),
+		bytes: Buffer.byteLength(PAYLOAD, "utf8"),
+		sha256: sha256Hex(PAYLOAD),
 	});
 	const messages: AgentMessage[] = [
 		user("read the file"),
@@ -53,6 +44,7 @@ function setup() {
 		user("now the newest question"),
 	];
 	const e = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
+	e.attachLedger(new LedgerReader(() => messages.map((m) => ({ type: "message", message: m }))));
 	e.process(messages, { contextWindow: 20_000, tokens: null });
 	return { e, code };
 }

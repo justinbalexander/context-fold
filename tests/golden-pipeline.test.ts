@@ -1,8 +1,8 @@
 /*
  * golden-pipeline.test.ts — byte-level characterization of the whole deterministic pipeline:
- * one fixed session in, fixed hashes out (folded messages, seed-index JSONL, spool envelopes,
- * recall). Guards the determinism invariant across refactors; run with GOLDEN_PRINT=1 to see
- * the current hashes when an intentional behavior change moves them.
+ * one fixed session in, fixed hashes out (folded messages, seed-index JSONL, recall). Guards the
+ * determinism invariant across refactors; run with GOLDEN_PRINT=1 to see the current hashes when
+ * an intentional behavior change moves them.
  */
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -11,8 +11,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
-import { MapSpoolRegistry } from "../src/core/spool-registry";
-import { SpoolStore } from "../src/adapters/pi/spool";
+import { MapFoldRegistry } from "../src/core/fold-registry";
+import { LedgerReader } from "../src/adapters/pi/ledger";
 import { SeedIndexStore, emitFoldIndex } from "../src/adapters/pi/index-store";
 import type { AgentMessage } from "../src/core/block";
 import { assistantText, assistantWithCalls, bigResult, toolResult, user } from "./helpers";
@@ -21,9 +21,8 @@ const NOW = 1_722_200_000_000;
 
 const GOLDEN = {
 	folded: "f759c01722ab2b7eca42453c5ecaf880bbd03298feb754c2087713d3dc67cff2",
-	index: "62b44a3c2dfd2f2d5dbabccd8f11f866d2b08f13abe7b6a33ff2f4939a82cc64",
-	spool: "c40035e7521ebdd74372039991582adea9e1ff9a68c5048a1aa8151ddf8227aa",
-	recall: "c038b9a2ff3480f52dc72ecf0b64c574f353a3ed1ffa18c746c8fbc96ad42a36",
+	index: "ee7cdd19956479886a6d9f3aa79c918e526865535f4a9319d27e3784777d2bc9",
+	recall: "60801419797d23a9486f5fe856fade34745b5f1c4d7062f6295b9a9c9e903382",
 };
 
 function sha(s: string): string {
@@ -60,28 +59,25 @@ let dir: string;
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("golden pipeline", () => {
-	it("the fixed session folds, indexes, spools, and recalls to fixed bytes", () => {
+	it("the fixed session folds, indexes, and recalls to fixed bytes — and writes only the JSONL", () => {
 		dir = mkdtempSync(join(tmpdir(), "contextfold-golden-"));
-		const registry = new MapSpoolRegistry();
-		const spool = new SpoolStore(dir);
+		const registry = new MapFoldRegistry();
 		const index = new SeedIndexStore(dir);
 		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { tailTarget: 100 }, registry);
-		engine.onFoldEvent = (ev) => emitFoldIndex(ev, { spool, registry, index, sessionId: "s-golden", now: NOW });
+		engine.onFoldEvent = (ev) => emitFoldIndex(ev, { registry, index, sessionId: "s-golden", now: NOW });
+		const session = fixedSession();
+		engine.attachLedger(new LedgerReader(() => session.map((m) => ({ type: "message", message: m }))));
 
-		const out = engine.process(fixedSession(), 8_000);
+		const out = engine.process(session, 8_000);
 		const foldedJson = JSON.stringify(out);
 		const codes = [...new Set([...foldedJson.matchAll(/\{#([a-z0-9]+) FOLDED/g)].map((m) => m[1]))].sort();
 		expect(codes.length).toBeGreaterThan(0);
 
 		const scrub = (s: string) => s.split(dir).join("<DIR>");
-		const indexBytes = filesUnder(dir)
-			.filter((f) => f.rel.endsWith(".jsonl"))
-			.map((f) => `${f.rel}\n${scrub(f.body)}`)
-			.join("\n---\n");
-		const spoolBytes = filesUnder(dir)
-			.filter((f) => !f.rel.endsWith(".jsonl"))
-			.map((f) => `${f.rel}\n${scrub(f.body)}`)
-			.join("\n---\n");
+		const files = filesUnder(dir);
+		// The seed index is the only on-disk artifact — no spool envelopes, no bookkeeping files.
+		expect(files.map((f) => f.rel)).toEqual(["seed-index.jsonl"]);
+		const indexBytes = files.map((f) => `${f.rel}\n${scrub(f.body)}`).join("\n---\n");
 		const recall = codes.map((c) => [
 			engine.resolveRecall([c]),
 			engine.resolveRecall([c], { grep: "CAP_X9" }),
@@ -90,7 +86,6 @@ describe("golden pipeline", () => {
 		const got = {
 			folded: sha(foldedJson),
 			index: sha(indexBytes),
-			spool: sha(spoolBytes),
 			recall: sha(scrub(JSON.stringify(recall))),
 		};
 		if (process.env.GOLDEN_PRINT) console.log("GOLDEN =", JSON.stringify(got, null, "\t"));

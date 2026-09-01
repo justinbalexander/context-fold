@@ -1,19 +1,19 @@
 /*
- * hardening.test.ts — adapter-level regressions: error-lexicon coverage, spool collision safety,
- * and the lines= re-flood cap.
+ * hardening.test.ts — adapter-level regressions: error-lexicon coverage, fold-code collision
+ * safety, and the lines= re-flood cap.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SpoolStore, SpoolError } from "../src/adapters/pi/spool";
-import { MapSpoolRegistry } from "../src/core/spool-registry";
+import { MapFoldRegistry } from "../src/core/fold-registry";
+import { LedgerReader, sha256Hex } from "../src/adapters/pi/ledger";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
-import { SeedIndexStore, emitFoldIndex } from "../src/adapters/pi/index-store";
+import { SeedIndexStore, emitFoldIndex, recordCompactedBlocks } from "../src/adapters/pi/index-store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
 import { foldCode } from "../src/core/digest";
 import { categorize } from "../src/core/policy/ledger";
-import type { AgentMessage } from "../src/core/block";
+import { linearize, type AgentMessage } from "../src/core/block";
 import { user, assistantText, assistantWithCalls, toolResult } from "./helpers";
 let dir: string;
 beforeEach(() => {
@@ -22,6 +22,11 @@ beforeEach(() => {
 afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
+
+/** A LedgerReader over a plain message array shaped like Pi's session entries. */
+function readerOver(messages: AgentMessage[]): LedgerReader {
+	return new LedgerReader(() => messages.map((m) => ({ type: "message", message: m })));
+}
 
 describe("error lexicon covers real failure spellings", () => {
 	const spellings = [
@@ -41,46 +46,43 @@ describe("error lexicon covers real failure spellings", () => {
 
 });
 
-describe("spool collision guard", () => {
-	it("refuses to overwrite another block's envelope under the same code", () => {
-		const store = new SpoolStore(dir);
-		store.write({ blockId: "r:AAA", code: "col111", tool: "read", input: {}, isError: false, content: "first payload" });
-		expect(() =>
-			store.write({ blockId: "r:BBB", code: "col111", tool: "read", input: {}, isError: false, content: "second payload" }),
-		).toThrow(SpoolError);
-		expect(store.read("col111").content).toBe("first payload"); // original intact
-	});
+/** Two REAL colliding durable ids (birthday search over the 36^6 code space, <100ms). */
+function collidingIds(): [string, string] {
+	const seen = new Map<string, string>();
+	for (let i = 0; ; i++) {
+		const id = `r:call_${i.toString(36)}`;
+		const c = foldCode(id);
+		const prev = seen.get(c);
+		if (prev !== undefined) return [prev, id];
+		seen.set(c, id);
+	}
+}
 
-	it("same block re-spooled with new content overwrites cleanly and drops the stale dedup key", () => {
-		const store = new SpoolStore(dir);
-		store.write({ blockId: "r:AAA", code: "col222", tool: "read", input: {}, isError: false, content: "v1 content" });
-		store.write({ blockId: "r:AAA", code: "col222", tool: "read", input: {}, isError: false, content: "v2 content" });
-		expect(store.read("col222").content).toBe("v2 content");
-		// A later identical-to-v1 payload must NOT alias to the rewritten file.
-		const r = store.write({ blockId: "r:CCC", code: "col333", tool: "read", input: {}, isError: false, content: "v1 content" });
-		expect(r.dedupOf).toBeUndefined();
-		expect(store.read("col333").content).toBe("v1 content");
+describe("fold-code collision guard", () => {
+	it("record-at-compaction refuses to give a second block another block's code", () => {
+		const [a, b] = collidingIds();
+		const registry = new MapFoldRegistry();
+		const messages: AgentMessage[] = [
+			user("both"),
+			assistantWithCalls([{ id: a.slice(2), name: "read" }, { id: b.slice(2), name: "read" }]),
+			toolResult(a.slice(2), "first payload"),
+			toolResult(b.slice(2), "second payload"),
+		];
+		const added = recordCompactedBlocks(linearize(messages), { registry });
+		expect(added.map((e) => e.blockId)).toEqual([a]); // collider skipped, original intact
+		expect(registry.get(a)!.sha256).toBe(sha256Hex("first payload"));
+		expect(registry.get(b)).toBeUndefined();
 	});
 
 	it("a collision drops only the colliding block — folding continues for everything else", () => {
-		// Two REAL colliding durable ids (birthday search over the 36^6 code space, <100ms).
-		const seen = new Map<string, string>();
-		let a = "", b = "";
-		for (let i = 0; ; i++) {
-			const id = `r:call_${i.toString(36)}`;
-			const c = foldCode(id);
-			const prev = seen.get(c);
-			if (prev !== undefined) { a = prev; b = id; break; }
-			seen.set(c, id);
-		}
+		const [a, b] = collidingIds();
 
-		const registry = new MapSpoolRegistry();
-		const spool = new SpoolStore(join(dir, "spool"));
-		const index = new SeedIndexStore(join(dir, "spool"));
+		const registry = new MapFoldRegistry();
+		const index = new SeedIndexStore(join(dir, "index"));
 		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 20_000, tailTarget: 100 }, registry);
 		// Wired exactly as adapters/pi/index.ts wires it: droppedIds flow back to the engine.
 		engine.onFoldEvent = (ev) => {
-			const { droppedIds } = emitFoldIndex(ev, { spool, registry, index, sessionId: "t", persistEntry: () => {} });
+			const { droppedIds } = emitFoldIndex(ev, { registry, index, sessionId: "t", persistEntry: () => {} });
 			return droppedIds.length ? droppedIds : true;
 		};
 		engine.onLayerCommit = () => true;
@@ -88,7 +90,7 @@ describe("spool collision guard", () => {
 		const big = (marker: string) =>
 			Array.from({ length: 600 }, (_, i) => `row ${i}: bulk content for pressure ${"x".repeat(30)}`).join("\n") + `\n${marker}`;
 
-		// Turn 1: block A folds and spools normally under the shared code.
+		// Turn 1: block A folds and records normally under the shared code.
 		const turn1: AgentMessage[] = [
 			user("first"),
 			assistantWithCalls([{ id: a.slice(2), name: "read" }]),
@@ -129,12 +131,13 @@ describe("spool collision guard", () => {
 describe("recall lines= is capped (no re-flood path)", () => {
 	it("an unbounded range comes back token-capped with a paging note", () => {
 		const flood = Array.from({ length: 800 }, (_, i) => `row ${i}: bulky line for the lines-cap scenario ${"y".repeat(40)}`).join("\n");
-		const reg = new MapSpoolRegistry();
-		const store = new SpoolStore(dir);
+		const reg = new MapFoldRegistry();
 		const code = foldCode("r:cL");
-		const written = store.write({ blockId: "r:cL", code, tool: "read", input: undefined, isError: false, content: flood });
-		reg.set({ blockId: "r:cL", code, tool: "read", isError: false, bytes: written.envelope.bytes, spoolPath: store.pathFor(code) });
+		reg.set({ blockId: "r:cL", code, tool: "read", isError: false, bytes: Buffer.byteLength(flood, "utf8"), sha256: sha256Hex(flood) });
 		const engine = new ContextFoldEngine(new FoldLadderPolicy(), { defaultContextWindow: 400_000 }, reg);
+		engine.attachLedger(
+			readerOver([user("go"), assistantWithCalls([{ id: "cL", name: "read" }]), toolResult("cL", flood)]),
+		);
 
 		const { matches } = engine.resolveRecall([code], { lines: "1-999999" });
 		expect(matches).toHaveLength(1);

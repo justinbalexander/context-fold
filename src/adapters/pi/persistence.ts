@@ -1,14 +1,14 @@
 /*
  * persistence.ts — event-sourced fold state across restarts (DESIGN.md §6).
  *
- * Spool locations, agent unfolds, and committed frozen layers live in memory during a session, so
- * they are persisted as custom entries and replayed on resume. Legacy `kind:"gate"` records remain
- * readable so old folded handles keep resolving after the arrival-time ingestion gate's removal.
+ * Fold entries, agent unfolds, and committed frozen layers live in memory during a session, so
+ * they are persisted as custom entries and replayed on resume. Legacy `kind:"spool"`/`kind:"gate"`
+ * records (from sessions created before the spool's removal) degrade to fold entries without a
+ * fold-time sha256: recall serves them from the ledger unverified and says so.
  *
  * Custom entries don't enter LLM context; they exist purely to reconstruct state (CustomEntry docs).
  */
-import { readEnvelopeAt, SpoolError } from "./spool";
-import type { SpoolEntry } from "../../core/spool-registry";
+import type { FoldEntry } from "../../core/fold-registry";
 
 /** The customType tag for every context-fold state entry. */
 export const FOLD_CUSTOM_TYPE = "contextfold.fold";
@@ -22,11 +22,13 @@ export interface FrozenLayerRecord {
 	entries: { id: string; digestText: string }[];
 }
 
-/** One event on the fold ledger. `gate` is a legacy arrival-gate spool record. Unknown kinds are
+/** One event on the fold ledger. `spool` and `gate` are legacy pre-redesign records whose entries
+ * carried spool-file paths; only their ledger-relevant fields are restored. Unknown kinds are
  * ignored on restore. */
 export type FoldRecord =
-	| { kind: "spool"; entry: SpoolEntry }
-	| { kind: "gate"; entry: SpoolEntry }
+	| { kind: "fold"; entry: FoldEntry }
+	| { kind: "spool"; entry: FoldEntry }
+	| { kind: "gate"; entry: FoldEntry }
 	| { kind: "unfold"; ids: string[] }
 	| { kind: "layer"; layer: FrozenLayerRecord };
 
@@ -42,9 +44,9 @@ export interface EntryLike {
 	data?: unknown;
 }
 
-/** Record the exact-content spool location for a newly folded block. */
-export function recordSpoolEntry(pi: EntryAppender, entry: SpoolEntry): void {
-	pi.appendEntry(FOLD_CUSTOM_TYPE, { kind: "spool", entry } satisfies FoldRecord);
+/** Record the fold entry (ledger location + fold-time sha) for a newly folded block. */
+export function recordFoldEntry(pi: EntryAppender, entry: FoldEntry): void {
+	pi.appendEntry(FOLD_CUSTOM_TYPE, { kind: "fold", entry } satisfies FoldRecord);
 }
 
 /** Record that the agent unfolded one or more blocks (sticky across resume). */
@@ -57,48 +59,43 @@ export function recordLayer(pi: EntryAppender, layer: FrozenLayerRecord): void {
 	if (layer.entries.length) pi.appendEntry(FOLD_CUSTOM_TYPE, { kind: "layer", layer } satisfies FoldRecord);
 }
 
+/** Pick only the fields the registry knows from a persisted entry: a legacy record carries extra
+ *  baggage (spoolPath, dedupOf, input) that must not ride back in, and its sha256 is absent —
+ *  which is exactly how recall knows to report the block unverified. */
+function toFoldEntry(raw: FoldEntry & { sha256?: unknown; fullOutputPath?: unknown }): FoldEntry {
+	return {
+		blockId: raw.blockId,
+		code: raw.code,
+		tool: raw.tool,
+		isError: !!raw.isError,
+		bytes: typeof raw.bytes === "number" ? raw.bytes : 0,
+		...(typeof raw.sha256 === "string" ? { sha256: raw.sha256 } : {}),
+		...(typeof raw.fullOutputPath === "string" ? { fullOutputPath: raw.fullOutputPath } : {}),
+	};
+}
+
 /**
- * Left-fold the session's context-fold entries into the restored state: the latest spool entry per
+ * Left-fold the session's context-fold entries into the restored state: the latest fold entry per
  * block wins, and every unfolded id accumulates. Pure — no disk, deterministic in entry order.
  */
 export function restoreFoldState(entries: EntryLike[]): {
-	spoolEntries: SpoolEntry[];
+	foldEntries: FoldEntry[];
 	unfoldedIds: Set<string>;
 	layers: FrozenLayerRecord[];
 } {
-	const byBlock = new Map<string, SpoolEntry>();
+	const byBlock = new Map<string, FoldEntry>();
 	const unfoldedIds = new Set<string>();
 	const layersBySeq = new Map<number, FrozenLayerRecord>();
 	for (const e of entries) {
 		if (e.customType !== FOLD_CUSTOM_TYPE) continue;
 		const rec = e.data as FoldRecord | undefined;
 		if (!rec || typeof rec !== "object") continue;
-		if ((rec.kind === "spool" || rec.kind === "gate") && rec.entry?.blockId) byBlock.set(rec.entry.blockId, rec.entry);
+		if ((rec.kind === "fold" || rec.kind === "spool" || rec.kind === "gate") && rec.entry?.blockId)
+			byBlock.set(rec.entry.blockId, toFoldEntry(rec.entry));
 		else if (rec.kind === "unfold" && Array.isArray(rec.ids)) for (const id of rec.ids) unfoldedIds.add(id);
 		else if (rec.kind === "layer" && rec.layer && typeof rec.layer.seq === "number" && Array.isArray(rec.layer.entries))
 			layersBySeq.set(rec.layer.seq, rec.layer);
 	}
 	const layers = [...layersBySeq.values()].sort((a, b) => a.seq - b.seq);
-	return { spoolEntries: [...byBlock.values()], unfoldedIds, layers };
-}
-
-/**
- * Revalidate restored entries against their spool files. A missing/corrupt entry is dropped from
- * recall's durable route; a still-live folded block remains recoverable from the session snapshot.
- */
-export function revalidateSpools(entries: SpoolEntry[]): {
-	valid: SpoolEntry[];
-	dropped: { code: string; path: string; reason: string }[];
-} {
-	const valid: SpoolEntry[] = [];
-	const dropped: { code: string; path: string; reason: string }[] = [];
-	for (const e of entries) {
-		try {
-			readEnvelopeAt(e.spoolPath);
-			valid.push(e);
-		} catch (err) {
-			dropped.push({ code: e.code, path: e.spoolPath, reason: err instanceof SpoolError ? err.message : String(err) });
-		}
-	}
-	return { valid, dropped };
+	return { foldEntries: [...byBlock.values()], unfoldedIds, layers };
 }

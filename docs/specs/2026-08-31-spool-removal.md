@@ -115,13 +115,15 @@ Agent calls, stated here:
 
 ## Slices
 
-- [ ] S1 Ledger read path: `resolveFromLedger` (linearize `getEntries()`, durable-id match,
+- [x] S1 Ledger read path: `resolveFromLedger` (linearize `getEntries()`, durable-id match,
       sha verify, existing caps/slicing); registry entry gains `sha256`, loses
       `spoolPath`/`dedupOf`; recall/search/unfold routes switch over behind the existing
       typed-error surface.
-- [ ] S2 Write path: fold events append `kind:"fold"` records (no file writes); compaction
+- [x] S2 Write path: fold events append `kind:"fold"` records (no file writes); compaction
       assigns codes index-only; `restoreFoldState` replays new records and degrades legacy
-      ones; commit precondition is record + index only.
+      ones; commit precondition is record + index only. (Landed with S1 in one commit: the
+      registry shape and the record shape are one contract, and a spool-writing intermediate
+      would have been throwaway.)
 - [ ] S3 Deletion and relocation: remove `spool.ts`, `retention.ts`, heartbeat, GC, env var,
       dedup; move `seed-index.jsonl` and handoff seeds to `<sessionDir>/context-fold/<id>/`;
       seed header gains the parent session path.

@@ -18,8 +18,8 @@ import { blockId, linearize, isDurableId } from "../../core/block";
 import { applyPlan } from "../../core/apply";
 import { digest, wireFoldable, foldCode, substTokens } from "../../core/digest";
 import { estTokens, safeSlice, BLOCK_OVERHEAD } from "../../core/tokens";
-import { MapSpoolRegistry, type SpoolEntry } from "../../core/spool-registry";
-import { readEnvelopeAt, SpoolError } from "./spool";
+import { MapFoldRegistry, type FoldEntry } from "../../core/fold-registry";
+import { sha256Hex, type LedgerLookup } from "./ledger";
 import { readFileSync } from "node:fs";
 
 /** The newest block is always protected (target>0); adding an older block may not overflow this. */
@@ -112,13 +112,14 @@ export interface CodeMatch {
 	note?: string;
 }
 
-/** A recall failure that names the offending spool path, surfaced to the agent, never thrown. */
+/** A recall failure naming the code and why the ledger route could not serve it. Surfaced to the
+ *  agent as text, never thrown. */
 export interface CodeError {
 	code: string;
 	message: string;
 }
 
-/** Partial-retrieval options for recall — honored on both the spool and live-history routes. */
+/** Partial-retrieval options for recall — honored on both the ledger and live-history routes. */
 export interface RecallOptions {
 	/** Return only lines matching this term (case-insensitive substring), with line numbers. */
 	grep?: string;
@@ -151,9 +152,9 @@ export class ContextFoldEngine {
 
 	/** Agent-unfolded block ids — held (protected from re-folding) for the rest of the session. */
 	private readonly unfolded = new Set<string>();
-	/** Ids whose spool write failed permanently (fold-code collision). Held for the session so the
+	/** Ids whose fold was rejected permanently (fold-code collision). Held for the session so the
 	 *  ladder stops proposing them — the colliding block just renders raw, per-block fail-open. */
-	private readonly spoolRejected = new Set<string>();
+	private readonly foldRejected = new Set<string>();
 	/** Per-turn snapshot: durable id → wire block (full content), for the unfold/recall tool. */
 	private snapshot = new Map<string, WireBlock>();
 	/** Cross-turn deterministic digest cache (id + text length → digest/tokens). linearize recreates
@@ -165,8 +166,10 @@ export class ContextFoldEngine {
 
 	private readonly host: PolicyHost;
 
-	// Exact originals for folded blocks; recall reads the spool by entry path.
-	private readonly spools: MapSpoolRegistry;
+	// Metadata for folded blocks; recall re-locates the bytes in the session ledger by durable id.
+	private readonly registry: MapFoldRegistry;
+	/** The session ledger, attached by the adapter (null in bare-engine tests → live-only recall). */
+	private ledger: LedgerLookup | null = null;
 
 	// ── recall-churn accounting (display-only; feeds the reset yellow flag) ──────────────────────
 	/** Total recall/search tool invocations this session. */
@@ -182,15 +185,15 @@ export class ContextFoldEngine {
 	private lastLayerSeq = 0;
 	/** Adapter callback: persist a prepared layer. False rejects the fold before it reaches the wire. */
 	onLayerCommit: ((layer: FrozenLayer) => unknown) | null = null;
-	/** Adapter callback: durably spool/index a prepared event. `false` rejects the whole fold;
-	 *  an array of block ids drops just those blocks (their spool could not be written — fold-code
-	 *  collision) and commits the rest. Dropped ids are held for the session. */
+	/** Adapter callback: durably record/index a prepared event. `false` rejects the whole fold;
+	 *  an array of block ids drops just those blocks (fold-code collision) and commits the rest.
+	 *  Dropped ids are held for the session. */
 	onFoldEvent: ((event: FoldEventReport) => unknown) | null = null;
 
-	constructor(policy: FoldPolicy, cfg: Partial<FoldConfig> = {}, spools: MapSpoolRegistry = new MapSpoolRegistry()) {
+	constructor(policy: FoldPolicy, cfg: Partial<FoldConfig> = {}, registry: MapFoldRegistry = new MapFoldRegistry()) {
 		this.cfg = { ...DEFAULT_CONFIG, ...cfg };
 		this.policy = policy;
-		this.spools = spools;
+		this.registry = registry;
 		this.host = {
 			setStatus: (text, metrics) => {
 				this.lastStatus = { text, metrics };
@@ -204,6 +207,11 @@ export class ContextFoldEngine {
 		Object.assign(this.cfg, partial);
 	}
 
+	/** Attach the session ledger recall reads from (adapter-owned; swapped on session switch). */
+	attachLedger(ledger: LedgerLookup | null): void {
+		this.ledger = ledger;
+	}
+
 	get status() {
 		return this.lastStatus;
 	}
@@ -213,7 +221,7 @@ export class ContextFoldEngine {
 		this.recallCallCount = 0;
 		this.recallByCode.clear();
 		this.unfolded.clear();
-		this.spoolRejected.clear();
+		this.foldRejected.clear();
 		this.snapshot = new Map();
 		this.detCache.clear();
 		this.frozenById = new Map();
@@ -323,12 +331,12 @@ export class ContextFoldEngine {
 		const res = this.onFoldEvent?.(event);
 		if (res === false) return [];
 
-		// Per-block spool rejection (fold-code collision): freeze only what was durably spooled and
-		// hold the dropped ids so one unspoolable block can never poison every later fold event.
+		// Per-block rejection (fold-code collision): freeze only what was durably recorded and hold
+		// the dropped ids so one unrecordable block can never poison every later fold event.
 		let kept = entries;
 		const dropped = Array.isArray(res) ? res.filter((x): x is string => typeof x === "string") : [];
 		if (dropped.length > 0) {
-			for (const id of dropped) this.spoolRejected.add(id);
+			for (const id of dropped) this.foldRejected.add(id);
 			const droppedSet = new Set(dropped);
 			kept = entries.filter((e) => !droppedSet.has(e.id));
 		}
@@ -374,9 +382,11 @@ export class ContextFoldEngine {
 	}
 
 	/**
-	 * Resolve fold-codes to original content (read-only, no fold-state change). Spool-backed codes
-	 * support bounded whole, grep, and line-range reads and remain recoverable after hard compaction.
-	 * A missing/corrupt spool becomes a typed error naming the path rather than an exception.
+	 * Resolve fold-codes to original content (read-only, no fold-state change). Registry-backed
+	 * codes re-locate their bytes in the session ledger by durable id, verify them against the
+	 * fold-time sha256, and support bounded whole, grep, and line-range reads — recoverable after
+	 * hard compaction because the ledger is append-only. A block the ledger cannot serve becomes a
+	 * typed error naming the code rather than an exception.
 	 */
 	resolveRecall(codes: string[], opts: RecallOptions = {}): { matches: CodeMatch[]; missing: string[]; errors: CodeError[] } {
 		this.recallCallCount++;
@@ -385,8 +395,8 @@ export class ContextFoldEngine {
 			this.recallByCode.set(c, (this.recallByCode.get(c) ?? 0) + 1);
 		}
 		const snapByCode = this.snapshotByCode();
-		const spoolByCode = new Map<string, SpoolEntry>();
-		for (const e of this.spools.entries()) spoolByCode.set(e.code, e);
+		const foldByCode = new Map<string, FoldEntry>();
+		for (const e of this.registry.entries()) foldByCode.set(e.code, e);
 
 		const matches: CodeMatch[] = [];
 		const missing: string[] = [];
@@ -394,40 +404,43 @@ export class ContextFoldEngine {
 
 		for (const raw of codes) {
 			const code = normalizeCode(raw);
-			const entry = spoolByCode.get(code);
+			const entry = foldByCode.get(code);
 			// Recall serves FOLDED content only: a snapshot hit counts only when the block is frozen.
 			// Every live block's id hashes to a code, but a block that was never folded is already in
 			// view — resolving it would make recall a general history reader, which this tool is
 			// deliberately not.
 			const hits = (snapByCode.get(code) ?? []).filter((b) => this.frozenById.has(b.id));
 			if (entry) {
-				try {
-					const { text, note } = this.recallFromSpool(entry, opts);
-					const dedupNote = entry.dedupOf ? `identical to #${entry.dedupOf}` : "";
+				const located = this.ledger?.blockById(entry.blockId);
+				if (located && (entry.sha256 === undefined || sha256Hex(located.text) === entry.sha256)) {
+					const { text, note } = this.recallFromLedger(entry, located.text, opts);
+					const verifyNote = entry.sha256 === undefined ? "unverified (legacy record without a fold-time sha256)" : "";
 					matches.push({
 						code,
-						label: `${entry.tool} · spool`,
+						label: `${entry.tool} · ledger`,
 						ids: [entry.blockId],
 						text,
-						note: [dedupNote, note].filter(Boolean).join(" · ") || undefined,
+						note: [verifyNote, note].filter(Boolean).join(" · ") || undefined,
 					});
-				} catch (e) {
-					const path = e instanceof SpoolError ? e.path : entry.spoolPath;
-					if (hits.length > 0) {
-						// The spool is unreadable but the block is still live in raw history — serve it
-						// from the snapshot through the same caps (DESIGN §7: a live block still resolves),
-						// carrying the spool warning as the note so the degradation stays visible.
-						const { text, note } = sliceLiveText(joinTexts(hits), opts);
-						matches.push({
-							code,
-							label: labelFor(hits),
-							ids: hits.map((b) => b.id),
-							text,
-							note: [`spool file unreadable (${path}) — served from live history`, note].filter(Boolean).join(" · "),
-						});
-					} else {
-						errors.push({ code, message: `recall unavailable — spool file for #${code} could not be read (${path})` });
-					}
+					continue;
+				}
+				const why = located
+					? `ledger content for #${code} failed the fold-time sha256 check`
+					: `block for #${code} was not found in the session ledger`;
+				if (hits.length > 0) {
+					// The ledger cannot serve it but the block is still live in raw history — serve it
+					// from the snapshot through the same caps (DESIGN §7: a live block still resolves),
+					// carrying the warning as the note so the degradation stays visible.
+					const { text, note } = sliceLiveText(joinTexts(hits), opts);
+					matches.push({
+						code,
+						label: labelFor(hits),
+						ids: hits.map((b) => b.id),
+						text,
+						note: [`${why} — served from live history`, note].filter(Boolean).join(" · "),
+					});
+				} else {
+					errors.push({ code, message: `recall unavailable — ${why}` });
 				}
 				continue;
 			}
@@ -435,9 +448,8 @@ export class ContextFoldEngine {
 				missing.push(raw);
 				continue;
 			}
-			// Live-history route (a frozen fold whose spool entry was dropped at restore). Bounded and
-			// sliced exactly like the spool route — recall must never re-flood, whichever haystack
-			// serves it.
+			// Live-history route (a frozen fold with no registry entry). Bounded and sliced exactly
+			// like the ledger route — recall must never re-flood, whichever haystack serves it.
 			const { text, note } = sliceLiveText(joinTexts(hits), opts);
 			matches.push({ code, label: labelFor(hits), ids: hits.map((b) => b.id), text, note });
 		}
@@ -445,28 +457,27 @@ export class ContextFoldEngine {
 	}
 
 	/**
-	 * Read a fold's content from the spool and slice it. grep and lines= read the SAME haystack
-	 * (the tool's full-output file when readable, else the spool), so a grep hit's line number
-	 * is always a valid input for a lines= follow-up. Whole recall is token-capped: recall must never
+	 * Slice a fold's ledger-located content. grep and lines= read the SAME haystack (the tool's
+	 * full-output file when readable, else the ledger content), so a grep hit's line number is
+	 * always a valid input for a lines= follow-up. Whole recall is token-capped: recall must never
 	 * re-flood the context the ladder reduced.
 	 */
-	private recallFromSpool(entry: SpoolEntry, opts: RecallOptions): { text: string; note?: string } {
-		const spooled = readEnvelopeAt(entry.spoolPath).content;
+	private recallFromLedger(entry: FoldEntry, content: string, opts: RecallOptions): { text: string; note?: string } {
 		if (opts.lines || opts.grep) {
-			let haystack = spooled;
-			let source = "spool";
+			let haystack = content;
+			let source = "ledger";
 			if (entry.fullOutputPath) {
 				try {
 					haystack = readFileSync(entry.fullOutputPath, "utf8");
 					source = "full output";
 				} catch {
-					/* fall back to spool content */
+					/* fall back to ledger content */
 				}
 			}
 			if (opts.lines) return sliceByLines(haystack, opts.lines, source);
 			return grepContent(haystack, opts.grep as string, source);
 		}
-		return capWholeRecall(spooled);
+		return capWholeRecall(content);
 	}
 
 	/**
@@ -512,19 +523,16 @@ export class ContextFoldEngine {
 
 		// Compacted-away folds: once hard compaction removes a raw message from history the block
 		// leaves the snapshot, but the det compaction summary points the agent at exactly this sweep.
-		// Serve those from the spool — the registry survives compaction for precisely this reason.
-		// Dedup aliases are skipped (their bytes are the target's), and an unreadable spool skips the
-		// entry (recalling that code surfaces the typed error).
+		// Serve those from the session ledger — the registry survives compaction for precisely this
+		// reason. A block the ledger cannot serve (or that fails its sha check) is skipped here;
+		// recalling that code surfaces the typed error.
 		if (!truncated) {
-			for (const e of this.spools.entries()) {
-				if (this.snapshot.has(e.blockId) || this.unfolded.has(e.blockId) || e.dedupOf) continue;
-				let content: string;
-				try {
-					content = readEnvelopeAt(e.spoolPath).content;
-				} catch {
-					continue;
-				}
-				sweep(e.code, `${e.tool} · spool (compacted out of view)`, content);
+			for (const e of this.registry.entries()) {
+				if (this.snapshot.has(e.blockId) || this.unfolded.has(e.blockId)) continue;
+				const located = this.ledger?.blockById(e.blockId);
+				if (!located) continue;
+				if (e.sha256 !== undefined && sha256Hex(located.text) !== e.sha256) continue;
+				sweep(e.code, `${e.tool} · ledger (compacted out of view)`, located.text);
 				if (truncated) break;
 			}
 		}
@@ -554,17 +562,18 @@ export class ContextFoldEngine {
 	}
 
 	/** Mark fold-codes' blocks unfolded (held). They expand in the view on the next turn.
-	 *  A code that resolves only through the spool is reported as `compacted`: its raw message left
-	 *  live history at hard compaction, so there is nothing to re-expand — but the content still
-	 *  reads back through recall, and the tool message must say that rather than "no such code". */
+	 *  A code that resolves only through the registry is reported as `compacted`: its raw message
+	 *  left live history at hard compaction, so there is nothing to re-expand — but the content
+	 *  still reads back through recall, and the tool message must say that rather than "no such
+	 *  code". */
 	markUnfold(codes: string[]): { matches: CodeMatch[]; missing: string[]; compacted: string[] } {
 		const res = this.resolve(codes);
 		for (const m of res.matches) for (const id of m.ids) this.unfolded.add(id);
-		const spoolCodes = new Set<string>();
-		for (const e of this.spools.entries()) spoolCodes.add(e.code);
+		const foldCodes = new Set<string>();
+		for (const e of this.registry.entries()) foldCodes.add(e.code);
 		const missing: string[] = [];
 		const compacted: string[] = [];
-		for (const raw of res.missing) (spoolCodes.has(normalizeCode(raw)) ? compacted : missing).push(raw);
+		for (const raw of res.missing) (foldCodes.has(normalizeCode(raw)) ? compacted : missing).push(raw);
 		return { matches: res.matches, missing, compacted };
 	}
 
@@ -620,7 +629,7 @@ export class ContextFoldEngine {
 				kind: b.kind,
 				tokens: b.tokens,
 				foldedTokens,
-				held: this.unfolded.has(b.id) || firstDelivery.has(b.id) || this.spoolRejected.has(b.id),
+				held: this.unfolded.has(b.id) || firstDelivery.has(b.id) || this.foldRejected.has(b.id),
 				frozen,
 				protected: i >= protectFrom,
 			};
@@ -672,7 +681,7 @@ export class ContextFoldEngine {
 				!firstDelivery.has(id) &&
 				!protectedAt(id) &&
 				!this.unfolded.has(id) &&
-				!this.spoolRejected.has(id) &&
+				!this.foldRejected.has(id) &&
 				!this.frozenById.has(id)
 			);
 		};

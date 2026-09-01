@@ -6,14 +6,14 @@
 import { describe, expect, it } from "vitest";
 import { ContextFoldEngine, type FoldEventReport, type FrozenLayer } from "../src/adapters/pi/store";
 import { FoldLadderPolicy, LADDER_DEFAULTS } from "../src/core/policy/fold-ladder";
-import { MapSpoolRegistry } from "../src/core/spool-registry";
+import { MapFoldRegistry } from "../src/core/fold-registry";
 import type { AgentMessage } from "../src/core/block";
 import type { FoldPolicy } from "../src/core/contract";
 import { user, assistantText, assistantWithCalls, bigResult, toolResult, isBalanced } from "./helpers";
 
 function ladderEngine(cfg: Record<string, unknown> = {}, ladderCfg = LADDER_DEFAULTS) {
 	const policy = new FoldLadderPolicy(ladderCfg);
-	const e = new ContextFoldEngine(policy, { tailTarget: 100, ...cfg }, new MapSpoolRegistry());
+	const e = new ContextFoldEngine(policy, { tailTarget: 100, ...cfg }, new MapFoldRegistry());
 	const committed: FrozenLayer[] = [];
 	const events: FoldEventReport[] = [];
 	e.onLayerCommit = (layer) => committed.push(layer);
@@ -216,7 +216,7 @@ describe("discrete fold events", () => {
 			label: "hostile",
 			conduct: (view) => [{ kind: "fold", ids: view.blocks.filter((block) => block.kind === "tool_result").map((block) => block.id) }],
 		};
-		const engine = new ContextFoldEngine(hostile, { tailTarget: 0 }, new MapSpoolRegistry());
+		const engine = new ContextFoldEngine(hostile, { tailTarget: 0 }, new MapFoldRegistry());
 		const messages: AgentMessage[] = [user("read it"), assistantWithCalls([{ id: "fresh", name: "read" }]), bigResult("fresh", 300)];
 
 		const out = engine.process(messages, { contextWindow: 80_000, tokens: null });
