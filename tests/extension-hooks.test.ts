@@ -880,4 +880,30 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 		expect(calls.length).toBe(0);
 		expect(existsSync(join(dir, "handoff-s1.md"))).toBe(true);
 	});
+
+	it("a throwing newSession degrades to the manual flow, not a command failure", async () => {
+		const s = await load();
+		const notices: string[] = [];
+		const ctx = {
+			hasUI: true,
+			sessionManager: {
+				getSessionDir: () => dir,
+				getSessionId: () => "s1",
+				getSessionFile: () => join(dir, "s1.jsonl"),
+				getEntries: () => [],
+			},
+			ui: { notify: (m: string) => notices.push(m), confirm: async () => true },
+			newSession: async () => {
+				throw new Error("switch exploded");
+			},
+		};
+
+		await s.commands.get("fold-handoff")!.handler("goal", ctx);
+
+		const all = notices.join("\n");
+		expect(all).toContain("falling back to the manual flow");
+		expect(all).toContain("/new");
+		expect(all).not.toContain("fold-handoff failed");
+		expect(existsSync(join(dir, "handoff-s1.md"))).toBe(true);
+	});
 });

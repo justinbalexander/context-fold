@@ -1,6 +1,6 @@
 # pi-api-review-followups
 
-Date: 2026-08-31   Status: building
+Date: 2026-08-31   Status: done
 
 ## Problem
 

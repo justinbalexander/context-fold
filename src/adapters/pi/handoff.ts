@@ -85,23 +85,32 @@ export function registerHandoffCommand(
 						`Seed written to ${out}.\nStart the replacement session now? It opens idle with the seed as its first user message.`,
 					);
 					if (go) {
-						const parentSession = ctx.sessionManager.getSessionFile?.();
-						const result = await ctx.newSession({
-							parentSession,
-							// Seeded and idle: a persisted user message only — nothing triggers a turn.
-							setup: async (sm) => {
-								sm.appendMessage({
-									role: "user",
-									content: [{ type: "text", text: seed }],
-									timestamp: Date.now(),
-								});
-							},
-						});
-						if (!result.cancelled) {
-							notify(`handoff seed written: ${out}\nReplacement session started with the seed in context — state your first instruction there.`, "info");
-							return;
+						// The seed file is already safe on disk, so a switch failure must degrade to the
+						// manual flow below rather than reporting the whole command as failed.
+						try {
+							const parentSession = ctx.sessionManager.getSessionFile?.();
+							const result = await ctx.newSession({
+								parentSession,
+								// Seeded and idle: a persisted user message only — nothing triggers a turn.
+								setup: async (sm) => {
+									sm.appendMessage({
+										role: "user",
+										content: [{ type: "text", text: seed }],
+										timestamp: Date.now(),
+									});
+								},
+							});
+							if (!result.cancelled) {
+								notify(`handoff seed written: ${out}\nReplacement session started with the seed in context — state your first instruction there.`, "info");
+								return;
+							}
+							notify("replacement session was cancelled by another extension — falling back to the manual flow", "warning");
+						} catch (err) {
+							notify(
+								`starting the replacement session failed (${err instanceof Error ? err.message : String(err)}) — falling back to the manual flow`,
+								"warning",
+							);
 						}
-						notify("replacement session was cancelled by another extension — falling back to the manual flow", "warning");
 					}
 				}
 				notify(`handoff seed written: ${out}\nReview it, start a fresh session (/new), and paste or reference it there.`, "info");
