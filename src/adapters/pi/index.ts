@@ -156,8 +156,10 @@ export default function contextFold(pi: ExtensionAPI): void {
 	// Recall's ledger route: one cached reader per session, attached on every hook that carries a
 	// ctx so recall works regardless of hook arrival order.
 	let ledgerKey = "";
-	const ensureLedger = (ctx: { sessionManager: { getSessionId(): string; getEntries(): unknown[] } }): void => {
-		const sid = ctx.sessionManager.getSessionId();
+	const ensureLedger = (ctx: { sessionManager: { getSessionDir(): string; getSessionId(): string; getEntries(): unknown[] } }): void => {
+		// Keyed by dir + id like the index store: a same-id session in another directory must not
+		// be served by a stale reader.
+		const sid = join(ctx.sessionManager.getSessionDir(), ctx.sessionManager.getSessionId());
 		if (ledgerKey === sid) return;
 		ledgerKey = sid;
 		engine.attachLedger(new LedgerReader(() => ctx.sessionManager.getEntries() as { type?: string; message?: unknown }[]));
@@ -382,8 +384,14 @@ export default function contextFold(pi: ExtensionAPI): void {
 				registry,
 				persistEntry: (entry) => recordFoldEntry(pi, entry),
 			});
-			if (debug && recordedNow.length)
-				process.stderr.write(`[context-fold] compaction: recorded ${recordedNow.length} unfolded block(s) leaving history\n`);
+			if (recordedNow.skippedIds.length)
+				// Per-block fail-open, announced: these blocks leave live history with no recall route
+				// beyond Pi's session file itself.
+				process.stderr.write(
+					`[context-fold] compaction: ${recordedNow.skippedIds.length} block(s) not recallable (record failed): ${recordedNow.skippedIds.join(", ")}\n`,
+				);
+			if (debug && recordedNow.added.length)
+				process.stderr.write(`[context-fold] compaction: recorded ${recordedNow.added.length} unfolded block(s) leaving history\n`);
 			const compactRecord = emitCompactIndex(blocks, {
 				registry,
 				index,

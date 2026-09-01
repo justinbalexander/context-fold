@@ -430,8 +430,9 @@ export class ContextFoldEngine {
 				if (hits.length > 0) {
 					// The ledger cannot serve it but the block is still live in raw history — serve it
 					// from the snapshot through the same caps (DESIGN §7: a live block still resolves),
-					// carrying the warning as the note so the degradation stays visible.
-					const { text, note } = sliceLiveText(joinTexts(hits), opts);
+					// carrying the warning as the note so the degradation stays visible. Routed through
+					// recallFromLedger so a recorded full-output file still backs grep/lines.
+					const { text, note } = this.recallFromLedger(entry, joinTexts(hits), opts);
 					matches.push({
 						code,
 						label: labelFor(hits),

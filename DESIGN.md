@@ -135,6 +135,13 @@ fall back to the ledger text when it is gone. A block the ledger cannot serve, o
 fails the sha check, is a typed error naming the code; if the block is still live in raw history
 it is served from the snapshot instead, through the same caps.
 
+One documented edge follows from verifying against the ledger: the fold-time sha is computed over
+the text the `context` hook saw, and Pi chains context transforms, so a block another extension
+rewrote before folding diverges from the raw persisted bytes. While the block is live, recall
+serves it from the snapshot with a warning; once it leaves history, recall reports the sha
+mismatch as a typed error rather than serving bytes the model never saw as if they were the
+folded view. Pi's session file still holds the raw payload either way.
+
 The fold record and seed-index record are commit preconditions. The engine prepares a layer, the
 adapter appends both records durably, and only then does the engine freeze and apply its bytes. A
 durability failure (record, index, or layer persistence) rejects the entire event and sends that

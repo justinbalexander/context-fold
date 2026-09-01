@@ -88,7 +88,7 @@ describe("recall survives hard compaction", () => {
 
 		// Hard compaction: record the leaving span, then emit the compact record.
 		const blocks = linearize(messages) as unknown as WireBlock[];
-		const added = recordCompactedBlocks(blocks, { registry });
+		const { added } = recordCompactedBlocks(blocks, { registry });
 		expect(added.map((a) => a.blockId)).toContain("r:cu");
 		const rec = emitCompactIndex(blocks, {
 			registry, index, sessionId: "s-compact", tokensBefore: 5_000, contextWindow: 80_000, now: 1_722_200_200_000,

@@ -187,8 +187,12 @@ export function emitFoldIndex(
 		extractIndex({ masked: recorded, all: event.blocks }),
 		spans,
 	);
-	deps.index.append(record);
+	// Fold records first, index second: the index is the consumer-facing artifact, so a partial
+	// failure must never leave it advertising spans whose fold records were not durably appended.
+	// (Fold records without an index record are harmless — the registry is not published and the
+	// turn goes out raw.) Either append throwing rejects the whole event.
 	for (const entry of newEntries) deps.persistEntry?.(entry);
+	deps.index.append(record);
 	for (const entry of newEntries) deps.registry.set(entry);
 	return { record, newEntries, droppedIds };
 }
@@ -212,25 +216,30 @@ export function recordCompactedBlocks(
 		/** Durably append each new fold entry so the recall route survives resume. */
 		persistEntry?: (entry: FoldEntry) => void;
 	},
-): FoldEntry[] {
+): { added: FoldEntry[]; skippedIds: string[] } {
 	const owners = codeOwners(deps.registry);
 	const added: FoldEntry[] = [];
+	const skippedIds: string[] = [];
 	for (const b of blocks) {
 		if (!wireFoldable(b) || !isDurableId(b.id) || !b.text || deps.registry.has(b.id)) continue;
 		const code = foldCode(b.id);
 		const owner = owners.get(code);
-		if (owner !== undefined && owner !== b.id) continue;
+		if (owner !== undefined && owner !== b.id) {
+			skippedIds.push(b.id);
+			continue;
+		}
 		const entry = foldEntryFor(b, code);
 		try {
 			deps.persistEntry?.(entry);
 		} catch {
+			skippedIds.push(b.id);
 			continue;
 		}
 		owners.set(code, b.id);
 		deps.registry.set(entry);
 		added.push(entry);
 	}
-	return added;
+	return { added, skippedIds };
 }
 
 /**

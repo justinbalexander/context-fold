@@ -68,8 +68,9 @@ describe("fold-code collision guard", () => {
 			toolResult(a.slice(2), "first payload"),
 			toolResult(b.slice(2), "second payload"),
 		];
-		const added = recordCompactedBlocks(linearize(messages), { registry });
+		const { added, skippedIds } = recordCompactedBlocks(linearize(messages), { registry });
 		expect(added.map((e) => e.blockId)).toEqual([a]); // collider skipped, original intact
+		expect(skippedIds).toEqual([b]); // and reported, so the caller can announce it
 		expect(registry.get(a)!.sha256).toBe(sha256Hex("first payload"));
 		expect(registry.get(b)).toBeUndefined();
 	});
