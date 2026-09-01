@@ -425,8 +425,8 @@ export default function contextFold(pi: ExtensionAPI): void {
 		pendingCompactSeq = null;
 	});
 	// `session_compact_failed` postdates Pi 0.84 (whose typings this build pins); on an older
-	// engine the handler simply never fires and a failed compaction keeps its premature record —
-	// the pre-S2 behavior. Registered through a plain-string signature so both versions load.
+	// engine the handler simply never fires and a failed compaction keeps its premature record.
+	// Registered through a plain-string signature so both versions load.
 	const onAny = pi.on as unknown as (name: string, handler: (event: unknown, ctx: unknown) => unknown) => void;
 	onAny("session_compact_failed", (event, rawCtx) => {
 		const ctx = rawCtx as { sessionManager: { getSessionDir(): string; getSessionId(): string } };

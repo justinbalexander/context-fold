@@ -689,7 +689,7 @@ describe.skipIf(!PI_PRESENT)("wire watchdog (folds that never reach the provider
 	});
 });
 
-// ── S2 of docs/specs/2026-08-31-pi-api-review-followups.md ──────────────────────────────────────
+// ── Compaction lifecycle: count and index record ────────────────────────────────────────────────
 
 describe.skipIf(!PI_PRESENT)("compaction lifecycle events own the count and the index record", () => {
 	const prep = () => ({
@@ -824,7 +824,7 @@ describe.skipIf(!PI_PRESENT)("model_select resets cache telemetry", () => {
 	});
 });
 
-// ── S3 of docs/specs/2026-08-31-pi-api-review-followups.md ──────────────────────────────────────
+// ── /fold-handoff command ───────────────────────────────────────────────────────────────────────
 
 describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 	/** Command ctx with a confirm answer and a recording newSession stub. */

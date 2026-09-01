@@ -1,5 +1,5 @@
 /*
- * recall-fulloutput.test.ts — S1 of docs/specs/2026-08-31-pi-api-review-followups.md.
+ * recall-fulloutput.test.ts — full-output paths thread through recall.
  *
  * A toolResult message that carries `details.fullOutputPath` (bash's truncation escape hatch,
  * persisted in the session JSONL) must thread that path — and the paired tool call's typed
