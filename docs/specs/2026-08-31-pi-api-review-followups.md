@@ -106,7 +106,7 @@ Agent calls, stated here:
 - [x] S2 Telemetry correctness: `session_compact`/`session_compact_failed` own the compaction
       count and index reconciliation; `model_select` resets cache telemetry on a real model
       change.
-- [ ] S3 Handoff switch: `/fold-handoff` writes the seed, confirms, and seeds a replacement
+- [x] S3 Handoff switch: `/fold-handoff` writes the seed, confirms, and seeds a replacement
       session via `newSession({parentSession, setup})`, landing idle; headless and "no" paths
       keep today's behavior.
 - [ ] S4 Spool-redundancy prototype (throwaway): real session, cheap model; verify raw tool

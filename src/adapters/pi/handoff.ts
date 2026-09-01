@@ -5,8 +5,10 @@
  * stated on the command line. No model is called: everything in the file is extracted verbatim
  * from the session, so there is nothing in it that can be a paraphrase or a fabrication.
  *
- * The seed is WRITTEN TO DISK in the session directory and its path reported — nothing is
- * injected into context, nothing fires on its own.
+ * The seed is WRITTEN TO DISK in the session directory first, always. Interactively, one confirm
+ * then offers to start the replacement session directly: `ctx.newSession` injects the seed as a
+ * persisted user message and the new session lands IDLE — no kickoff turn, no tokens spent until
+ * the user acts. Declining (or running headless) keeps the write-review-paste flow.
  */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,11 +37,20 @@ export function buildHandoffSeed(opts: { goal: string; indexBody: string; at: st
 }
 
 interface HandoffCtx {
-	ui?: { notify?(msg: string, level?: string): void };
+	hasUI?: boolean;
+	ui?: {
+		notify?(msg: string, level?: string): void;
+		confirm?(title: string, message: string): Promise<boolean>;
+	};
 	sessionManager: {
 		getSessionDir(): string;
 		getSessionId(): string;
+		getSessionFile?(): string | undefined;
 	};
+	newSession?(options?: {
+		parentSession?: string;
+		setup?(sessionManager: { appendMessage(message: unknown): string }): Promise<void>;
+	}): Promise<{ cancelled: boolean }>;
 }
 
 export function registerHandoffCommand(
@@ -64,6 +75,35 @@ export function registerHandoffCommand(
 				});
 				const out = join(ctx.sessionManager.getSessionDir(), `handoff-${ctx.sessionManager.getSessionId()}.md`);
 				writeFileSync(out, seed, "utf8");
+
+				// Confirm-then-switch (interactive only): the seed file above is the reviewable record
+				// either way, and every ctx capability is optional — an older Pi or a headless run
+				// simply keeps the manual flow.
+				if (ctx.hasUI && ctx.ui?.confirm && ctx.newSession) {
+					const go = await ctx.ui.confirm(
+						"fold-handoff",
+						`Seed written to ${out}.\nStart the replacement session now? It opens idle with the seed as its first user message.`,
+					);
+					if (go) {
+						const parentSession = ctx.sessionManager.getSessionFile?.();
+						const result = await ctx.newSession({
+							parentSession,
+							// Seeded and idle: a persisted user message only — nothing triggers a turn.
+							setup: async (sm) => {
+								sm.appendMessage({
+									role: "user",
+									content: [{ type: "text", text: seed }],
+									timestamp: Date.now(),
+								});
+							},
+						});
+						if (!result.cancelled) {
+							notify(`handoff seed written: ${out}\nReplacement session started with the seed in context — state your first instruction there.`, "info");
+							return;
+						}
+						notify("replacement session was cancelled by another extension — falling back to the manual flow", "warning");
+					}
+				}
 				notify(`handoff seed written: ${out}\nReview it, start a fresh session (/new), and paste or reference it there.`, "info");
 			} catch (err) {
 				notify(`fold-handoff failed: ${err instanceof Error ? err.message : String(err)}`, "error");

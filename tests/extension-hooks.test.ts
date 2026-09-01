@@ -795,3 +795,89 @@ describe.skipIf(!PI_PRESENT)("model_select resets cache telemetry", () => {
 		expect(notices.join("\n")).not.toContain("cache: no usage yet");
 	});
 });
+
+// ── S3 of docs/specs/2026-08-31-pi-api-review-followups.md ──────────────────────────────────────
+
+describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
+	/** Command ctx with a confirm answer and a recording newSession stub. */
+	function handoffCtx(opts: { hasUI: boolean; confirmAnswer?: boolean }) {
+		const notices: string[] = [];
+		const appended: { role?: string; content?: { type: string; text?: string }[] }[] = [];
+		const calls: { parentSession?: string; ranSetup: boolean; ranWithSession: boolean }[] = [];
+		const ctx = {
+			hasUI: opts.hasUI,
+			sessionManager: {
+				getSessionDir: () => dir,
+				getSessionId: () => "s1",
+				getSessionFile: () => join(dir, "s1.jsonl"),
+				getEntries: () => [],
+			},
+			ui: {
+				notify: (m: string) => notices.push(m),
+				...(opts.hasUI ? { confirm: async () => opts.confirmAnswer ?? false } : {}),
+			},
+			newSession: async (o?: {
+				parentSession?: string;
+				setup?: (sm: { appendMessage(m: unknown): string }) => Promise<void>;
+				withSession?: (c: unknown) => Promise<void>;
+			}) => {
+				const call = { parentSession: o?.parentSession, ranSetup: false, ranWithSession: false };
+				if (o?.setup) {
+					call.ranSetup = true;
+					await o.setup({
+						appendMessage: (m: unknown) => {
+							appended.push(m as (typeof appended)[number]);
+							return "e1";
+						},
+					});
+				}
+				if (o?.withSession) call.ranWithSession = true;
+				calls.push(call);
+				return { cancelled: false };
+			},
+		};
+		return { ctx, notices, appended, calls };
+	}
+
+	it("confirm=yes seeds the replacement session as a persisted user message and stays idle", async () => {
+		const s = await load();
+		const { ctx, notices, appended, calls } = handoffCtx({ hasUI: true, confirmAnswer: true });
+
+		await s.commands.get("fold-handoff")!.handler("finish the migration", ctx);
+
+		expect(calls.length).toBe(1);
+		expect(calls[0].parentSession).toBe(join(dir, "s1.jsonl"));
+		expect(calls[0].ranSetup).toBe(true);
+		// Seeded and idle: nothing may trigger a turn in the replacement session.
+		expect(calls[0].ranWithSession).toBe(false);
+		expect(appended.length).toBe(1);
+		expect(appended[0].role).toBe("user");
+		const text = (appended[0].content ?? []).map((p) => p.text ?? "").join("\n");
+		expect(text).toContain("finish the migration");
+		expect(text).toContain("extracted verbatim");
+		// The seed file is still written for the record.
+		expect(existsSync(join(dir, "handoff-s1.md"))).toBe(true);
+		expect(notices.join("\n")).toContain("handoff seed written");
+	});
+
+	it("confirm=no keeps today's write-review-paste flow", async () => {
+		const s = await load();
+		const { ctx, notices, calls } = handoffCtx({ hasUI: true, confirmAnswer: false });
+
+		await s.commands.get("fold-handoff")!.handler("goal", ctx);
+
+		expect(calls.length).toBe(0);
+		expect(existsSync(join(dir, "handoff-s1.md"))).toBe(true);
+		expect(notices.join("\n")).toContain("/new");
+	});
+
+	it("headless (no UI) never prompts and never switches", async () => {
+		const s = await load();
+		const { ctx, calls } = handoffCtx({ hasUI: false });
+
+		await s.commands.get("fold-handoff")!.handler("goal", ctx);
+
+		expect(calls.length).toBe(0);
+		expect(existsSync(join(dir, "handoff-s1.md"))).toBe(true);
+	});
+});

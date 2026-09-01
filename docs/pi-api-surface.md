@@ -62,7 +62,8 @@ All of these fire headless.
 | Footer status line (TUI) | `ctx.ui.setStatus(key, text)`, a keyed slot on the footer's extension-status line where `undefined` clears. No-op stub in print/json modes, forwarded as an event in RPC mode. |
 | Persist custom entry (NOT in LLM context) | `pi.appendEntry(type, data)` |
 | Read entries back | `ctx.sessionManager.getEntries()`, filtered on `entry.type === "custom" && entry.customType === …` |
-| Session paths | `ctx.sessionManager.getSessionDir()` / `.getSessionId()` |
+| Session paths | `ctx.sessionManager.getSessionDir()` / `.getSessionId()` / `.getSessionFile()` |
+| Seed a replacement session (`/fold-handoff` confirm path) | `ctx.newSession({ parentSession, setup })` on the command context; `setup(sm)` appends the seed as a persisted user message and no `withSession` work is scheduled, so the new session opens idle |
 | Out-of-band completion | `import { complete } from "@earendil-works/pi-ai/compat"` |
 
 `StringEnum` for tool-parameter enums is imported from `@earendil-works/pi-ai`.
@@ -82,8 +83,9 @@ All of these fire headless.
 
 Every hook, tool and command above fires in `pi -p --mode json`. But `ctx.hasUI === false` and
 `ctx.mode ∈ {"print","json"}`, so guard every `ctx.ui.*` call. This extension only ever
-touches `ctx.ui` through optional chaining, in the display-only status command and the footer
-status updater (both inert headless). `ctx.shutdown()`
+touches `ctx.ui` through optional chaining, in the display-only status command, the footer
+status updater, the settings menu, and the user-invoked `/fold-handoff` confirm (all inert
+headless). `ctx.shutdown()`
 is a no-op in print mode. Compaction still auto-fires on threshold and overflow headless, so
 `session_before_compact` is reachable without an interactive `/compact`.
 

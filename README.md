@@ -64,7 +64,10 @@ that can hallucinate. The extension warns you after a second forced compaction; 
 a handoff well before that, at a definable task finish line.
 
 **4. Handoff.** *(manual, `/fold-handoff`)* Writes a seed file for starting a fresh session: the
-same verbatim index plus the goal you state.
+same verbatim index plus the goal you state. Interactively it then offers, behind one
+confirmation, to start the replacement session directly — the seed lands as the first user
+message and the new session opens idle, spending nothing until you type. Decline (or run
+headless) and the flow stays write, review, `/new`, paste.
 
 > **On the thresholds.** Every percentage above is a default, not a tuned constant. The right
 > first-fold point trades the initial cache write against how many times you compact over a
