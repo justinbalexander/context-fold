@@ -3,10 +3,10 @@
 #
 # Run 1 reads a large file under a low deterministic budget cap, causing a ladder fold. Run 2
 # RESUMES the same session id and asks a question about a buried line. We assert:
-#   (a) the resume restored spool entries and frozen layers;
+#   (a) the resume restored fold entries and frozen layers;
 #   (b) the prior read still renders as a pointer in run 2's outgoing view (restore worked — without
 #       it the result would come back raw);
-#   (c) the pointer resolves — the agent recovers the buried phrase via recall.
+#   (c) the pointer resolves — the agent recovers the buried phrase via recall from the session ledger.
 #
 # Model defaults to gpt-5.6-sol (openai-codex). Override with E2E_PROVIDER / E2E_MODEL.
 # Requires auth for the chosen provider in the active agent dir.
@@ -49,7 +49,7 @@ if [[ -z "$FOLDLINE" ]]; then
   echo "== e2e-resume: FAIL =="; exit 1
 fi
 
-# Delete the source file: run 2 can only answer through the restored fold's spool.
+# Delete the source file: run 2 can only answer through the session ledger.
 rm -f "$BIGFILE"
 
 echo "== run 2: resume same session, recall a buried line =="
@@ -62,10 +62,10 @@ echo "   run 2 exit=$?"
 fail=0
 
 # (a) restore happened
-if grep -qE 'resume: restored [1-9][0-9]* spool entries, [0-9]+ unfolds, [1-9][0-9]* layers' "$WORK/stderr2.txt"; then
-  echo "PASS (a) resume restored fold state: $(grep -oE 'resume: restored [0-9]+ spool entries, [0-9]+ unfolds, [0-9]+ layers[^\\]*' "$WORK/stderr2.txt" | head -1)"
+if grep -qE 'resume: restored [1-9][0-9]* fold entries, [0-9]+ unfolds, [1-9][0-9]* layers' "$WORK/stderr2.txt"; then
+  echo "PASS (a) resume restored fold state: $(grep -oE 'resume: restored [0-9]+ fold entries, [0-9]+ unfolds, [0-9]+ layers[^\\]*' "$WORK/stderr2.txt" | head -1)"
 else
-  echo "FAIL (a) no restored spool/layer state in run 2 stderr"; grep -i 'context-fold' "$WORK/stderr2.txt" | head -3; fail=1
+  echo "FAIL (a) no restored fold/layer state in run 2 stderr"; grep -i 'context-fold' "$WORK/stderr2.txt" | head -3; fail=1
 fi
 
 # (b) the prior read still renders folded in run 2's view
@@ -86,7 +86,7 @@ fi
 
 # (c) the restored pointer resolves via recall
 if grep -qF "$PHRASE" "$WORK/stdout2.json"; then
-  echo "PASS (c) agent recovered the buried phrase '$PHRASE' from the restored spool"
+  echo "PASS (c) agent recovered the buried phrase '$PHRASE' from the session ledger"
 else
   echo "FAIL (c) answer did not contain '$PHRASE'"; fail=1
 fi

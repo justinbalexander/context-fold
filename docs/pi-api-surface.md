@@ -4,7 +4,34 @@ The exact Pi APIs this extension depends on, verified against the engine source 
 from the docs. Written for contributors: if one of these moves, this is the list to re-check.
 Verified against Pi 0.83.0 and 0.84.1. The authoritative reference is `docs/extensions.md`,
 `docs/compaction.md` and `examples/extensions/*` inside an installed
-`@earendil-works/pi-coding-agent`.
+`@earendil-works/pi-coding-agent`. The session-ledger findings below were verified against
+0.84.4 (`dist/core/session-manager.js`; line numbers cite that build).
+
+## The session ledger as recall's durability floor
+
+Recall re-locates folded blocks in `sessionManager.getEntries()`. The properties it depends on,
+each verified in the engine source:
+
+- **Append-only.** The class doc states "The session is append-only" and entries are never
+  mutated or removed; `_appendEntry` pushes to `fileEntries` and every navigation (`branch()`,
+  `resetLeaf()`) only moves the leaf pointer — "Existing entries are not modified or deleted"
+  (session-manager.js:979, 1030–1041).
+- **`getEntries()` returns the WHOLE tree**, not the active branch: every in-memory entry minus
+  the header (session-manager.js:982–984). A block on an abandoned branch therefore still
+  resolves. Hard compaction appends a compaction entry and removes nothing.
+- **A fork copies the ledger.** `SessionManager.forkFrom` writes a new header and then copies
+  every non-header entry from the source file — messages and custom entries alike
+  (session-manager.js:1270–1275). Recall in a forked session resolves the copied spans, and the
+  restored fold records verify against the copied messages.
+- **`newSession({parentSession})` carries nothing.** It resets `fileEntries` to a fresh header
+  (session-manager.js:652–661) and no reader traverses `parentSession`. Cross-session handoff is
+  therefore path-only: the `/fold-handoff` seed names the parent session file, and codes in it
+  are provenance, not live handles.
+- **`persist: false` (in-memory embeddings) still serves recall in-process.**
+  `SessionManager.inMemory` sets no file, but `_appendEntry` populates `fileEntries` regardless
+  of persistence (session-manager.js:726–761, 1226–1228), so `getEntries()` answers normally for
+  the life of the process. Nothing survives exit — there is no file — which matches the
+  extension's posture everywhere: the durable route exists exactly where Pi keeps a session file.
 
 ## Per-turn context mutation
 

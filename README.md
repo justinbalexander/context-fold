@@ -271,8 +271,9 @@ npm install && npm run typecheck && npm test   # unit + integration suite
 ```
 
 ```bash
-scripts/e2e-ladder.sh   # live: fold event fires, index emitted, head byte-stable, buried value recalled
-scripts/e2e-resume.sh   # live: folds survive a session restart
+scripts/e2e-ladder.sh          # live: fold event fires, index emitted, head byte-stable, buried value recalled
+scripts/e2e-resume.sh          # live: folds survive a session restart
+scripts/e2e-compact-resume.sh  # live: folds survive real hard compaction plus a restart, recalled from the session ledger
 ```
 
 The live scripts drive real Pi sessions against a real provider, so they cost money and need

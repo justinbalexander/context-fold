@@ -131,14 +131,26 @@ Agent calls, stated here:
       (known issues pruned, recovery section rewritten), SEED_INDEX_SPEC v2, ADR 0002
       superseding spool-backed recovery (cites the S4 verdict and Pi's append-only contract),
       CHANGELOG entry.
-- [ ] S5 Verification: unit suite green; one e2e resume probe run and its result recorded
+- [x] S5 Verification: unit suite green; one e2e resume probe run and its result recorded
       below; fork/tree/headless survival answered from Pi source with citations in
       `docs/pi-api-surface.md`, paid probe only if the source left ambiguity.
 
 ## Open questions
 
-- E2E resume probe result (filled by S5): pending.
-- Fork/tree/headless survival findings (filled by S5, from Pi source): pending. Two specifics to
-  settle there: whether a fork copies entries into the new file (which would make recall resolve
-  for copied spans), and what recall means in a `persist:false` headless session (expected: no
-  durable route, same as today — confirm and document).
+- E2E resume probe result (filled by S5): **ALL PASS**, 2026-08-31, `scripts/e2e-compact-resume.sh`
+  against openai-codex/gpt-5.6-sol. One session: fold event (cap), then real threshold hard
+  compaction answered by the det summary (15,310 tok summarized, no model), quit, resume
+  (restored 3 fold entries, 1 layer), and `recall_folded` recovered the planted phrase
+  `periwinkle-astrolabe-7` from the session ledger with both source files deleted. No `spool/`
+  directory anywhere on disk; seed index at `context-fold/<sid>/seed-index.jsonl`. Two probe
+  notes: folding itself keeps provider usage below a compaction threshold (the probe needs a
+  second raw first-delivery read to cross it), and project-level settings are ignored in an
+  untrusted directory (the probe carries its compaction override in a temp agent dir).
+- Fork/tree/headless survival findings (filled by S5, from Pi source 0.84.4, citations in
+  `docs/pi-api-surface.md`): a fork COPIES every non-header entry into the new file
+  (`forkFrom`), so recall resolves copied spans and restored fold records verify against them;
+  `getEntries()` returns the whole tree, so blocks on abandoned branches still resolve;
+  `newSession({parentSession})` carries nothing (path-only handoff confirmed); `persist:false`
+  sessions serve recall in-process from the in-memory entry list and nothing survives exit — the
+  durable route exists exactly where Pi keeps a session file. No ambiguity remained, so no
+  additional paid probe was needed for these.
