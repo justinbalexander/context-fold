@@ -3,7 +3,7 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
-## Unreleased
+## 0.4.0 — 2026-08-31
 
 The spool is gone: Pi's own append-only session file is the durability floor behind every fold.
 
@@ -27,6 +27,27 @@ The spool is gone: Pi's own append-only session file is the durability floor beh
   entries without a sha: recall serves them from the ledger with an unverified note where the
   block is present, and reports unavailable where it is not. Old spool files are inert; delete
   them freely.
+- **`/context-fold config`: an interactive settings menu.** Every knob — fold thresholds,
+  budget fraction and cap, tail target, compaction mode, reconstruction budget — lives in one
+  table backing the menu, the env parser, and a new saved-settings file
+  (`<agentDir>/context-fold.json`). Menu edits persist and steer future folds in the live
+  session immediately; already-frozen layers never change. Env vars stay a per-session override
+  on top of the saved file, and the menu flags that shadowing rather than hiding it. A corrupt
+  or hand-edited file revalidates on read and degrades to defaults.
+- **Recall slices answer from the tool's recorded full output.** Fold records carry the
+  persisted full-output path from the paired tool call, so `recall_folded` with `grep=` or
+  `lines=` searches the complete output rather than only the text that was delivered into
+  context.
+- **`/fold-handoff` offers to start the successor session.** The seed file is still written
+  first as the reviewable record; interactively the command then asks once and, on yes, opens a
+  new session seeded with the handoff and linked to its parent. Declining, headless runs, older
+  Pi builds, and any switch failure keep the write-review-paste flow.
+- **Compaction and cache accounting settle on terminal events.** Compactions count when they
+  complete, so a cancelled or failed attempt no longer trips the forced-compaction advisor; an
+  index record from a compaction that then fails is voided by an append-only retract line; and
+  a real model change restarts cache telemetry, since the new model's cache is genuinely cold.
+- **Footer status drops the redundant extension name.** Pi's footer already labels each status
+  with its key; the fold glyph stays as the visual anchor.
 
 ## 0.3.2 — 2026-08-17
 
