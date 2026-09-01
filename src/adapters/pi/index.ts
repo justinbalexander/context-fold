@@ -82,7 +82,13 @@ export default function contextFold(pi: ExtensionAPI): void {
 	};
 
 	// ── advisory state (display-only; nothing here gates a turn) ─────────────────────────────────
+	// Counted on session_compact (the terminal event), never on session_before_compact: an
+	// attempted compaction that Pi cancels or that fails must not read as a forced one.
 	let compactions = 0;
+	// The seq the det-compaction handler's index record claimed, retracted if Pi then reports
+	// the compaction failed — a recovery map for a compaction that never happened must not
+	// shadow later summaries.
+	let pendingCompactSeq: number | null = null;
 	let lastContextWindow: number | null = null;
 	let wasCold = false;
 	let warnedWireDeferral = false;
@@ -207,6 +213,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			// Closure-held advisory state is per-session too — stale values would make the new
 			// session's first /context-fold report the old session's compactions or cold streak.
 			compactions = 0;
+			pendingCompactSeq = null;
 			wasCold = false;
 			lastContextWindow = null;
 			warnedWireDeferral = false;
@@ -370,7 +377,6 @@ export default function contextFold(pi: ExtensionAPI): void {
 	// CONTEXTFOLD_COMPACT=native leaves Pi's own compaction untouched. Fail-open: any error here
 	// falls through to Pi's default behavior.
 	pi.on("session_before_compact", (event, ctx) => {
-		compactions++;
 		if (acfg.compact !== "det") return;
 		try {
 			const prep = (event as { preparation: { messagesToSummarize: unknown[]; turnPrefixMessages: unknown[]; tokensBefore: number; firstKeptEntryId: string; previousSummary?: string } }).preparation;
@@ -404,8 +410,10 @@ export default function contextFold(pi: ExtensionAPI): void {
 				tokensBefore: prep.tokensBefore,
 				contextWindow: lastContextWindow,
 			});
-			// The compact record claimed a seq; the next fold event must start past it.
+			// The compact record claimed a seq; the next fold event must start past it. Remember it
+			// so a failed compaction can retract it.
 			engine.ensureLayerSeqAtLeast(compactRecord.seq);
+			pendingCompactSeq = compactRecord.seq;
 			const summary = renderDetCompactionSummary({
 				records: index.readAll(),
 				spoolDir: join(ctx.sessionManager.getSessionDir(), "spool", ctx.sessionManager.getSessionId()),
@@ -420,6 +428,51 @@ export default function contextFold(pi: ExtensionAPI): void {
 			);
 			return;
 		}
+	});
+
+	// Terminal compaction events: the count and the index record settle only here.
+	pi.on("session_compact", () => {
+		compactions++;
+		pendingCompactSeq = null;
+	});
+	// `session_compact_failed` postdates Pi 0.84 (whose typings this build pins); on an older
+	// engine the handler simply never fires and a failed compaction keeps its premature record —
+	// the pre-S2 behavior. Registered through a plain-string signature so both versions load.
+	const onAny = pi.on as unknown as (name: string, handler: (event: unknown, ctx: unknown) => unknown) => void;
+	onAny("session_compact_failed", (event, rawCtx) => {
+		const ctx = rawCtx as { sessionManager: { getSessionDir(): string; getSessionId(): string } };
+		const e = event as { reason?: string; errorMessage?: string; aborted?: boolean };
+		const why = e.aborted ? "aborted" : (e.errorMessage ?? "failed");
+		process.stderr.write(`[context-fold] compaction (${e.reason ?? "?"}) did not complete (${why}) — not counted\n`);
+		if (pendingCompactSeq === null) return;
+		try {
+			indexFor(ctx).appendRetraction(pendingCompactSeq);
+			if (debug) process.stderr.write(`[context-fold] retracted seed-index compact record seq ${pendingCompactSeq}\n`);
+		} catch (err) {
+			// Fail-open: a stale compact record costs duplicate pointers in a later summary, never a turn.
+			process.stderr.write(
+				`[context-fold] compact-record retraction failed (record left in place): ${err instanceof Error ? err.message : String(err)}\n`,
+			);
+		} finally {
+			pendingCompactSeq = null;
+		}
+	});
+
+	// A real model change cold-starts the provider cache: telemetry spanning it would blend two
+	// incompatible measurements, so the segment restarts. `restore` precedes a fresh telemetry
+	// object and is ignored; re-selecting the same model is not a change.
+	pi.on("model_select", (event, ctx) => {
+		const e = event as {
+			model?: { provider?: string; id?: string };
+			previousModel?: { provider?: string; id?: string };
+			source?: string;
+		};
+		if (e.source === "restore" || !e.previousModel || !e.model) return;
+		if (e.previousModel.provider === e.model.provider && e.previousModel.id === e.model.id) return;
+		telemetry.reset();
+		wasCold = false;
+		updateFooter(ctx as unknown as Parameters<typeof updateFooter>[0]);
+		if (debug) process.stderr.write("[context-fold] model changed — cache telemetry segment restarted\n");
 	});
 
 	registerFoldTools(pi, engine, (ids) => recordUnfold(pi, ids));

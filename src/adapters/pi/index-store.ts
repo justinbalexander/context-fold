@@ -22,6 +22,17 @@ import type { SpoolEntry, MapSpoolRegistry } from "../../core/spool-registry";
 const INDEX_FILENAME = "seed-index.jsonl";
 const INDEX_HARNESS = "pi-context-fold";
 
+/** A retraction line: voids fold-index records with this seq that appear EARLIER in the file.
+ *  Appended when Pi reports `session_compact_failed` after a compact record was already emitted —
+ *  the compaction never happened, so its recovery map must not shadow later summaries. The JSONL
+ *  stays append-only; a later record may legitimately reuse the seq (latest-per-seq wins). */
+interface RetractRecord {
+	v: 1;
+	kind: "fold-retract";
+	seq: number;
+	at: string;
+}
+
 function spoolEntryFor(b: WireBlock, code: string, res: SpoolWriteResult, deps: { spool: SpoolStore }): SpoolEntry {
 	return {
 		blockId: b.id,
@@ -51,16 +62,28 @@ export class SeedIndexStore {
 		appendFileSync(this.path, `${JSON.stringify(record)}\n`, "utf8");
 	}
 
-	/** All parseable records, file order. Tolerates junk lines and unknown higher versions. */
+	/** Void earlier fold-index records carrying `seq` (see RetractRecord). */
+	appendRetraction(seq: number, now?: number): void {
+		const rec: RetractRecord = { v: 1, kind: "fold-retract", seq, at: new Date(now ?? Date.now()).toISOString() };
+		if (!this.ensured) {
+			mkdirSync(dirname(this.path), { recursive: true });
+			this.ensured = true;
+		}
+		appendFileSync(this.path, `${JSON.stringify(rec)}\n`, "utf8");
+	}
+
+	/** All effective records, file order: junk lines and unknown higher versions are tolerated,
+	 *  and a fold-retract line drops the fold-index records with its seq appended before it. */
 	readAll(): SeedIndexRecord[] {
 		if (!existsSync(this.path)) return [];
-		const out: SeedIndexRecord[] = [];
+		let out: SeedIndexRecord[] = [];
 		for (const line of readFileSync(this.path, "utf8").split("\n")) {
 			const t = line.trim();
 			if (!t) continue;
 			try {
-				const rec = JSON.parse(t) as SeedIndexRecord;
-				if (rec && rec.kind === "fold-index" && Array.isArray(rec.spans)) out.push(rec);
+				const rec = JSON.parse(t) as SeedIndexRecord | RetractRecord;
+				if (rec && rec.kind === "fold-index" && Array.isArray((rec as SeedIndexRecord).spans)) out.push(rec as SeedIndexRecord);
+				else if (rec && rec.kind === "fold-retract" && typeof rec.seq === "number") out = out.filter((r) => r.seq !== rec.seq);
 			} catch {
 				/* junk line — skip */
 			}

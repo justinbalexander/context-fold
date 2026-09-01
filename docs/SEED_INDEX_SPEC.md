@@ -73,6 +73,10 @@ Field semantics:
 - `seq`: the fold event's sequence number, monotonic per session (the
   frozen-layer seq). The file is append-only and never rewritten, so a reader
   resolving a seq that appears more than once takes the latest record for it.
+  A line of the form `{ "v": 1, "kind": "fold-retract", "seq": 3, "at": "…" }`
+  voids the `fold-index` records with that seq appended before it (a compaction
+  that failed after its record was emitted); a record appended after the
+  retraction may reuse the seq and stands on its own.
 - `trigger`: why this fold fired.
 - `files`: every path the folded span touched: tool inputs (read/edit/write
   targets) and path-shaped tokens inside outputs. Repo-relative when

@@ -54,6 +54,9 @@ All of these fire headless.
 | Measured prompt-cache usage | `message.usage.{cacheRead,cacheWrite,input}` on `message_end` |
 | Know the agent loop is actually idle | `pi.on("agent_settled", …)`, which fires after retries, compaction, and queued continuations finish |
 | Hard-compaction summary / cancel | `pi.on("session_before_compact", …) → {compaction:{summary, firstKeptEntryId, tokensBefore}} \| {cancel:true}` |
+| Compaction actually completed (count it, settle the index record) | `pi.on("session_compact", …)` |
+| Compaction failed/aborted after preparation (retract the compact record) | `pi.on("session_compact_failed", …)` — **postdates 0.84.1**; on older engines the handler never fires, so context-fold registers it through a plain-string cast and degrades to leaving the premature record in place |
+| Model changed mid-session (restart the cache-telemetry segment) | `pi.on("model_select", …)` → `{ model, previousModel?, source: "set" \| "cycle" \| "restore" }` |
 | Agent-facing tool | `pi.registerTool({ name, label, description, promptSnippet, promptGuidelines, parameters: Type.Object({…}), execute })` |
 | Slash command | `pi.registerCommand(name, { description, handler })` |
 | Footer status line (TUI) | `ctx.ui.setStatus(key, text)`, a keyed slot on the footer's extension-status line where `undefined` clears. No-op stub in print/json modes, forwarded as an event in RPC mode. |

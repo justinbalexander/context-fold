@@ -103,7 +103,7 @@ Agent calls, stated here:
 - [x] S1 Recall fidelity: thread typed `input` and `details.fullOutputPath` from linearize
       through spool envelopes and seed-index records; recall grep answers from the full-output
       file when present.
-- [ ] S2 Telemetry correctness: `session_compact`/`session_compact_failed` own the compaction
+- [x] S2 Telemetry correctness: `session_compact`/`session_compact_failed` own the compaction
       count and index reconciliation; `model_select` resets cache telemetry on a real model
       change.
 - [ ] S3 Handoff switch: `/fold-handoff` writes the seed, confirms, and seeds a replacement

@@ -682,3 +682,116 @@ describe.skipIf(!PI_PRESENT)("wire watchdog (folds that never reach the provider
 		expect(notices.join("\n")).not.toContain("not observed on the wire");
 	});
 });
+
+// ── S2 of docs/specs/2026-08-31-pi-api-review-followups.md ──────────────────────────────────────
+
+describe.skipIf(!PI_PRESENT)("compaction lifecycle events own the count and the index record", () => {
+	const prep = () => ({
+		messagesToSummarize: heavySession(),
+		turnPrefixMessages: [],
+		tokensBefore: 40_000,
+		firstKeptEntryId: "e9",
+	});
+
+	it("attempted-but-failed compactions never trip the advisor's forced-compaction flag", async () => {
+		process.env.CONTEXTFOLD_COMPACT = "det";
+		const s = await load();
+		const { ctx, notices } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+
+		// Two attempts, both failing afterwards: the old code counted these as forced compactions.
+		for (let i = 0; i < 2; i++) {
+			await s.hooks.get("session_before_compact")!({ preparation: prep() }, ctx);
+			await s.hooks.get("session_compact_failed")!({ reason: "manual", aborted: true }, ctx);
+		}
+		await s.commands.get("context-fold")!.handler("", ctx);
+		expect(notices.join("\n")).not.toContain("second forced compaction");
+	});
+
+	it("completed compactions still count (flag appears after two session_compact events)", async () => {
+		process.env.CONTEXTFOLD_COMPACT = "det";
+		const s = await load();
+		const { ctx, notices } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+
+		for (let i = 0; i < 2; i++) {
+			await s.hooks.get("session_before_compact")!({ preparation: prep() }, ctx);
+			await s.hooks.get("session_compact")!({ reason: "threshold", fromExtension: true }, ctx);
+		}
+		await s.commands.get("context-fold")!.handler("", ctx);
+		expect(notices.join("\n")).toContain("second forced compaction");
+	});
+
+	it("a failed compaction retracts the premature seed-index compact record", async () => {
+		process.env.CONTEXTFOLD_COMPACT = "det";
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		// A fold event first, so the index holds one legitimate fold record.
+		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
+
+		const { SeedIndexStore } = await import("../src/adapters/pi/index-store");
+		const index = new SeedIndexStore(join(dir, "spool", "s1"));
+		const before = index.readAll();
+		expect(before.some((r) => r.trigger === "compact")).toBe(false);
+
+		await s.hooks.get("session_before_compact")!({ preparation: prep() }, ctx);
+		expect(index.readAll().some((r) => r.trigger === "compact")).toBe(true);
+
+		await s.hooks.get("session_compact_failed")!({ reason: "threshold", errorMessage: "boom" }, ctx);
+		const after = index.readAll();
+		expect(after.some((r) => r.trigger === "compact")).toBe(false);
+		// The fold record survives the retraction.
+		expect(after.length).toBe(before.length);
+	});
+
+	it("a compaction that completes keeps its compact record", async () => {
+		process.env.CONTEXTFOLD_COMPACT = "det";
+		const s = await load();
+		const { ctx } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		await s.hooks.get("context")!({ messages: heavySession() }, ctx);
+		await s.hooks.get("session_before_compact")!({ preparation: prep() }, ctx);
+		await s.hooks.get("session_compact")!({ reason: "threshold", fromExtension: true }, ctx);
+
+		const { SeedIndexStore } = await import("../src/adapters/pi/index-store");
+		const index = new SeedIndexStore(join(dir, "spool", "s1"));
+		expect(index.readAll().some((r) => r.trigger === "compact")).toBe(true);
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("model_select resets cache telemetry", () => {
+	const usage = { input: 5_000, cacheRead: 20_000, cacheWrite: 100, output: 50 };
+
+	it("an actual model change starts a fresh telemetry segment", async () => {
+		const s = await load();
+		const { ctx, notices } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		await s.hooks.get("message_end")!({ message: { role: "assistant", usage } }, ctx);
+
+		await s.hooks.get("model_select")!(
+			{
+				model: { provider: "other", id: "big-model" },
+				previousModel: { provider: "test", id: "test-model" },
+				source: "set",
+			},
+			ctx,
+		);
+		await s.commands.get("context-fold")!.handler("", ctx);
+		expect(notices.join("\n")).toContain("cache: no usage yet");
+	});
+
+	it("restore and same-model reselection keep the segment", async () => {
+		const s = await load();
+		const { ctx, notices } = ctxFor({ usage: { contextWindow: 80_000, tokens: null } });
+		await s.hooks.get("message_end")!({ message: { role: "assistant", usage } }, ctx);
+
+		// Restore fires with a differing previousModel shape on some paths — still no reset.
+		await s.hooks.get("model_select")!(
+			{ model: { provider: "other", id: "big" }, previousModel: { provider: "test", id: "test-model" }, source: "restore" },
+			ctx,
+		);
+		// Re-selecting the same model is not a change.
+		await s.hooks.get("model_select")!(
+			{ model: { provider: "test", id: "test-model" }, previousModel: { provider: "test", id: "test-model" }, source: "set" },
+			ctx,
+		);
+		await s.commands.get("context-fold")!.handler("", ctx);
+		expect(notices.join("\n")).not.toContain("cache: no usage yet");
+	});
+});
