@@ -79,6 +79,10 @@ All of these fire headless.
 |---|---|
 | Detect pressure | `ctx.getContextUsage()` → `{ contextWindow, tokens }` |
 | Measured prompt-cache usage | `message.usage.{cacheRead,cacheWrite,input}` on `message_end` |
+| Resume cache-age estimate | `ctx.sessionManager.getBranch()` → successful assistant entries, using entry completion timestamps and provider/model identity |
+| Recheck or stop cache timers | `session_start`, `session_tree`, `model_select`, `session_compact`, `agent_start`, `agent_settled`, `session_shutdown` |
+| Optional pre-request confirmation | `pi.on("input", …)` with interactive source → `ctx.ui.select`; `handled` consumes a cancelled prompt before model/auth/compaction work |
+| Draft restoration | `ctx.ui.setEditorText(text)` plus `ctx.ui.notify` to request a render; retained structured images return via `input` → `transform` on resubmission |
 | Know the agent loop is actually idle | `pi.on("agent_settled", …)`, which fires after retries, compaction, and queued continuations finish |
 | Hard-compaction summary / cancel | `pi.on("session_before_compact", …) → {compaction:{summary, firstKeptEntryId, tokensBefore}} \| {cancel:true}` |
 | Compaction actually completed (count it, settle the index record) | `pi.on("session_compact", …)` |

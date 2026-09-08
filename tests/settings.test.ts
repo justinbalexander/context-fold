@@ -127,3 +127,18 @@ describe("settingsReport", () => {
 		expect(report).not.toContain("Spool retention");
 	});
 });
+
+describe("provider warning menu", () => {
+	it("edits and clears only the selected provider, preserving other settings", async () => {
+		writeFileSync(file, JSON.stringify({ tail: 1234, providerCacheIdleMinutes: { custom: 60 } }));
+		const applied: SavedSettings[] = [];
+		const ui = scriptedUi(["Cache inactivity warning", "10", "Cache inactivity warning", "default", "Done"]);
+		await runSettingsMenu(ui, s => applied.push(s), file, "openai");
+		expect(applied).toEqual([
+			{ tail: 1234, providerCacheIdleMinutes: { custom: 60, openai: 10 } },
+			{ tail: 1234, providerCacheIdleMinutes: { custom: 60 } },
+		]);
+		expect(settingsReport(applied[0], "openai")).toContain("Cache inactivity warning (minutes) [openai]: 10 (saved)");
+		expect(settingsReport(applied[0], "custom")).toContain("[custom]: 60 (saved)");
+	});
+});

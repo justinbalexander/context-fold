@@ -12,7 +12,7 @@ import { LADDER_DEFAULTS, type LadderConfig } from "../../core/policy/fold-ladde
 /** How the extension answers Pi's hard compaction (`session_before_compact`). */
 export type CompactMode = "det" | "native";
 
-export type KnobValue = number | CompactMode;
+export type KnobValue = number | CompactMode | "on" | "off";
 
 /** Settings persisted by the /context-fold config menu (same keys in the JSON file). */
 export interface SavedSettings {
@@ -24,9 +24,12 @@ export interface SavedSettings {
 	tail?: number;
 	compact?: CompactMode;
 	reconTokens?: number;
+	cacheIdleMinutes?: number;
+	confirmColdPrompt?: "on" | "off";
+	providerCacheIdleMinutes?: Record<string, number>;
 }
 
-export type KnobKey = keyof SavedSettings;
+export type KnobKey = Exclude<keyof SavedSettings, "providerCacheIdleMinutes">;
 
 export interface KnobSpec {
 	readonly key: KnobKey;
@@ -48,7 +51,7 @@ const fraction = (raw: string): number | undefined => {
 	return Number.isFinite(n) && n > 0 && n <= 1 ? n : undefined;
 };
 const nonNegative = (raw: string): number | undefined => {
-	if (raw === "") return undefined; // Number("") is 0, and blank is not a spelling of zero
+	if (raw.trim() === "") return undefined; // Number("") is 0, and blank is not a spelling of zero
 	const n = Number(raw);
 	return Number.isFinite(n) && n >= 0 ? n : undefined;
 };
@@ -56,6 +59,27 @@ const plain = (v: KnobValue): string => String(v);
 const offOrNumber = (v: KnobValue): string => (v === 0 ? "off" : String(v));
 
 export const KNOBS: readonly KnobSpec[] = [
+	{
+		key: "cacheIdleMinutes",
+		env: "CONTEXTFOLD_CACHE_IDLE_MINUTES",
+		label: "Cache inactivity warning (minutes)",
+		hint: "warn after this many idle minutes; investigate your provider's retention; 'off' or 0 disables",
+		def: 30,
+		live: true,
+		parse: (raw) => raw === "off" ? 0 : nonNegative(raw),
+		format: offOrNumber,
+	},
+	{
+		key: "confirmColdPrompt",
+		env: "CONTEXTFOLD_CONFIRM_COLD_PROMPT",
+		label: "Confirm potentially cold prompts",
+		hint: "interactive send confirmation when a large session's cache may have expired",
+		def: "off",
+		choices: ["off", "on"],
+		live: true,
+		parse: (raw) => raw === "on" || raw === "off" ? raw : undefined,
+		format: plain,
+	},
 	{
 		key: "foldAt",
 		env: "CONTEXTFOLD_FOLD_AT",
@@ -159,11 +183,15 @@ export interface ResolvedKnob {
 }
 
 /** Effective value for one knob: env (when set and valid) over saved file over default. */
-export function resolveKnob(spec: KnobSpec, saved: SavedSettings = {}): ResolvedKnob {
+export function resolveKnob(spec: KnobSpec, saved: SavedSettings = {}, provider?: string): ResolvedKnob {
 	const raw = process.env[spec.env];
 	if (raw !== undefined) {
 		const v = spec.parse(raw.trim());
 		if (v !== undefined) return { value: v, source: "env" };
+	}
+	if (spec.key === "cacheIdleMinutes" && provider && saved.providerCacheIdleMinutes &&
+		Object.hasOwn(saved.providerCacheIdleMinutes, provider)) {
+		return { value: saved.providerCacheIdleMinutes[provider], source: "saved" };
 	}
 	const s = saved[spec.key];
 	if (s !== undefined) return { value: s, source: "saved" };
@@ -183,7 +211,18 @@ export function parseSavedSettings(json: unknown): SavedSettings {
 		const parsed = spec.parse(String(v).trim());
 		if (parsed !== undefined) out[spec.key] = parsed;
 	}
-	return out as SavedSettings;
+	const saved: SavedSettings = out as SavedSettings;
+	const providers = (json as Record<string, unknown>).providerCacheIdleMinutes;
+	if (typeof providers === "object" && providers !== null && !Array.isArray(providers)) {
+		const valid: [string, number][] = [];
+		for (const [provider, raw] of Object.entries(providers)) {
+			if (!provider.trim() || (typeof raw !== "number" && typeof raw !== "string")) continue;
+			const minutes = knob("cacheIdleMinutes").parse(String(raw).trim());
+			if (typeof minutes === "number") valid.push([provider, minutes]);
+		}
+		if (valid.length) saved.providerCacheIdleMinutes = Object.fromEntries(valid);
+	}
+	return saved;
 }
 
 /** How the extension answers Pi's hard compaction, plus the other adapter-level settings. */

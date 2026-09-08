@@ -9,7 +9,7 @@
  *
  * The policy is the discrete fold ladder: fold events mask stale observations into prefix-stable
  * frozen layers, with a deterministic seed index emitted at every event. No model call ever fires
- * on the automatic path. Fully autonomous (no UI prompts) — runs identically headless.
+ * on the automatic path. Folding runs identically headless; cache-risk confirmation is opt-in UI.
  */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,6 +27,7 @@ import { LedgerReader } from "./ledger";
 import { recordFoldEntry, recordLayer, recordUnfold, restoreFoldState } from "./persistence";
 import { CacheTelemetry, k } from "./cache-telemetry";
 import { advise } from "./advisor";
+import { CacheWarning, notifyCacheWarning } from "./cache-warning";
 
 import { adapterConfigFromEnv, configFromEnv, debugEnabled, type SavedSettings } from "./config";
 import { loadSavedSettings, runSettingsMenu, settingsReport } from "./settings";
@@ -39,7 +40,8 @@ export default function contextFold(pi: ExtensionAPI): void {
 		process.stderr.write("[context-fold] disabled by CONTEXTFOLD=0 — no folding this session\n");
 		return;
 	}
-	const savedSettings = loadSavedSettings();
+	let savedSettings = loadSavedSettings();
+	const cacheWarning = new CacheWarning(() => savedSettings);
 	const acfg = adapterConfigFromEnv(savedSettings);
 	const foldCfg = configFromEnv(savedSettings);
 	const ladderPolicy = new FoldLadderPolicy(acfg.ladder);
@@ -52,6 +54,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 	// cleared knob falls back correctly, then push it into the policy, the engine, and acfg. Frozen
 	// layers keep their bytes; new values steer future folds only.
 	const applySavedSettings = (saved: SavedSettings) => {
+		savedSettings = saved;
 		const a = adapterConfigFromEnv(saved);
 		acfg.ladder = a.ladder;
 		acfg.reconTokens = a.reconTokens;
@@ -187,6 +190,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 	// clears the previous session's registry (stale codes must never serve another session's blocks).
 	let restoredFor = "";
 	pi.on("session_start", (_event, ctx) => {
+		cacheWarning.restore(ctx);
 		const sid = ctx.sessionManager.getSessionId();
 		if (restoredFor === sid) return;
 		const isSwitch = restoredFor !== "";
@@ -239,10 +243,16 @@ export default function contextFold(pi: ExtensionAPI): void {
 		}
 	});
 
+	pi.on("session_tree", (_event, ctx) => cacheWarning.restore(ctx));
+	pi.on("session_shutdown", () => cacheWarning.dispose());
+	pi.on("agent_start", () => cacheWarning.pause());
+	pi.on("input", (event, ctx) => cacheWarning.input(event, ctx));
+
 	// OBSERVE-ONLY cache telemetry: every finalized assistant message carries real provider
 	// usage (cacheRead/cacheWrite). The per-turn hit ratio is the measured signal for whether
 	// folding kept the prefix warm — it collapses on the turn after a head-rewriting fold.
 	pi.on("message_end", (event, ctx) => {
+		cacheWarning.observe(event.message);
 		const message = event.message as { role?: string; usage?: Record<string, number> };
 		if (message.role !== "assistant" || !message.usage) return;
 		telemetry.record(message.usage);
@@ -277,14 +287,15 @@ export default function contextFold(pi: ExtensionAPI): void {
 	// tool-call response while the agent is visibly still working. Coldness is a session-level
 	// recommendation: evaluate it only once Pi says retries, compaction and queued continuations
 	// have all settled. This also lets a transient cache miss recover later in the same agent run.
-	pi.on("agent_settled", () => {
+	pi.on("agent_settled", (_event, ctx) => {
+		cacheWarning.refresh(ctx);
 		const t = telemetry.snapshot();
 		const adv = buildAdvisory();
 		if (adv.coldNow && !wasCold) {
 			const carried = t.last ? t.last.cacheRead + t.last.input : 0;
 			if (carried >= 20_000)
-				process.stderr.write(
-					`session cold: rebilled ~${Math.round(carried / 1000)}k tok as fresh input. Consider /new\n`,
+				notifyCacheWarning(ctx,
+					`session cold: rebilled ~${Math.round(carried / 1000)}k tok as fresh input. Consider /fold-handoff`,
 				);
 		}
 		// The first response after a fold is intentionally excluded from cold detection because the
@@ -420,7 +431,8 @@ export default function contextFold(pi: ExtensionAPI): void {
 	});
 
 	// Terminal compaction events: the count and the index record settle only here.
-	pi.on("session_compact", () => {
+	pi.on("session_compact", (_event, ctx) => {
+		cacheWarning.refresh(ctx);
 		compactions++;
 		pendingCompactSeq = null;
 	});
@@ -460,6 +472,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 		if (e.previousModel.provider === e.model.provider && e.previousModel.id === e.model.id) return;
 		telemetry.reset();
 		wasCold = false;
+		cacheWarning.refresh(ctx);
 		updateFooter(ctx as unknown as Parameters<typeof updateFooter>[0]);
 		if (debug) process.stderr.write("[context-fold] model changed — cache telemetry segment restarted\n");
 	});
@@ -476,6 +489,10 @@ export default function contextFold(pi: ExtensionAPI): void {
 		description: "context-fold status; 'config' opens the settings menu.",
 		handler: async (args, cmdCtx) => {
 			const sub = (args ?? "").trim().toLowerCase();
+			if (sub === "discard-images") {
+				cacheWarning.discardImages(cmdCtx);
+				return;
+			}
 			if (sub === "config" || sub === "settings") {
 				const ui = cmdCtx.ui;
 				// Headless ui.select is a stub that answers undefined, so gate on hasUI rather than
@@ -494,7 +511,12 @@ export default function contextFold(pi: ExtensionAPI): void {
 								input: (title, placeholder) => ui.input(title, placeholder),
 								notify: say,
 							},
-							applySavedSettings,
+							(saved) => {
+								applySavedSettings(saved);
+								cacheWarning.refresh(cmdCtx);
+							},
+							undefined,
+							cmdCtx.model?.provider,
 						);
 					} catch (err) {
 						say(
@@ -504,7 +526,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 					}
 				} else {
 					cmdCtx.ui?.notify?.(
-						`context-fold settings (env over saved over default):\n${settingsReport(loadSavedSettings())}`,
+						`context-fold settings (env over saved over default):\n${settingsReport(loadSavedSettings(), cmdCtx.model?.provider)}`,
 						"info",
 					);
 				}

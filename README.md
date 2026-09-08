@@ -148,16 +148,20 @@ append-only session file even once the raw message has left live context.
 
 ### Status and advisories
 
-Measured prompt-cache telemetry (per-message `cacheRead`/`cacheWrite`) drives the advisories below,
-in price-agnostic input-token equivalents; fee ratios are near-constant across vendors, with
-cache read ≈ 0.1× input.
-
-- **Cold detection**: after the agent settles, a final response with zero cached reads and at
-  least 20k input tokens can trigger `session cold: rebilled ~40k tok as fresh input. Consider /new`.
+- **Cache inactivity warning**: in interactive Pi, a session carrying at least 20k tokens warns
+  on resume or when its configured idle interval expires:
+  `cache may have expired: ~85k tok may rebill. Consider /fold-handoff`.
+  The clock starts at the last successful response for the selected provider and model, restored
+  from the active session branch. Typing, tool activity, and failed responses do not refresh it.
+  Each idle interval gets one notice. A model with no recorded activity instead says
+  `cache unverified`. The token count is an estimate, including after compaction; elapsed time
+  does not prove cache expiry or guarantee that the provider will bill the whole context again.
+- **Observed cold input**: after the agent settles, a final response with zero cached reads and
+  at least 20k input tokens can trigger
+  `session cold: rebilled ~40k tok as fresh input. Consider /fold-handoff`.
   Detection requires at least two responses observed since the extension loaded and excludes
-  the first response after a fold. The notice appears at most once per cold streak. It reports input
-  already processed, not predicted cache expiry; there is no inactivity warning before you send.
-  For continuity when starting fresh, use the [seed handoff workflow](#starting-fresh-with-the-seed-index).
+  the first response after a fold. The notice appears at most once per cold streak and reports
+  input already processed. Interactive notices use Pi's renderer; headless notices use stderr.
 - **`/context-fold` status**: fold position (usage %, the next-fold gauge), cache hit ratios, and
   flags: folds committed but not observed on the wire, a second forced compaction, irreducible
   context past half the window, cold with a large carry, and recall churn. Advisory only; nothing
@@ -181,6 +185,20 @@ cache read ≈ 0.1× input.
   writes: Anthropic and Bedrock Converse do, while the Codex route reports cached reads only and
   Pi hardcodes Google's write to zero. Where writes are unreported the line says so instead of
   showing a zero, because "nothing was rewritten" and "this provider never says" are different facts.
+
+For continuity when starting fresh, use the [seed handoff workflow](#starting-fresh-with-the-seed-index).
+
+**Optional send confirmation.** Enable **Confirm potentially cold prompts** in
+`/context-fold config` to offer **Keep draft** or **Send anyway** before an interactive prompt
+reaches the provider. Escape keeps the draft. The same inactivity and 20k-token thresholds
+apply. Automation, RPC, and prompts queued during streaming bypass this confirmation.
+An advisory or selector failure also lets input proceed; an explicit cancellation never does.
+
+Cancelled text returns to the editor, including pasted-image file paths. Structured images
+remain in memory for the next interactive prompt in the same session, even if you edit the text.
+A notice lists the retained image count; `/context-fold discard-images` clears those images.
+Session navigation, reload, and shutdown discard them. The extension never resets a session or
+submits a handoff automatically.
 
 ## Guarantees
 
@@ -289,8 +307,32 @@ shadowing when it applies.
 | `CONTEXTFOLD_TAIL` | `20000` | Protected-tail target: the newest ~N tokens never fold (clamped to half the budget). |
 | `CONTEXTFOLD_COMPACT` | `det` | Hard-compaction answer: `det` = deterministic seed-index summary; `native` = Pi stock. |
 | `CONTEXTFOLD_RECON_TOKENS` | `18000` | Reconstruction estimate used by the reset flag (input-token equivalents). |
+| `CONTEXTFOLD_CACHE_IDLE_MINUTES` | `30` | Cache inactivity warning threshold; `off` or `0` disables prediction and send confirmation. |
+| `CONTEXTFOLD_CONFIRM_COLD_PROMPT` | `off` | `on` enables interactive pre-request confirmation. |
 | `CONTEXTFOLD_DEBUG` | _(off)_ | One-line fold/cache summary to stderr each turn. |
 | `CONTEXTFOLD_DUMP` | _(unset)_ | Debug/e2e seam: write each turn's outgoing (folded) view to this JSON path. |
+
+The **Cache inactivity warning (minutes)** menu row names the selected Pi provider. Edits to
+that row save a provider-specific override. Unconfigured providers use the fallback above;
+this is a warning policy, not a claim about provider retention. Investigate the retention policy
+for your provider, model, and request settings, then tune the value accordingly.
+
+The saved JSON supports a global fallback and provider overrides, for example:
+
+```json
+{
+  "cacheIdleMinutes": 30,
+  "providerCacheIdleMinutes": {
+    "openai": 30,
+    "my-provider": 10
+  },
+  "confirmColdPrompt": "off"
+}
+```
+
+Provider keys are Pi provider IDs. The environment timeout overrides every saved provider value.
+Choosing `default` in the provider's menu row removes only that provider's override. Menu edits
+apply immediately; direct JSON edits take effect when the extension reloads.
 
 ## Verification
 
@@ -303,6 +345,10 @@ scripts/e2e-ladder.sh          # live: fold event fires, index emitted, head byt
 scripts/e2e-resume.sh          # live: folds survive a session restart
 scripts/e2e-compact-resume.sh  # live: folds survive real hard compaction plus a restart, recalled from the session ledger
 ```
+
+With Pi and tmux installed, `bash scripts/check-cache-warning.sh` checks cancellation, edited
+resubmission, and image preservation in a 48-column Pi terminal. It uses an offline fixture
+provider, makes no model request, and prints the directory containing its screen captures.
 
 The live scripts drive real Pi sessions against a real provider, so they cost money and need
 provider auth plus `python3`. They load the working copy explicitly, so they test the checkout

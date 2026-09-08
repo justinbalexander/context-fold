@@ -416,7 +416,7 @@ describe.skipIf(!PI_PRESENT)("message_end hook and the status command", () => {
 
 			await s.hooks.get("agent_settled")!({}, ctx);
 			const warnings = writes.filter((w) => w.includes("session cold"));
-			expect(warnings).toEqual(["session cold: rebilled ~40k tok as fresh input. Consider /new\n"]);
+			expect(warnings).toEqual(["session cold: rebilled ~40k tok as fresh input. Consider /fold-handoff\n"]);
 			expect(warnings[0].trimEnd().length).toBeLessThanOrEqual(80);
 		} finally {
 			process.stderr.write = originalWrite;
@@ -935,5 +935,45 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 		expect(all).toContain("/new");
 		expect(all).not.toContain("fold-handoff failed");
 		expect(existsSync(join(dir, "context-fold", "s1", "handoff-s1.md"))).toBe(true);
+	});
+});
+
+describe.skipIf(!PI_PRESENT)("pre-request warning wiring", () => {
+	it("warns at resume, gates the first prompt, and applies the provider timeout live", async () => {
+		process.env.PI_CODING_AGENT_DIR = dir;
+		writeFileSync(join(dir, "context-fold.json"), JSON.stringify({ confirmColdPrompt: "on" }));
+		const s = await load();
+		const { ctx, notices } = ctxFor({ usage: { contextWindow: 200_000, tokens: 85_000 } });
+		let draft = "";
+		const fullCtx = {
+			...ctx, hasUI: true, mode: "tui", isIdle: () => true,
+			sessionManager: { ...ctx.sessionManager, getBranch: () => [{ type: "message", timestamp: new Date(Date.now() - 31 * 60_000).toISOString(), message: {
+				role: "assistant", provider: "test", model: "test-model", stopReason: "stop", usage: { input: 85_000, output: 0, cacheRead: 0, cacheWrite: 0 },
+			} }] },
+			ui: { ...ctx.ui, setEditorText: (text: string) => draft = text, select: async () => "Keep draft" },
+		};
+		await s.hooks.get("session_start")!({}, fullCtx);
+		expect(notices).toContain("cache may have expired: ~85k tok may rebill. Consider /fold-handoff");
+		const event = { text: "continue", source: "interactive" };
+		expect(await s.hooks.get("input")!(event, fullCtx)).toEqual({ action: "handled" });
+		expect(draft).toBe("continue");
+		const choices = ["Cache inactivity warning", "Done"];
+		const menuCtx = { ...fullCtx, ui: { ...fullCtx.ui,
+			select: async (_title: string, options: string[]) => options.find(o => o.startsWith(choices.shift()!)),
+			input: async () => "60",
+		} };
+		await s.commands.get("context-fold")!.handler("config", menuCtx);
+		expect(JSON.parse(readFileSync(join(dir, "context-fold.json"), "utf8")).providerCacheIdleMinutes).toEqual({ test: 60 });
+		expect(await s.hooks.get("input")!(event, fullCtx)).toEqual({ action: "continue" });
+		await s.hooks.get("session_shutdown")!({}, fullCtx);
+	});
+
+	it("renders the observed cold notice through the UI instead of stderr", async () => {
+		const s = await load();
+		const { ctx, notices } = ctxFor();
+		const uiCtx = { ...ctx, hasUI: true };
+		for (let i = 0; i < 2; i++) await s.hooks.get("message_end")!({ message: { role: "assistant", usage: { input: 40_000, cacheRead: 0, cacheWrite: 0 } } }, uiCtx);
+		await s.hooks.get("agent_settled")!({}, uiCtx);
+		expect(notices).toContain("session cold: rebilled ~40k tok as fresh input. Consider /fold-handoff");
 	});
 });

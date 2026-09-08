@@ -48,7 +48,8 @@ src/
     persistence.ts         # event-sourced fold state
     compact.ts             # the deterministic hard-compaction summary
     handoff.ts             # /fold-handoff: writes a deterministic seed for a fresh session
-    advisor.ts             # cold detection and the reset yellow flag
+    advisor.ts             # observed cold input and the reset yellow flag
+    cache-warning.ts       # idle/resume cache-risk notices and opt-in input confirmation
     cache-telemetry.ts     # measured cacheRead/cacheWrite accounting
     unfold-tool.ts         # the recall_folded / unfold tools
     config.ts              # the knob table: defaults < saved settings < CONTEXTFOLD_* env
@@ -169,8 +170,9 @@ Pi's own session files, with no garbage collection.
 
 ## 7. Failure posture
 
-Every hook is fail-open with a bounded blast radius, and every degradation is announced on stderr
-rather than swallowed.
+Every hook is fail-open with a bounded blast radius. Folding degradations are announced on stderr;
+cache-advisory failures use Pi's notification UI when available. A failed notification sink cannot
+prevent the turn.
 
 | failure | cost |
 |---|---|
@@ -179,12 +181,26 @@ rather than swallowed.
 | fold-code collision on one block | that block alone stays raw for the session; the rest of the event folds |
 | deterministic compaction throws | Pi's own compaction runs instead |
 | resume restore throws | prior folds render raw this session |
+| cache-risk estimate or confirmation throws | input proceeds without the advisory; an explicit cancellation still consumes the input |
 | ledger cannot serve a block (absent, or sha mismatch) | a live block still resolves from raw history, through the same recall caps and slices; only a block that also left live history errors |
 
 `CONTEXTFOLD=0` disables the extension entirely for one session, which is the escape hatch for
 testing or for isolating a suspected fold-related problem.
 
 ---
+
+### Cache-risk input boundary
+
+Cache prediction reads successful assistant completion timestamps from the active session branch,
+keyed by provider and model. Runtime timers, notification deduplication, and cancelled structured
+images live only in `cache-warning.ts`; session navigation and shutdown reset them. No additional
+session record or provider request is needed. Provider warning intervals are saved settings, not
+provider retention guarantees.
+
+The `input` hook can consume a potentially cold interactive prompt before Pi sends it. Automation
+and queued streaming input continue unchanged. Cancellation restores the editor text and retains
+structured images for the next interactive prompt in that session; `discard-images` clears them.
+The confirmation is disabled by default and never changes fold policy or starts a new session.
 
 ## 8. Invariants
 

@@ -138,3 +138,29 @@ describe("saved settings flow into the config builders", () => {
 		expect(acfg.reconTokens).toBe(9_000);
 	});
 });
+
+describe("cache warning settings", () => {
+	it("defaults to 30 minutes and an opt-in send confirmation", () => {
+		expect(resolveKnob(knob("cacheIdleMinutes"))).toEqual({ value: 30, source: "default" });
+		expect(resolveKnob(knob("confirmColdPrompt")).value).toBe("off");
+	});
+
+	it("resolves the selected provider override beneath the environment", () => {
+		const settings = { cacheIdleMinutes: 30, providerCacheIdleMinutes: { openai: 10, custom: 0 } };
+		expect(resolveKnob(knob("cacheIdleMinutes"), settings, "openai").value).toBe(10);
+		expect(resolveKnob(knob("cacheIdleMinutes"), settings, "custom").value).toBe(0);
+		expect(resolveKnob(knob("cacheIdleMinutes"), settings, "unknown").value).toBe(30);
+		setEnv("CONTEXTFOLD_CACHE_IDLE_MINUTES", "15");
+		expect(resolveKnob(knob("cacheIdleMinutes"), settings, "openai")).toEqual({ value: 15, source: "env" });
+	});
+
+	it("validates each provider independently and supports disabling warnings", () => {
+		expect(parseSavedSettings({ providerCacheIdleMinutes: { openai: "10", custom: "off", bad: -1, broken: {} } })).toEqual({
+			providerCacheIdleMinutes: { openai: 10, custom: 0 },
+		});
+		expect(parseSavedSettings({ providerCacheIdleMinutes: [] })).toEqual({});
+		expect(knob("cacheIdleMinutes").parse(" ")).toBeUndefined();
+		expect(knob("confirmColdPrompt").parse("on")).toBe("on");
+		expect(knob("confirmColdPrompt").parse("maybe")).toBeUndefined();
+	});
+});

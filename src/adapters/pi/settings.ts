@@ -43,13 +43,25 @@ function writeSettings(saved: SavedSettings, path: string): void {
 	renameSync(tmp, path);
 }
 
-export function writeSavedSetting(key: KnobKey, value: KnobValue, path = settingsFilePath()): void {
-	writeSettings({ ...loadSavedSettings(path), [key]: value }, path);
+export function writeSavedSetting(key: KnobKey, value: KnobValue, path = settingsFilePath(), provider?: string): void {
+	const saved = loadSavedSettings(path);
+	if (key === "cacheIdleMinutes" && provider && typeof value === "number") {
+		saved.providerCacheIdleMinutes = { ...saved.providerCacheIdleMinutes, [provider]: value };
+		writeSettings(saved, path);
+	} else writeSettings({ ...saved, [key]: value }, path);
 }
 
-export function removeSavedSetting(key: KnobKey, path = settingsFilePath()): void {
-	const { [key]: _cleared, ...rest } = loadSavedSettings(path);
-	writeSettings(rest, path);
+export function removeSavedSetting(key: KnobKey, path = settingsFilePath(), provider?: string): void {
+	const saved = loadSavedSettings(path);
+	if (key === "cacheIdleMinutes" && provider) {
+		const { [provider]: _cleared, ...rest } = saved.providerCacheIdleMinutes ?? {};
+		if (Object.keys(rest).length) saved.providerCacheIdleMinutes = rest;
+		else delete saved.providerCacheIdleMinutes;
+		writeSettings(saved, path);
+	} else {
+		const { [key]: _cleared, ...rest } = saved;
+		writeSettings(rest, path);
+	}
 }
 
 /** The slice of ctx.ui the menu needs; injectable so tests can script a session. */
@@ -62,16 +74,17 @@ export interface MenuUi {
 const DONE = "Done";
 const RESET = "reset to default";
 
-function menuRow(spec: KnobSpec, saved: SavedSettings): string {
-	const r = resolveKnob(spec, saved);
+function menuRow(spec: KnobSpec, saved: SavedSettings, provider?: string): string {
+	const r = resolveKnob(spec, saved, provider);
 	const source = r.source === "default" ? "" : ` (${r.source})`;
 	const deferred = spec.live ? "" : " [next session]";
-	return `${spec.label}: ${spec.format(r.value)}${source}${deferred}`;
+	const scope = spec.key === "cacheIdleMinutes" && provider ? ` [${provider}]` : "";
+	return `${spec.label}${scope}: ${spec.format(r.value)}${source}${deferred}`;
 }
 
 /** One-line-per-knob effective settings, for headless output and the status fallback. */
-export function settingsReport(saved: SavedSettings): string {
-	return KNOBS.map((spec) => menuRow(spec, saved)).join("\n");
+export function settingsReport(saved: SavedSettings, provider?: string): string {
+	return KNOBS.map((spec) => menuRow(spec, saved, provider)).join("\n");
 }
 
 /**
@@ -83,15 +96,16 @@ export async function runSettingsMenu(
 	ui: MenuUi,
 	applyLive: (saved: SavedSettings) => void,
 	path = settingsFilePath(),
+	provider?: string,
 ): Promise<void> {
 	for (;;) {
 		const saved = loadSavedSettings(path);
-		const rows = KNOBS.map((spec) => menuRow(spec, saved));
+		const rows = KNOBS.map((spec) => menuRow(spec, saved, provider));
 		const pick = await ui.select("context-fold settings — pick one to change", [...rows, DONE]);
 		const idx = pick === undefined ? -1 : rows.indexOf(pick);
 		if (idx < 0) return;
 		const spec = KNOBS[idx];
-		const current = resolveKnob(spec, saved);
+		const current = resolveKnob(spec, saved, provider);
 
 		let raw: string | undefined;
 		if (spec.choices) {
@@ -107,19 +121,19 @@ export async function runSettingsMenu(
 		if (!trimmed) continue;
 
 		if (trimmed === RESET || trimmed.toLowerCase() === "default") {
-			removeSavedSetting(spec.key, path);
+			removeSavedSetting(spec.key, path, provider);
 		} else {
 			const parsed = spec.parse(trimmed);
 			if (parsed === undefined) {
 				ui.notify(`${spec.label}: '${trimmed}' is not a valid value (${spec.hint})`, "error");
 				continue;
 			}
-			writeSavedSetting(spec.key, parsed, path);
+			writeSavedSetting(spec.key, parsed, path, provider);
 		}
 
 		const now = loadSavedSettings(path);
 		applyLive(now);
-		const effective = resolveKnob(spec, now);
+		const effective = resolveKnob(spec, now, provider);
 		if (effective.source === "env")
 			ui.notify(
 				`Saved, but ${spec.env} overrides it this session — effective: ${spec.format(effective.value)}`,
