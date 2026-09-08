@@ -415,7 +415,9 @@ describe.skipIf(!PI_PRESENT)("message_end hook and the status command", () => {
 			expect(writes.join("")).not.toContain("session cold");
 
 			await s.hooks.get("agent_settled")!({}, ctx);
-			expect(writes.filter((w) => w.includes("session cold"))).toHaveLength(1);
+			const warnings = writes.filter((w) => w.includes("session cold"));
+			expect(warnings).toEqual(["session cold: rebilled ~40k tok as fresh input. Consider /new\n"]);
+			expect(warnings[0].trimEnd().length).toBeLessThanOrEqual(80);
 		} finally {
 			process.stderr.write = originalWrite;
 		}
