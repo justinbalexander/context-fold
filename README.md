@@ -109,6 +109,30 @@ commands run, error lines in every spelling the lexicon knows (lowercase `failed
 messages, and recovery spans naming each folded block's ledger anchor, extent, and fold-time
 sha256. Extraction is pure regex: same input, byte-identical output.
 
+### Starting fresh with the seed index
+
+`/new` starts an empty session. It does not import the previous session's seed index or fold
+handles. To carry indexed context forward, run this in the old session:
+
+```text
+/fold-handoff <goal for the next session>
+```
+
+The command writes `<sessionDir>/context-fold/<sessionId>/handoff-<sessionId>.md` and offers to
+open a replacement session with that seed as its first user message. Accept, then type your next
+instruction. Creating the seed and opening the session make no model request.
+
+To review the seed first, decline the switch, open the file at the printed path, then run `/new`
+and paste its contents or ask the new agent to read that path. If you already ran `/new` without
+making a seed, use `/resume` to return to the old session and run `/fold-handoff` there.
+
+The seed contains a bounded rendering of existing fold and compaction records, so recent work
+that has not been indexed may be absent. Include the next task in the goal. The complete index
+remains in `seed-index.jsonl` beside the seed. For a saved session, raw content remains in its
+parent session file, whose path the seed includes when Pi provides it. Old fold codes do not
+resolve through the new session's `recall_folded` or `unfold`; read the parent files directly or
+resume the parent session to use those handles.
+
 ### Getting detail back
 
 - `recall_folded search=<term>`: one sweep over every folded block, with matching lines grouped by code.
@@ -128,8 +152,12 @@ Measured prompt-cache telemetry (per-message `cacheRead`/`cacheWrite`) drives th
 in price-agnostic input-token equivalents; fee ratios are near-constant across vendors, with
 cache read ≈ 0.1× input.
 
-- **Cold detection**: an expected-warm turn that read zero cached tokens gets one stderr notice
-  with the re-billed size and a `/new` suggestion.
+- **Cold detection**: after the agent settles, a final response with zero cached reads and at
+  least 20k input tokens can trigger `session cold: rebilled ~40k tok as fresh input. Consider /new`.
+  Detection requires at least two responses observed since the extension loaded and excludes
+  the first response after a fold. The notice appears at most once per cold streak. It reports input
+  already processed, not predicted cache expiry; there is no inactivity warning before you send.
+  For continuity when starting fresh, use the [seed handoff workflow](#starting-fresh-with-the-seed-index).
 - **`/context-fold` status**: fold position (usage %, the next-fold gauge), cache hit ratios, and
   flags: folds committed but not observed on the wire, a second forced compaction, irreducible
   context past half the window, cold with a large carry, and recall churn. Advisory only; nothing

@@ -284,7 +284,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 			const carried = t.last ? t.last.cacheRead + t.last.input : 0;
 			if (carried >= 20_000)
 				process.stderr.write(
-					`[context-fold] session cold — the settled run re-billed ~${Math.round(carried / 1000)}k tok as fresh input; consider /new (reconstruction ≈ ${Math.round(acfg.reconTokens / 1000)}k tok via the seed index)\n`,
+					`session cold: rebilled ~${Math.round(carried / 1000)}k tok as fresh input. Consider /new\n`,
 				);
 		}
 		// The first response after a fold is intentionally excluded from cold detection because the
