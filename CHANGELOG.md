@@ -3,6 +3,15 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
+## 0.5.1 - 2026-09-08
+
+### Fixed
+
+- `/fold-handoff` no longer throws after starting the replacement session. A successful
+  `ctx.newSession()` invalidates the original command context, so the "handoff seed written"
+  notice now goes through `withSession`, which receives the fresh context. Display-only change;
+  the seed file and its content are unaffected.
+
 ## 0.5.0 - 2026-09-08
 
 ### Added
