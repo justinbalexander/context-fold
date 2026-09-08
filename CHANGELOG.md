@@ -3,7 +3,7 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
-## Unreleased
+## 0.5.0 - 2026-09-08
 
 ### Added
 
