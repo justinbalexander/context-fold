@@ -119,24 +119,26 @@ export class CacheWarning {
 			if (!risk || risk.remaining > 0 || resolveKnob(knob("confirmColdPrompt"), this.settings()).value !== "on") return proceed();
 			const selectedModel = ctx.model && modelKey(ctx.model.provider, ctx.model.id);
 			const choice = await ctx.ui.select(risk.text, ["Keep draft", "Send anyway"]);
-			if (epoch !== this.epoch || selectedModel !== (ctx.model && modelKey(ctx.model.provider, ctx.model.id))) {
-				notifyCacheWarning(ctx, "Session or model changed; prompt not sent.");
+			if (epoch !== this.epoch) {
+				notifyCacheWarning(ctx, "Session changed; prompt not sent.");
 				return { action: "handled" };
 			}
-			if (choice === "Send anyway") return proceed();
+			const modelChanged = selectedModel !== (ctx.model && modelKey(ctx.model.provider, ctx.model.id));
+			if (choice === "Send anyway" && !modelChanged) return proceed();
 			this.retainedImages = images;
 			try { ctx.ui.setEditorText(event.text); } catch {
 				notifyCacheWarning(ctx, `Prompt not sent; editor restore failed. Draft: ${event.text}`);
 			}
 			// setEditorText changes the buffer without requesting a Pi render. The notice also
 			// makes retained structured images visible; clipboard image paths are already text.
-			notifyCacheWarning(ctx, images?.length
+			const notice = images?.length
 				? `${images.length} image(s) kept for your next prompt in this session. /context-fold discard-images clears them.`
-				: "Draft kept; prompt not sent.");
+				: "Draft kept; prompt not sent.";
+			notifyCacheWarning(ctx, `${modelChanged ? "Model changed; confirm again before sending. " : ""}${notice}`);
 			return { action: "handled" };
 		} catch (error) {
 			this.failed(ctx, error);
-			return proceed();
+			return epoch === this.epoch ? proceed() : { action: "handled" };
 		}
 	}
 }

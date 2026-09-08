@@ -197,6 +197,23 @@ describe("optional input confirmation", () => {
 		f.warning.dispose();
 	});
 
+	it.each([undefined, "Send anyway"])("keeps text and images if the model changes while confirmation is open (%s)", async choice => {
+		const f = fixture();
+		f.settings({ confirmColdPrompt: "on" });
+		f.warning.restore(f.ctx);
+		let answer!: (value: string | undefined) => void;
+		f.ui.select.mockImplementation(() => new Promise(resolve => answer = resolve));
+		const images = [{ type: "image" as const, data: "aA==", mimeType: "image/png" }];
+		const pending = f.warning.input({ ...input(), images }, f.ctx);
+		f.context.model = { provider: "openai", id: "different" };
+		answer(choice);
+		expect(await pending).toEqual({ action: "handled" });
+		expect(f.ui.setEditorText).toHaveBeenCalledWith("continue with /tmp/pi-clipboard.png");
+		f.ui.select.mockResolvedValue("Send anyway");
+		expect(await f.warning.input(input("edited draft"), f.ctx)).toEqual({ action: "transform", text: "edited draft", images });
+		f.warning.dispose();
+	});
+
 	it("does not send an old prompt after navigation while the confirmation is open", async () => {
 		const f = fixture();
 		f.settings({ confirmColdPrompt: "on" });
@@ -206,6 +223,19 @@ describe("optional input confirmation", () => {
 		const pending = f.warning.input(input(), f.ctx);
 		f.warning.restore(f.ctx);
 		answer("Send anyway");
+		expect(await pending).toEqual({ action: "handled" });
+		f.warning.dispose();
+	});
+
+	it("does not fail open into a different session when a pending selector rejects", async () => {
+		const f = fixture();
+		f.settings({ confirmColdPrompt: "on" });
+		f.warning.restore(f.ctx);
+		let reject!: (reason: Error) => void;
+		f.ui.select.mockImplementation(() => new Promise((_resolve, fail) => reject = fail));
+		const pending = f.warning.input(input(), f.ctx);
+		f.warning.restore(f.ctx);
+		reject(new Error("old selector disposed"));
 		expect(await pending).toEqual({ action: "handled" });
 		f.warning.dispose();
 	});

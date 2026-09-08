@@ -191,7 +191,8 @@ For continuity when starting fresh, use the [seed handoff workflow](#starting-fr
 
 **Optional send confirmation.** Enable **Confirm potentially cold prompts** in
 `/context-fold config` to offer **Keep draft** or **Send anyway** before an interactive prompt
-reaches the provider. Escape keeps the draft. The same inactivity and 20k-token thresholds
+reaches the provider. Escape keeps the draft. A model change during confirmation also keeps the
+draft and requires another submission. The same inactivity and 20k-token thresholds
 apply. Automation, RPC, and prompts queued during streaming bypass this confirmation.
 An advisory or selector failure also lets input proceed; an explicit cancellation never does.
 
