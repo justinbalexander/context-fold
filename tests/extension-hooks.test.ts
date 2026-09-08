@@ -829,11 +829,16 @@ describe.skipIf(!PI_PRESENT)("model_select resets cache telemetry", () => {
 // ── /fold-handoff command ───────────────────────────────────────────────────────────────────────
 
 describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
-	/** Command ctx with a confirm answer and a recording newSession stub. */
-	function handoffCtx(opts: { hasUI: boolean; confirmAnswer?: boolean }) {
+	/** Invalidate the old ctx at replacement, as Pi does before withSession. */
+	function handoffCtx(opts: { hasUI: boolean; confirmAnswer?: boolean; cancelled?: boolean }) {
 		const notices: string[] = [];
 		const appended: { role?: string; content?: { type: string; text?: string }[] }[] = [];
 		const calls: { parentSession?: string; ranSetup: boolean; ranWithSession: boolean }[] = [];
+		const replacementNotices: string[] = [];
+		let stale = false;
+		const assertLive = () => {
+			if (stale) throw new Error("This extension ctx is stale after session replacement or reload.");
+		};
 		const ctx = {
 			hasUI: opts.hasUI,
 			sessionManager: {
@@ -843,7 +848,10 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 				getEntries: () => [],
 			},
 			ui: {
-				notify: (m: string) => notices.push(m),
+				notify: (m: string) => {
+					assertLive();
+					notices.push(m);
+				},
 				...(opts.hasUI ? { confirm: async () => opts.confirmAnswer ?? false } : {}),
 			},
 			newSession: async (o?: {
@@ -852,6 +860,8 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 				withSession?: (c: unknown) => Promise<void>;
 			}) => {
 				const call = { parentSession: o?.parentSession, ranSetup: false, ranWithSession: false };
+				calls.push(call);
+				if (opts.cancelled) return { cancelled: true };
 				if (o?.setup) {
 					call.ranSetup = true;
 					await o.setup({
@@ -861,25 +871,34 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 						},
 					});
 				}
-				if (o?.withSession) call.ranWithSession = true;
-				calls.push(call);
+				stale = true;
+				if (o?.withSession) {
+					call.ranWithSession = true;
+					// Only notification is available: trying to trigger a model turn fails this test.
+					await o.withSession({ ui: { notify: (m: string) => replacementNotices.push(m) } });
+				}
 				return { cancelled: false };
 			},
 		};
-		return { ctx, notices, appended, calls };
+		const guardedCtx = new Proxy(ctx, {
+			get(target, key, receiver) {
+				assertLive();
+				return Reflect.get(target, key, receiver);
+			},
+		});
+		return { ctx: guardedCtx, notices, replacementNotices, appended, calls };
 	}
 
 	it("confirm=yes seeds the replacement session as a persisted user message and stays idle", async () => {
 		const s = await load();
-		const { ctx, notices, appended, calls } = handoffCtx({ hasUI: true, confirmAnswer: true });
+		const { ctx, notices, replacementNotices, appended, calls } = handoffCtx({ hasUI: true, confirmAnswer: true });
 
 		await s.commands.get("fold-handoff")!.handler("finish the migration", ctx);
 
 		expect(calls.length).toBe(1);
 		expect(calls[0].parentSession).toBe(join(dir, "s1.jsonl"));
 		expect(calls[0].ranSetup).toBe(true);
-		// Seeded and idle: nothing may trigger a turn in the replacement session.
-		expect(calls[0].ranWithSession).toBe(false);
+		expect(calls[0].ranWithSession).toBe(true);
 		expect(appended.length).toBe(1);
 		expect(appended[0].role).toBe("user");
 		const text = (appended[0].content ?? []).map((p) => p.text ?? "").join("\n");
@@ -887,7 +906,28 @@ describe.skipIf(!PI_PRESENT)("/fold-handoff confirm-then-switch", () => {
 		expect(text).toContain("extracted verbatim");
 		// The seed file is still written for the record.
 		expect(existsSync(join(dir, "context-fold", "s1", "handoff-s1.md"))).toBe(true);
-		expect(notices.join("\n")).toContain("handoff seed written");
+		expect(notices).toEqual([]);
+		expect(replacementNotices).toHaveLength(1);
+		expect(replacementNotices[0]).toContain("Replacement session started");
+		expect(text).toBe(readFileSync(join(dir, "context-fold", "s1", "handoff-s1.md"), "utf8"));
+	});
+
+	it("a cancelled replacement keeps the old ctx live for the manual flow", async () => {
+		const s = await load();
+		const { ctx, notices, replacementNotices, appended, calls } = handoffCtx({
+			hasUI: true, confirmAnswer: true, cancelled: true,
+		});
+
+		await s.commands.get("fold-handoff")!.handler("goal", ctx);
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].ranSetup).toBe(false);
+		expect(calls[0].ranWithSession).toBe(false);
+		expect(appended).toEqual([]);
+		expect(replacementNotices).toEqual([]);
+		expect(notices.join("\n")).toContain("cancelled by another extension");
+		expect(notices.join("\n")).toContain("/new");
+		expect(existsSync(join(dir, "context-fold", "s1", "handoff-s1.md"))).toBe(true);
 	});
 
 	it("confirm=no keeps today's write-review-paste flow", async () => {

@@ -53,6 +53,7 @@ interface HandoffCtx {
 	newSession?(options?: {
 		parentSession?: string;
 		setup?(sessionManager: { appendMessage(message: unknown): string }): Promise<void>;
+		withSession?(ctx: Pick<HandoffCtx, "ui">): Promise<void>;
 	}): Promise<{ cancelled: boolean }>;
 }
 
@@ -105,11 +106,15 @@ export function registerHandoffCommand(
 										timestamp: Date.now(),
 									});
 								},
+								withSession: async (replacementCtx) => {
+									replacementCtx.ui?.notify?.(
+										`handoff seed written: ${out}\nReplacement session started with the seed in context. State your first instruction there.`,
+										"info",
+									);
+								},
 							});
-							if (!result.cancelled) {
-								notify(`handoff seed written: ${out}\nReplacement session started with the seed in context — state your first instruction there.`, "info");
-								return;
-							}
+							// Successful replacement invalidates the original ctx, including its UI.
+							if (!result.cancelled) return;
 							notify("replacement session was cancelled by another extension — falling back to the manual flow", "warning");
 						} catch (err) {
 							notify(

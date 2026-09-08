@@ -95,7 +95,7 @@ All of these fire headless.
 | Persist custom entry (NOT in LLM context) | `pi.appendEntry(type, data)` |
 | Read entries back | `ctx.sessionManager.getEntries()`, filtered on `entry.type === "custom" && entry.customType === …` |
 | Session paths | `ctx.sessionManager.getSessionDir()` / `.getSessionId()` / `.getSessionFile()` |
-| Seed a replacement session (`/fold-handoff` confirm path) | `ctx.newSession({ parentSession, setup })` on the command context; `setup(sm)` appends the seed as a persisted user message and no `withSession` work is scheduled, so the new session opens idle |
+| Seed a replacement session (`/fold-handoff` confirm path) | `ctx.newSession({ parentSession, setup, withSession })` on the command context; `setup(sm)` appends the seed as a persisted user message. `withSession(ctx)` displays the success notice through the fresh context without triggering a turn. Successful replacement invalidates the original command context |
 | Out-of-band completion | `import { complete } from "@earendil-works/pi-ai/compat"` |
 
 `StringEnum` for tool-parameter enums is imported from `@earendil-works/pi-ai`.
