@@ -977,3 +977,66 @@ describe.skipIf(!PI_PRESENT)("pre-request warning wiring", () => {
 		expect(notices).toContain("session cold: rebilled ~40k tok as fresh input. Consider /fold-handoff");
 	});
 });
+
+describe.skipIf(!PI_PRESENT)("/context-fold menu", () => {
+	it("opens settings without arguments and persists an edit", async () => {
+		process.env.PI_CODING_AGENT_DIR = dir;
+		const s = await load();
+		const { ctx, notices } = ctxFor();
+		const choices = ["Settings", "Protected tail", "Done"];
+		const menus: string[][] = [];
+		await s.commands.get("context-fold")!.handler("", {
+			...ctx, hasUI: true, isIdle: () => true,
+			ui: { ...ctx.ui,
+				select: async (_title: string, options: string[]) => {
+					menus.push(options);
+					const choice = choices.shift();
+					return options.find(option => option.startsWith(choice!));
+				},
+				input: async () => "5000",
+			},
+		});
+		expect(menus[0]).toEqual(["Status", "Settings", "Discard retained images", "Close"]);
+		expect(JSON.parse(readFileSync(join(dir, "context-fold.json"), "utf8"))).toEqual({ tail: 5000 });
+		expect(notices.join("\n")).toContain("Protected tail → 5000 (applied)");
+	});
+
+	it.each(["Status", "Discard retained images"])("routes %s to its existing action", async choice => {
+		const s = await load();
+		const { ctx, notices } = ctxFor();
+		await s.commands.get("context-fold")!.handler("", {
+			...ctx, hasUI: true, ui: { ...ctx.ui, select: async () => choice },
+		});
+		expect(notices.join("\n")).toContain(choice === "Status" ? "no usage yet" : "Retained draft images discarded.");
+	});
+
+	it.each([undefined, "Close"])("does nothing when the menu is dismissed (%s)", async choice => {
+		const s = await load();
+		const { ctx, notices } = ctxFor();
+		await s.commands.get("context-fold")!.handler("", {
+			...ctx, hasUI: true, ui: { ...ctx.ui, select: async () => choice },
+		});
+		expect(notices).toEqual([]);
+	});
+
+	it.each([{ args: "status", hasUI: true }, { args: "", hasUI: false }])("keeps direct status/headless use out of the menu ($args, $hasUI)", async ({ args, hasUI }) => {
+		const s = await load();
+		const { ctx, notices } = ctxFor();
+		let selected = false;
+		await s.commands.get("context-fold")!.handler(args, {
+			...ctx, hasUI, ui: { ...ctx.ui, select: async () => { selected = true; return "Close"; } },
+		});
+		expect(selected).toBe(false);
+		expect(notices.join("\n")).toContain("no usage yet");
+	});
+
+	it("falls back to status when the selector fails", async () => {
+		const s = await load();
+		const { ctx, notices } = ctxFor();
+		await s.commands.get("context-fold")!.handler("", {
+			...ctx, hasUI: true, ui: { ...ctx.ui, select: async () => { throw new Error("selector unavailable"); } },
+		});
+		expect(notices.join("\n")).toContain("selector unavailable");
+		expect(notices.join("\n")).toContain("no usage yet");
+	});
+});

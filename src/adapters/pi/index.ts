@@ -483,27 +483,37 @@ export default function contextFold(pi: ExtensionAPI): void {
 		seedDirFor: (hctx) => artifactDirFor(hctx as Parameters<typeof artifactDirFor>[0]),
 	});
 
-	// Bare: display-only status (no-op safe in headless mode — pure text). `config`/`settings`:
-	// the interactive knob menu (headless falls back to a plain effective-settings listing).
 	pi.registerCommand("context-fold", {
-		description: "context-fold status; 'config' opens the settings menu.",
+		description: "Open the context-fold menu: status, settings, and retained draft images.",
 		handler: async (args, cmdCtx) => {
-			const sub = (args ?? "").trim().toLowerCase();
+			const ui = cmdCtx.ui;
+			const say = (message: string, level: "info" | "warning" | "error") => {
+				try { ui?.notify?.(message, level); } catch {}
+			};
+			let sub = (args ?? "").trim().toLowerCase();
+			if (!sub && cmdCtx.hasUI && ui?.select) {
+				const actions = new Map([
+					["Status", "status"],
+					["Settings", "config"],
+					["Discard retained images", "discard-images"],
+				]);
+				try {
+					const selected = await ui.select("context-fold", [...actions.keys(), "Close"]);
+					const action = selected && actions.get(selected);
+					if (!action) return;
+					sub = action;
+				} catch (err) {
+					say(`context-fold menu unavailable; showing status: ${err instanceof Error ? err.message : String(err)}`, "warning");
+				}
+			}
 			if (sub === "discard-images") {
 				cacheWarning.discardImages(cmdCtx);
 				return;
 			}
 			if (sub === "config" || sub === "settings") {
-				const ui = cmdCtx.ui;
 				// Headless ui.select is a stub that answers undefined, so gate on hasUI rather than
 				// method presence; fail-open — a bad settings write costs a notice, never the command.
 				if (cmdCtx.hasUI && ui?.select && ui.input) {
-					// A throwing notify must not reject the command — it is the error channel itself.
-					const say = (message: string, level: "info" | "warning" | "error") => {
-						try {
-							ui.notify?.(message, level);
-						} catch {}
-					};
 					try {
 						await runSettingsMenu(
 							{
@@ -525,7 +535,7 @@ export default function contextFold(pi: ExtensionAPI): void {
 						);
 					}
 				} else {
-					cmdCtx.ui?.notify?.(
+					say(
 						`context-fold settings (env over saved over default):\n${settingsReport(loadSavedSettings(), cmdCtx.model?.provider)}`,
 						"info",
 					);
@@ -547,9 +557,9 @@ export default function contextFold(pi: ExtensionAPI): void {
 				// Both sides of folding, not just the savings — see CacheTelemetry.foldCostLine.
 				...(telemetry.foldCostLine() ? [telemetry.foldCostLine() as string] : []),
 				...adv.flags.map((f) => `⚑ ${f}`),
-				"tune with /context-fold config",
+				cmdCtx.hasUI ? "tune with /context-fold → Settings" : "tune with /context-fold config",
 			];
-			cmdCtx.ui?.notify?.(lines.join("\n"), adv.flags.length ? "warning" : "info");
+			say(lines.join("\n"), adv.flags.length ? "warning" : "info");
 		},
 	});
 }

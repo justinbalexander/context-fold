@@ -163,10 +163,11 @@ append-only session file even once the raw message has left live context.
   Detection requires at least two responses observed since the extension loaded and excludes
   the first response after a fold. The notice appears at most once per cold streak and reports
   input already processed. Interactive notices use Pi's renderer; headless notices use stderr.
-- **`/context-fold` status**: fold position (usage %, the next-fold gauge), cache hit ratios, and
-  flags: folds committed but not observed on the wire, a second forced compaction, irreducible
-  context past half the window, cold with a large carry, and recall churn. Advisory only; nothing
-  blocks. `/context-fold config` opens the settings menu (see [Configuration](#configuration)).
+- **`/context-fold` menu**: choose **Status**, **Settings**, or **Discard retained images**.
+  Escape or **Close** dismisses it. Status shows fold position (usage %, the next-fold gauge),
+  cache hit ratios, and advisory flags: folds committed but not observed on the wire, a second
+  forced compaction, irreducible context past half the window, cold with a large carry, and recall
+  churn. See [Configuration](#configuration) for settings.
 - **Footer status line (TUI)**: a persistent one-line summary in Pi's footer (`⧉ context-fold ×3
   · ~41k tok masked · next fold: 3.1k/9.6k maskable · cache avg 66%`), updated as fold events fire.
   Purely visual: nothing is added to the transcript or the model's context, and headless modes are
@@ -190,7 +191,7 @@ append-only session file even once the raw message has left live context.
 For continuity when starting fresh, use the [seed handoff workflow](#starting-fresh-with-the-seed-index).
 
 **Optional send confirmation.** Enable **Confirm potentially cold prompts** in
-`/context-fold config` to offer **Keep draft** or **Send anyway** before an interactive prompt
+`/context-fold` → **Settings** to offer **Keep draft** or **Send anyway** before an interactive prompt
 reaches the provider. Escape keeps the draft. A model change during confirmation also keeps the
 draft and requires another submission. The same inactivity and 20k-token thresholds
 apply. Automation, RPC, and prompts queued during streaming bypass this confirmation.
@@ -198,7 +199,7 @@ An advisory or selector failure also lets input proceed; an explicit cancellatio
 
 Cancelled text returns to the editor, including pasted-image file paths. Structured images
 remain in memory for the next interactive prompt in the same session, even if you edit the text.
-A notice lists the retained image count; `/context-fold discard-images` clears those images.
+A notice lists the retained image count; `/context-fold` → **Discard retained images** clears them.
 Session navigation, reload, and shutdown discard them. The extension never resets a session or
 submits a handoff automatically.
 
@@ -288,11 +289,13 @@ From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 
 ## Configuration
 
-`/context-fold config` opens an interactive settings menu inside Pi: every knob below (except the
-debug seams and the kill switch) with its effective value and where it came from. Edits persist to
+Run `/context-fold` and choose **Settings** to see every knob below (except the debug seams and
+the kill switch), with its effective value and where it came from. Edits persist to
 `<agent dir>/context-fold.json` (normally `~/.pi/agent/context-fold.json`) and, where marked live,
 apply to the running session immediately — already-frozen folds keep their bytes; new values steer
-future folds only. Headless modes print the effective settings instead of a menu.
+future folds only. Direct shortcuts still work: `/context-fold status`, `/context-fold config`
+(or `settings`), and `/context-fold discard-images`. Headless use skips the menu and keeps the
+status path; the config shortcut uses an effective-settings listing.
 
 Precedence per knob: built-in default < saved settings file < environment variable. An env var
 keeps working exactly as before and shadows the saved value for that session; the menu flags the

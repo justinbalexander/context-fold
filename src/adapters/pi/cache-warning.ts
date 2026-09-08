@@ -132,7 +132,7 @@ export class CacheWarning {
 			// setEditorText changes the buffer without requesting a Pi render. The notice also
 			// makes retained structured images visible; clipboard image paths are already text.
 			const notice = images?.length
-				? `${images.length} image(s) kept for your next prompt in this session. /context-fold discard-images clears them.`
+				? `${images.length} image(s) kept for your next prompt in this session. Clear via /context-fold → Discard retained images.`
 				: "Draft kept; prompt not sent.";
 			notifyCacheWarning(ctx, `${modelChanged ? "Model changed; confirm again before sending. " : ""}${notice}`);
 			return { action: "handled" };
