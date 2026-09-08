@@ -1,8 +1,7 @@
 # context-fold architecture
 
-As built, describing the shipped 0.3.x behavior. `README.md` is the user-facing
-document. This file is for contributors and covers structure, invariants, and the reasoning
-behind them.
+This file describes the current implementation for contributors: its structure, invariants, and
+the reasoning behind them. `README.md` is the user-facing document.
 
 ## 1. Core idea
 
@@ -29,7 +28,7 @@ The session file is never modified.
 
 ```
 src/
-  core/                    # No Pi dependencies, no clock/randomness/I/O — pure and testable
+  core/                    # pure and testable; no Pi dependencies, clock, randomness, or I/O
     tokens.ts              # estTokens = ceil(len/4), BLOCK_OVERHEAD, clip, firstLine, safeSlice
     digest.ts              # the {#code FOLDED} tag, foldCode (FNV-1a), per-kind digests
     contract.ts            # PolicyView / FoldCommand / ViewBlock
@@ -58,9 +57,9 @@ src/
 
 The core speaks only its own `AgentMessage`-shaped block model and a
 `conduct(view) → FoldCommand[]` policy interface. The Pi adapter converts Pi's `AgentMessage[]`
-to and from core blocks and owns every Pi API call. The split is a pure/effectful boundary, not a
-porting seam: context-fold serves Pi only (ADR 0001), and the core stays free of clock,
-randomness, and I/O because that is what keeps deterministic, reversible folding testable.
+to and from core blocks and owns every Pi API call. Context-fold serves Pi only (ADR 0001), so
+this boundary separates pure code from effects rather than providing a porting seam. The core
+stays free of clock, randomness, and I/O to keep deterministic, reversible folding testable.
 
 **Policy/mechanism split:** `policy/fold-ladder.ts` is the policy and decides what and when to
 fold. `apply.ts` is the mechanism. It performs the rewrite and has no opinion about timing.
@@ -70,8 +69,8 @@ Keeping them apart is what lets fold timing change without touching the rewrite.
 
 ## 3. The per-turn pipeline
 
-Pi's `context` hook fires before every model call, hands over a deep copy of the outgoing
-`AgentMessage[]`, and the array returned is what actually gets sent. Per turn:
+Pi's `context` hook fires before every model call with a deep copy of the outgoing
+`AgentMessage[]`. Pi sends the returned array. Each turn follows this pipeline:
 
 ```
 on "context" (messages, ctx):
@@ -128,13 +127,13 @@ anywhere.
 
 `recall_folded` re-locates the block by re-linearizing the ledger's message entries with the same
 durable-id formula that named it, verifies the text against the recorded sha256, and serves it
-whole or through bounded grep/line slices; `unfold` restores the live block on the next turn.
+whole or through bounded grep/line slices. `unfold` restores the live block on the next turn.
 Linearization is cached per session and invalidated by entry count, so recall does not re-walk
 the file on every call. When the persisted message's `details` name a tool-owned full-output file
 (a truncated bash result), grep and line recalls prefer that file over the truncated content and
 fall back to the ledger text when it is gone. A block the ledger cannot serve, or whose text
-fails the sha check, is a typed error naming the code; if the block is still live in raw history
-it is served from the snapshot instead, through the same caps.
+fails the sha check, produces a typed error naming the code. If the block is still live in raw
+history, recall serves it from the snapshot instead, through the same caps.
 
 One documented edge follows from verifying against the ledger: the fold-time sha is computed over
 the text the `context` hook saw, and Pi chains context transforms, so a block another extension
@@ -160,19 +159,19 @@ Fold entries, agent unfold decisions, and committed layers are event-sourced as 
 (`contextfold.fold`) and replayed on `session_start`. Legacy `kind:"spool"`/`kind:"gate"` records
 (from sessions created before the spool's removal) degrade to fold entries without a fold-time
 sha256: recall serves them from the ledger unverified and says so, and a block absent from the
-ledger reports unavailable. No crash, no silent token creep.
+ledger reports unavailable. Neither case crashes or silently increases the token count.
 
 The extension's own on-disk artifacts, the seed index and handoff seeds, live in
-`<sessionDir>/context-fold/<sessionId>/`: append-only text measured in kilobytes, retained like
-Pi's own session files, with no garbage collection.
+`<sessionDir>/context-fold/<sessionId>/`. They are append-only text measured in kilobytes and
+retained like Pi's own session files, with no garbage collection.
 
 ---
 
 ## 7. Failure posture
 
-Every hook is fail-open with a bounded blast radius. Folding degradations are announced on stderr;
-cache-advisory failures use Pi's notification UI when available. A failed notification sink cannot
-prevent the turn.
+Every hook is fail-open with a bounded blast radius. Folding degradations are announced on stderr,
+and cache-advisory failures use Pi's notification UI when available. A failed notification sink
+cannot prevent the turn.
 
 | failure | cost |
 |---|---|
@@ -193,14 +192,15 @@ testing or for isolating a suspected fold-related problem.
 
 Cache prediction reads successful assistant completion timestamps from the active session branch,
 keyed by provider and model. Runtime timers, notification deduplication, and cancelled structured
-images live only in `cache-warning.ts`; session navigation and shutdown reset them. No additional
-session record or provider request is needed. Provider warning intervals are saved settings, not
-provider retention guarantees.
+images live only in `cache-warning.ts`. Session navigation and shutdown reset them. No additional
+session record or provider request is needed. Saved provider warning intervals control the
+advisory rather than guaranteeing provider retention.
 
 The `input` hook can consume a potentially cold interactive prompt before Pi sends it. Automation
 and queued streaming input continue unchanged. Cancellation restores the editor text and retains
-structured images for the next interactive prompt in that session; `discard-images` clears them.
-The confirmation is disabled by default and never changes fold policy or starts a new session.
+structured images for the next interactive prompt in that session. `/context-fold discard-images`
+clears them. The confirmation is disabled by default and never changes fold policy or starts a new
+session.
 
 ## 8. Invariants
 
@@ -211,7 +211,7 @@ The confirmation is disabled by default and never changes fold policy or starts 
    these ids over `getEntries()`, so an id that could drift would strand its content.
 2. **The engine is the sole author of the `{#code}` tag.** Strip any tag a policy supplies and
    prepend the authoritative one.
-3. **Single disposition.** No block id in two ops.
+3. **Single disposition.** Each block id appears in at most one op.
 4. **A block's token cost is uniform `ceil(chars/4) + 4`** (`estTokens` plus `BLOCK_OVERHEAD`),
    one swappable oracle in `tokens.ts`.
 5. **Frozen bytes are immutable** for the life of the layer. Only an explicit unfold or a recorded

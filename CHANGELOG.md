@@ -3,6 +3,41 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
+## Unreleased
+
+### Added
+
+- Interactive cache-inactivity warnings on resume and after an idle interval for sessions
+  carrying at least 20k tokens. The default interval is 30 minutes, with saved provider-specific
+  overrides and `CONTEXTFOLD_CACHE_IDLE_MINUTES` as a session override. Warnings estimate risk
+  from successful responses for the selected provider and model; they do not prove cache expiry.
+- Optional confirmation before sending a potentially cold interactive prompt. Enable it in
+  Settings or with `CONTEXTFOLD_CONFIRM_COLD_PROMPT=on`. **Keep draft** and Escape cancel the
+  send and restore the text; structured images remain available for the next interactive prompt
+  in that session. Automation, RPC, and prompts queued during streaming bypass confirmation.
+- A local, network-free terminal check for cancellation, edited resubmission, and image
+  preservation at the provider boundary (`bash scripts/check-cache-warning.sh`).
+
+### Changed
+
+- `/context-fold` now opens a menu with **Status**, **Settings**, and **Discard retained images**.
+  Existing subcommands still work, and headless use keeps the status path.
+- Observed cold-input notices use Pi's renderer interactively and stderr headlessly. The shorter
+  message recommends `/fold-handoff`; the README explains how to carry the seed into a new
+  session and recover details from its parent.
+- User and contributor docs use plainer prose, and the architecture introduction and headless
+  integration notes describe the current implementation.
+
+### Fixed
+
+- Cache prediction estimates retained context when Pi reports unknown usage after compaction,
+  rather than reusing the larger pre-compaction count. Hosts without a retained-context estimate
+  skip prediction while usage is unknown.
+- A model change during send confirmation preserves the cancelled draft and its images and
+  requires another submission, even if **Send anyway** was selected.
+
+Fold timing and the seed-index record format are unchanged.
+
 ## 0.4.0 — 2026-08-31
 
 The spool is gone: Pi's own append-only session file is the durability floor behind every fold.

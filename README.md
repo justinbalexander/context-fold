@@ -21,8 +21,6 @@ until you decide to end the session or the work is done.
 
 ## Why deterministic
 
-The published evidence points the same way from several directions.
-
 Deterministic masking of stale tool output matches or beats LLM summarization on agentic coding
 tasks, at equal or lower cost ([The Complexity Trap](https://arxiv.org/abs/2508.21433),
 [SWE-agent](https://arxiv.org/abs/2405.15793),
@@ -57,15 +55,15 @@ context-fold intercepts it and hands Pi a summary rendered verbatim from the ses
 so Pi's LLM summarization never runs. `CONTEXTFOLD_COMPACT=native` opts back into Pi's stock
 behavior.
 
-At this stage the raw messages do leave live context; that is what compaction is. What survives is
-the index and Pi's session file, both on disk and both reachable through `recall_folded`. The
-loss is bounded and reversible rather than lossy and final. There is no paraphrase step and nothing
-that can hallucinate. The extension warns you after a second forced compaction; it is worth running
-a handoff well before that, at a definable task finish line.
+At this stage compaction removes the raw messages from live context. What survives is the index
+and Pi's session file, both on disk and both reachable through `recall_folded`. The loss is bounded
+and reversible rather than lossy and final. There is no paraphrase step and nothing that can
+hallucinate. The extension warns you after a second forced compaction. Consider running a handoff
+well before that, at a task finish line.
 
 **4. Handoff.** *(manual, `/fold-handoff`)* Writes a seed file for starting a fresh session: the
 same verbatim index plus the goal you state. Interactively it then offers, behind one
-confirmation, to start the replacement session directly — the seed lands as the first user
+confirmation, to start the replacement session directly. The seed becomes the first user
 message and the new session opens idle, spending nothing until you type. Decline (or run
 headless) and the flow stays write, review, `/new`, paste.
 
@@ -92,10 +90,10 @@ prompt-cache suffix, so mutations are batched at points where that cost is paid 
 
 ### Ledger-backed recovery
 
-Pi's session file is append-only: every raw payload stays in it for the life of the session,
-through hard compaction and resume. A committed ladder fold therefore stores no copy — it records
-the masked block's identity and a sha256 of its exact bytes, and recall re-locates the original
-in the session ledger and verifies it against that sha before serving it. The model sees a
+Pi's session file is append-only, so every raw payload stays in it for the life of the session,
+through hard compaction and resume. A committed ladder fold therefore records the masked block's
+identity and a sha256 of its exact bytes rather than copying the payload. Recall re-locates the
+original in the session ledger and verifies it against that sha before serving it. The model sees a
 deterministic `{#code FOLDED}` digest and can retrieve the original through `recall_folded` or
 restore it through `unfold`. This happens only when context pressure folds stale material;
 context-fold never hides a fresh result before its first delivery.
@@ -107,7 +105,7 @@ Every fold event appends one deterministic record to `seed-index.jsonl` under
 commands run, error lines in every spelling the lexicon knows (lowercase `failed`, `npm ERR!`,
 …), exact identifiers and numbers harvested from the masked output, first lines of user
 messages, and recovery spans naming each folded block's ledger anchor, extent, and fold-time
-sha256. Extraction is pure regex: same input, byte-identical output.
+sha256. Extraction uses pure regex and produces byte-identical output for the same input.
 
 ### Starting fresh with the seed index
 
@@ -136,7 +134,7 @@ resume the parent session to use those handles.
 ### Getting detail back
 
 - `recall_folded search=<term>`: one sweep over every folded block, with matching lines grouped by code.
-  A detail lost somewhere behind N pointers costs one call, not N.
+  Finding a detail lost behind N pointers takes one call rather than N.
 - `recall_folded <code>`, with optional `grep=<term>` or `lines=<a-b>`: whole or partial retrieval,
   token-capped so a recall can never re-flood what folding saved. When the tool recorded its own
   full-output file (a truncated bash result), grep and line reads answer from that file, so recall
@@ -170,9 +168,9 @@ append-only session file even once the raw message has left live context.
   churn. See [Configuration](#configuration) for settings.
 - **Footer status line (TUI)**: a persistent one-line summary in Pi's footer (`⧉ context-fold ×3
   · ~41k tok masked · next fold: 3.1k/9.6k maskable · cache avg 66%`), updated as fold events fire.
-  Purely visual: nothing is added to the transcript or the model's context, and headless modes are
-  unaffected. The middle segment is the ladder's trigger gauge, showing whichever fold condition is
-  actually binding. Below the entry threshold it names it (`next fold at 45% ctx`); once usage is
+  The line is purely visual. It adds nothing to the transcript or the model's context and leaves
+  headless modes unaffected. The middle segment is the ladder's trigger gauge, showing whichever
+  fold condition is actually binding. Below the entry threshold it names it (`next fold at 45% ctx`); once usage is
   past the threshold, which is permanent from then on, it tracks maskable mass toward the next fold
   step (`next fold: 3.1k/9.6k maskable`, counting up from 0 right after a fold as new observations
   land). `⚠ no more folds possible (over budget)` appears only in the terminal state where the
@@ -195,11 +193,13 @@ For continuity when starting fresh, use the [seed handoff workflow](#starting-fr
 reaches the provider. Escape keeps the draft. A model change during confirmation also keeps the
 draft and requires another submission. The same inactivity and 20k-token thresholds
 apply. Automation, RPC, and prompts queued during streaming bypass this confirmation.
-An advisory or selector failure also lets input proceed; an explicit cancellation never does.
+An advisory or selector failure also lets input proceed, while an explicit cancellation consumes
+the input without sending it.
 
 Cancelled text returns to the editor, including pasted-image file paths. Structured images
 remain in memory for the next interactive prompt in the same session, even if you edit the text.
-A notice lists the retained image count; `/context-fold` → **Discard retained images** clears them.
+A notice lists the retained image count. To clear them, choose **Discard retained images** in
+`/context-fold`.
 Session navigation, reload, and shutdown discard them. The extension never resets a session or
 submits a handoff automatically.
 
@@ -211,7 +211,8 @@ submits a handoff automatically.
   it. Every `{#code}` handle resolves through `recall_folded`/`unfold` for as long as the session
   file exists, verified against a sha256 recorded at fold time.
 - **Tool pairs cannot orphan.** Folding is in-place content substitution and never changes the
-  message count, so a `tool_call` can never lose its `tool_result`. Structural, not policed.
+  message count, so a `tool_call` can never lose its `tool_result`. The structure guarantees this
+  without a separate check.
 - **Failure signals survive compression** at every fidelity level; the error lexicon is
   deliberately broad and any-case.
 - **No model is ever called.** Folding, digests, compaction, and the handoff seed are all
@@ -247,9 +248,8 @@ submits a handoff automatically.
 
 ## Known integrations
 
-Findings from running context-fold beside other Pi extensions. The common theme: a fold can be
-committed and correct locally yet still be discarded or deferred downstream, which is why the
-extension watches provider usage for that outcome.
+A fold can be committed and correct locally yet still be discarded or deferred by another Pi
+extension. Context-fold watches provider usage for that outcome. Known interactions follow.
 
 - **`@howaboua/pi-codex-conversion` defers folds to user-turn boundaries.** Its cached WebSocket
   continuation answers a mid-chain prefix change by sending only the pending tool output as a delta
@@ -267,7 +267,7 @@ extension watches provider usage for that outcome.
   table in `docs/pi-api-surface.md`.
 - **Do not load the package twice.** `pi install npm:context-fold` plus a `-e npm:context-fold`
   flag registers `recall_folded`/`unfold` twice and fails loudly at load with a tool-name conflict.
-  Installed or `-e`, pick one.
+  Choose either the installed copy or `-e`.
 
 **The wire watchdog.** Because every one of these failure modes is invisible in the extension's own
 output, the telemetry checks the outcome instead: a fold that masked tokens strictly shrinks the
@@ -292,10 +292,10 @@ From a clone, point Pi at the checkout instead: `pi -e /path/to/context-fold`.
 Run `/context-fold` and choose **Settings** to see every knob below (except the debug seams and
 the kill switch), with its effective value and where it came from. Edits persist to
 `<agent dir>/context-fold.json` (normally `~/.pi/agent/context-fold.json`) and, where marked live,
-apply to the running session immediately — already-frozen folds keep their bytes; new values steer
-future folds only. Direct shortcuts still work: `/context-fold status`, `/context-fold config`
+apply to the running session immediately. Already-frozen folds keep their bytes, and new values
+steer future folds only. Direct shortcuts still work: `/context-fold status`, `/context-fold config`
 (or `settings`), and `/context-fold discard-images`. Headless use skips the menu and keeps the
-status path; the config shortcut uses an effective-settings listing.
+status path. The config shortcut uses an effective-settings listing.
 
 Precedence per knob: built-in default < saved settings file < environment variable. An env var
 keeps working exactly as before and shadows the saved value for that session; the menu flags the
@@ -318,9 +318,10 @@ shadowing when it applies.
 | `CONTEXTFOLD_DUMP` | _(unset)_ | Debug/e2e seam: write each turn's outgoing (folded) view to this JSON path. |
 
 The **Cache inactivity warning (minutes)** menu row names the selected Pi provider. Edits to
-that row save a provider-specific override. Unconfigured providers use the fallback above;
-this is a warning policy, not a claim about provider retention. Investigate the retention policy
-for your provider, model, and request settings, then tune the value accordingly.
+that row save a provider-specific override. Unconfigured providers use the fallback above.
+This setting controls warnings rather than claiming how long a provider retains its cache.
+Investigate the retention policy for your provider, model, and request settings, then tune the
+value accordingly.
 
 The saved JSON supports a global fallback and provider overrides, for example:
 
@@ -358,9 +359,8 @@ containing its screen captures.
 
 The live scripts drive real Pi sessions against a real provider, so they cost money and need
 provider auth plus `python3`. They load the working copy explicitly, so they test the checkout
-rather than an installed build. Override the model with `E2E_PROVIDER` / `E2E_MODEL`. These are
-liveness checks, not benchmarks: they assert that folding happens and survives, not how much it
-saves.
+rather than an installed build. Override the model with `E2E_PROVIDER` / `E2E_MODEL`. These
+liveness checks assert that folding happens and survives. They do not benchmark savings.
 
 ## Develop
 
@@ -370,15 +370,16 @@ npm run typecheck
 npm test
 ```
 
-The core (`src/core/*`) has zero harness dependencies; the Pi adapter (`src/adapters/pi/*`) owns
-all I/O and hook wiring. Architecture notes are in `DESIGN.md`, the index format in
-`docs/SEED_INDEX_SPEC.md`, and the Pi APIs this leans on in `docs/pi-api-surface.md`.
+The core (`src/core/*`) has zero harness dependencies, and the Pi adapter (`src/adapters/pi/*`)
+owns all I/O and hook wiring. `DESIGN.md` describes the architecture,
+`docs/SEED_INDEX_SPEC.md` defines the index format, and `docs/pi-api-surface.md` lists the Pi APIs
+that the extension uses.
 
-There is no build step: Pi loads the TypeScript source directly through jiti, so the package ships
+Pi loads the TypeScript source directly through jiti, so there is no build step. The package ships
 `src/` as-is and installs no dependencies of its own.
 
-`typebox` and `@earendil-works/pi-coding-agent` are declared as optional peer dependencies. Pi
-injects them at runtime; never bundle a copy.
+`typebox` and `@earendil-works/pi-coding-agent` are declared as optional peer dependencies. Use the
+copies Pi injects at runtime rather than bundling them.
 
 ## Provenance & license
 

@@ -1,42 +1,43 @@
 # Pi extension API surface
 
-The exact Pi APIs this extension depends on, verified against the engine source rather than taken
-from the docs. Written for contributors: if one of these moves, this is the list to re-check.
-Verified against Pi 0.83.0 and 0.84.1. The authoritative reference is `docs/extensions.md`,
-`docs/compaction.md` and `examples/extensions/*` inside an installed
-`@earendil-works/pi-coding-agent`. The session-ledger findings below were verified against
-0.84.4 (`dist/core/session-manager.js`; line numbers cite that build).
+This reference lists the Pi APIs that context-fold depends on, verified against the engine source
+in Pi 0.83.0 and 0.84.1. Contributors should re-check these APIs when upgrading Pi. The authoritative
+references are `docs/extensions.md`, `docs/compaction.md`, and `examples/extensions/*` inside an
+installed `@earendil-works/pi-coding-agent`.
+
+The session-ledger findings below were verified against Pi 0.84.4. Their line numbers refer to
+`dist/core/session-manager.js` in that build.
 
 ## The session ledger as recall's durability floor
 
-Recall re-locates folded blocks in `sessionManager.getEntries()`. The properties it depends on,
+Recall re-locates folded blocks in `sessionManager.getEntries()`. It depends on these properties,
 each verified in the engine source:
 
 - **Append-only.** The class doc states "The session is append-only" and entries are never
-  mutated or removed; `_appendEntry` pushes to `fileEntries` and every navigation (`branch()`,
-  `resetLeaf()`) only moves the leaf pointer — "Existing entries are not modified or deleted"
-  (session-manager.js:979, 1030–1041).
-- **`getEntries()` returns the WHOLE tree**, not the active branch: every in-memory entry minus
-  the header (session-manager.js:982–984). A block on an abandoned branch therefore still
-  resolves. Hard compaction appends a compaction entry and removes nothing.
+  mutated or removed. `_appendEntry` pushes to `fileEntries`, and navigation through `branch()`
+  or `resetLeaf()` only moves the leaf pointer. As the source states, "Existing entries are not
+  modified or deleted" (session-manager.js:979, 1030–1041).
+- **Whole-tree reads.** `getEntries()` returns every in-memory entry minus the header rather
+  than only the active branch (session-manager.js:982–984). A block on an abandoned branch
+  therefore still resolves. Hard compaction appends a compaction entry and removes nothing.
 - **A fork copies the ledger.** `SessionManager.forkFrom` writes a new header and then copies
-  every non-header entry from the source file — messages and custom entries alike
+  every non-header entry from the source file, including messages and custom entries
   (session-manager.js:1270–1275). Recall in a forked session resolves the copied spans, and the
   restored fold records verify against the copied messages.
 - **`newSession({parentSession})` carries nothing.** It resets `fileEntries` to a fresh header
   (session-manager.js:652–661) and no reader traverses `parentSession`. Cross-session handoff is
-  therefore path-only: the `/fold-handoff` seed names the parent session file, and codes in it
-  are provenance, not live handles.
+  therefore path-only. The `/fold-handoff` seed names the parent session file, and its codes
+  identify provenance rather than live handles.
 - **`persist: false` (in-memory embeddings) still serves recall in-process.**
   `SessionManager.inMemory` sets no file, but `_appendEntry` populates `fileEntries` regardless
   of persistence (session-manager.js:726–761, 1226–1228), so `getEntries()` answers normally for
-  the life of the process. Nothing survives exit — there is no file — which matches the
-  extension's posture everywhere: the durable route exists exactly where Pi keeps a session file.
+  the life of the process. Nothing survives exit because there is no file. The durable route
+  exists exactly where Pi keeps a session file.
 
 ## Per-turn context mutation
 
-Hook named **`context`**. Fires before each LLM call, on a deep copy, and the returned `messages`
-array replaces what is sent. Confirmed in the engine as well as the docs:
+The `context` hook fires before each LLM call on a deep copy. Its returned `messages` array
+replaces what Pi sends. The engine and docs confirm the following:
 
 - `pi-agent-core/dist/harness/agent-harness.js` wires it as `transformContext`:
   `const result = await emitHook({type:"context", messages:[...messages]}); return result?.messages ?? messages;`
@@ -86,7 +87,7 @@ All of these fire headless.
 | Know the agent loop is actually idle | `pi.on("agent_settled", …)`, which fires after retries, compaction, and queued continuations finish |
 | Hard-compaction summary / cancel | `pi.on("session_before_compact", …) → {compaction:{summary, firstKeptEntryId, tokensBefore}} \| {cancel:true}` |
 | Compaction actually completed (count it, settle the index record) | `pi.on("session_compact", …)` |
-| Compaction failed/aborted after preparation (retract the compact record) | `pi.on("session_compact_failed", …)` — **postdates 0.84.1**; on older engines the handler never fires, so context-fold registers it through a plain-string cast and degrades to leaving the premature record in place |
+| Compaction failed/aborted after preparation (retract the compact record) | `pi.on("session_compact_failed", …)` postdates 0.84.1. On older engines the handler never fires, so context-fold registers it through a plain-string cast and leaves the premature record in place |
 | Model changed mid-session (restart the cache-telemetry segment) | `pi.on("model_select", …)` → `{ model, previousModel?, source: "set" \| "cycle" \| "restore" }` |
 | Agent-facing tool | `pi.registerTool({ name, label, description, promptSnippet, promptGuidelines, parameters: Type.Object({…}), execute })` |
 | Slash command | `pi.registerCommand(name, { description, handler })` |
@@ -112,12 +113,13 @@ All of these fire headless.
 
 ## Headless notes
 
-Every hook, tool and command above fires in `pi -p --mode json`. But `ctx.hasUI === false` and
-`ctx.mode ∈ {"print","json"}`, so guard every `ctx.ui.*` call. This extension only ever
-touches `ctx.ui` through optional chaining, in the display-only status command, the footer
-status updater, the settings menu, and the user-invoked `/fold-handoff` confirm (all inert
-headless). `ctx.shutdown()`
-is a no-op in print mode. Compaction still auto-fires on threshold and overflow headless, so
-`session_before_compact` is reachable without an interactive `/compact`.
+The hooks, tools, and commands above are available in `pi -p --mode json`, but UI calls need
+headless guards. Cache prediction and send confirmation require an interactive TUI. The command
+and settings menus require `ctx.hasUI`; headless calls use the status or effective-settings path
+instead. Observed cold-input notices use stderr headlessly. The footer updater and user-invoked
+`/fold-handoff` confirmation also guard UI access.
+
+`ctx.shutdown()` is a no-op in print mode. Compaction still auto-fires on threshold and overflow
+headlessly, so `session_before_compact` is reachable without an interactive `/compact`.
 
 The folding design must be fully autonomous, so nothing on the automatic path calls `ui.confirm`.
