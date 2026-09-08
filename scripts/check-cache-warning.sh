@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Offline Pi TUI check: cancel a stale-session prompt with an image, edit, then approve.
-# The fixture consumes approved inputs and replaces the provider with a throwing sentinel.
+# Approved input reaches a throwing fixture provider; no network request is made.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PI="${PI_BIN:-$(command -v pi)}"
@@ -67,7 +67,7 @@ tmux -L "$SOCKET" send-keys -t check Enter
 wait_screen 'Keep draft' "$WORK/confirmation-edited.txt"
 tmux -L "$SOCKET" send-keys -t check Down Enter
 for ((i=0; i<100; i++)); do
-  if grep -q '"accepted"' "$WORK/events.jsonl"; then break; fi
+  if grep -q '"provider"' "$WORK/events.jsonl"; then break; fi
   sleep 0.1
 done
 tmux -L "$SOCKET" capture-pane -p -t check > "$WORK/approved.txt"
@@ -76,7 +76,11 @@ import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 const work = process.argv[2];
 const events = readFileSync(`${work}/events.jsonl`, 'utf8').trim().split('\n').map(JSON.parse);
-assert.equal(events.filter(e => e.unexpectedProviderRequest).length, 0);
+const requests = events.filter(e => e.provider);
+assert.equal(requests.length, 1, 'Send anyway must reach the offline provider exactly once');
+const userMessage = requests[0].provider.messages.filter(m => m.role === 'user').at(-1);
+assert.equal(userMessage.content.find(c => c.type === 'text').text, 'edited draft');
+assert.equal(userMessage.content.find(c => c.type === 'image').data, readFileSync(`${work}/image.png`).toString('base64'));
 const accepted = events.filter(e => e.accepted);
 assert.equal(accepted.length, 1);
 assert.equal(accepted[0].accepted.text, 'edited draft');
@@ -86,5 +90,5 @@ assert.equal(accepted[0].accepted.images[0].mimeType, 'image/png');
 const screen = readFileSync(`${work}/cancelled.txt`, 'utf8');
 assert.ok(screen.includes('inspect original'));
 assert.ok(screen.includes('image(s) kept'));
-console.log('PASS: 48-column Pi confirmation, cancel/edit/image roundtrip, zero provider requests');
+console.log('PASS: 48-column Pi confirmation, cancel/edit/image roundtrip through provider boundary, zero network requests');
 JS

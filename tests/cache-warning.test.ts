@@ -90,14 +90,14 @@ describe("cache inactivity warning", () => {
 		f.warning.dispose();
 	});
 
-	it("handles null usage using the latest known context, but honors a compacted small context", () => {
+	it("skips unknown usage without a retained-context estimator and honors the compacted size", () => {
 		const f = fixture();
 		f.context.getContextUsage.mockReturnValue({ tokens: null, contextWindow: 200_000 } as never);
 		f.warning.restore(f.ctx);
-		expect(f.ui.notify).toHaveBeenCalledTimes(1);
+		expect(f.ui.notify).not.toHaveBeenCalled();
 		f.context.getContextUsage.mockReturnValue({ tokens: 19_999, contextWindow: 200_000 });
 		f.warning.restore(f.ctx);
-		expect(f.ui.notify).toHaveBeenCalledTimes(1);
+		expect(f.ui.notify).not.toHaveBeenCalled();
 		f.warning.dispose();
 	});
 

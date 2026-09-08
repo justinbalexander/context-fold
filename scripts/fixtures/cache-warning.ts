@@ -12,15 +12,15 @@ export default function (pi: ExtensionAPI): void {
 			id: "fixture", name: "Offline warning fixture", reasoning: false, input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200_000, maxTokens: 1000,
 		}],
-		streamSimple: () => {
-			record({ unexpectedProviderRequest: true });
-			throw new Error("Offline fixture: provider requests are forbidden");
+		streamSimple: (_model, context) => {
+			record({ provider: context });
+			throw new Error("Offline fixture: reached provider boundary without a network request");
 		},
 	});
 	pi.on("input", event => { record({ offered: event }); });
 	contextFold(pi);
 	pi.on("input", event => {
 		record({ accepted: event });
-		return { action: "handled" };
+		return { action: "continue" };
 	});
 }

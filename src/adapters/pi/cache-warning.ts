@@ -16,7 +16,6 @@ export function notifyCacheWarning(ctx: ExtensionContext, text: string): void {
 export class CacheWarning {
 	private activity = new Map<string, number>();
 	private warned = new Map<string, number | undefined>();
-	private carriedTokens = 0;
 	private timer?: ReturnType<typeof setTimeout>;
 	private epoch = 0;
 	private retainedImages: InputEvent["images"];
@@ -43,7 +42,6 @@ export class CacheWarning {
 		this.dispose();
 		this.activity.clear();
 		this.warned.clear();
-		this.carriedTokens = 0;
 		try {
 			for (const entry of ctx.sessionManager.getBranch?.() ?? []) {
 				if (entry.type === "message") this.observe(entry.message, Date.parse(entry.timestamp));
@@ -60,7 +58,6 @@ export class CacheWarning {
 		if (!Number.isFinite(tokens) || tokens <= 0) return;
 		const key = modelKey(message.provider, message.model);
 		this.activity.set(key, at);
-		this.carriedTokens = tokens;
 		this.warned.delete(key);
 	}
 
@@ -73,7 +70,8 @@ export class CacheWarning {
 			// Pi marks usage unknown after compaction. Estimate the retained context rather than
 			// recycling the pre-compaction usage that may have been orders of magnitude larger.
 			const entries = ctx.sessionManager.buildContextEntries?.();
-			tokens = entries ? estTokens(JSON.stringify(entries)) : this.carriedTokens;
+			if (!entries) return;
+			tokens = estTokens(JSON.stringify(entries));
 		}
 		if (tokens < 20_000) return;
 		const key = modelKey(ctx.model.provider, ctx.model.id);

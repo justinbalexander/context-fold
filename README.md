@@ -156,6 +156,7 @@ append-only session file even once the raw message has left live context.
   Each idle interval gets one notice. A model with no recorded activity instead says
   `cache unverified`. The token count is an estimate, including after compaction; elapsed time
   does not prove cache expiry or guarantee that the provider will bill the whole context again.
+  Hosts that cannot estimate the retained context skip prediction while its size is unknown.
 - **Observed cold input**: after the agent settles, a final response with zero cached reads and
   at least 20k input tokens can trigger
   `session cold: rebilled ~40k tok as fresh input. Consider /fold-handoff`.
@@ -347,8 +348,9 @@ scripts/e2e-compact-resume.sh  # live: folds survive real hard compaction plus a
 ```
 
 With Pi and tmux installed, `bash scripts/check-cache-warning.sh` checks cancellation, edited
-resubmission, and image preservation in a 48-column Pi terminal. It uses an offline fixture
-provider, makes no model request, and prints the directory containing its screen captures.
+resubmission, and image preservation through the provider boundary in a 48-column Pi terminal.
+It uses a local throwing fixture provider, makes no network request, and prints the directory
+containing its screen captures.
 
 The live scripts drive real Pi sessions against a real provider, so they cost money and need
 provider auth plus `python3`. They load the working copy explicitly, so they test the checkout
