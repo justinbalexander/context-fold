@@ -387,7 +387,7 @@ records. The union with fold records is therefore load-bearing, not noise.
 
 **The correct scoping rule** is a partition by compaction boundary: a block folded before the
 previous compaction is no longer in live history (that compaction removed it), so its record is
-"earlier material". Everything at/after the previous compaction boundary is the current span:
+"earlier material". Everything after the previous compaction boundary is the current span:
 
 ```ts
 interface Partition {
@@ -399,14 +399,23 @@ interface Partition {
 }
 
 function partitionRecords(records: SeedIndexRecord[]): Partition {
+	// The final record is the compact record being rendered now, so it belongs to the current
+	// span, not the boundary. The boundary is the compaction BEFORE it. At handoff (no trailing
+	// compact record) the boundary is simply the last compaction, if any.
+	const scanEnd =
+		records.length > 0 && records[records.length - 1].trigger === "compact" ? records.length - 1 : records.length;
 	let lastCompact = -1;
-	records.forEach((r, i) => {
-		if (r.trigger === "compact") lastCompact = i;
-	});
+	for (let i = 0; i < scanEnd; i++) if (records[i].trigger === "compact") lastCompact = i;
 	if (lastCompact < 0) return { current: records, earlier: [] };
-	return { current: records.slice(lastCompact), earlier: records.slice(0, lastCompact) };
+	return { current: records.slice(lastCompact + 1), earlier: records.slice(0, lastCompact + 1) };
 }
 ```
+
+**Revision after implementation (2026-09-18):** the first version of this reference code sliced
+at the LAST compact record, which put only the new compact record in `current` and demoted the
+fold records since the previous compaction to `earlier` — exactly the data loss the subtlety
+above warns about. The implementing session caught this; the code above is the corrected,
+shipped form.
 
 This works because records are appended in chronological order and compaction removes the live
 history that earlier records index. Example: `fold1, fold2, compact1, fold3, fold4, compact2` ⇒
