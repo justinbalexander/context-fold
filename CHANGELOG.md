@@ -7,6 +7,11 @@ Notable changes to context-fold.
 
 ### Changed
 
+- **Section titles in the deterministic summary carry the turn range they cover.** Each primary
+  section title now names the range of source turns, for example `## Files touched (turns 12–52)`
+  or `## Files touched (turn 12)` for a single turn. `## Error lines observed (verbatim)` is
+  renamed to `## Error lines (verbatim)` and carries the same suffix. The earlier-material header
+  carries the range of the earlier records. A section with no source spans keeps its bare title.
 - **The deterministic summary describes the span leaving live history.** The summary partitions the
   seed index at the previous compaction: records at or after that boundary render as the primary
   sections. Records from before it render under a new "Earlier indexed material" header at halved

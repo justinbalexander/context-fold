@@ -56,8 +56,27 @@ function partitionRecords(records: SeedIndexRecord[]): { current: SeedIndexRecor
 	return { current: records.slice(lastCompact + 1), earlier: records.slice(0, lastCompact + 1) };
 }
 
+/**
+ * The turn range of the spans in the records a section was rendered from, as a title suffix.
+ * Approximate for files/identifiers: it is the range of the source spans, not of the item.
+ * Returns "" when the records carry no spans.
+ */
+function turnRange(records: SeedIndexRecord[]): string {
+	let min = Infinity;
+	let max = -Infinity;
+	for (const r of records)
+		for (const s of r.spans) {
+			if (s.turn < min) min = s.turn;
+			if (s.turn > max) max = s.turn;
+		}
+	if (min > max) return "";
+	return min === max ? ` (turn ${min})` : ` (turns ${min}–${max})`;
+}
+
 export function renderDetCompactionSummary(input: DetCompactionInput): string {
 	const { current, earlier } = partitionRecords(input.records);
+	const currentTurns = turnRange(current);
+	const earlierTurns = turnRange(earlier);
 	const userMessages = dedupBy(
 		current.flatMap((r) => r.userMessages),
 		(u) => `${u.turn}:${u.firstLine}`,
@@ -84,16 +103,16 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
 		parts.push("", "## User intents (first lines, in order)");
 		for (const u of userMessages) parts.push(`- [turn ${u.turn}] ${u.firstLine}`);
 	}
-	if (files.length) parts.push("", "## Files touched", listed(files));
+	if (files.length) parts.push("", `## Files touched${currentTurns}`, listed(files));
 	if (commands.length) {
-		parts.push("", "## Commands run");
+		parts.push("", `## Commands run${currentTurns}`);
 		for (const c of commands) parts.push(renderCommand(c));
 	}
 	if (errors.length) {
-		parts.push("", "## Error lines observed (verbatim)");
+		parts.push("", `## Error lines (verbatim)${currentTurns}`);
 		for (const e of errors) parts.push(...renderError(e));
 	}
-	if (identifiers.length) parts.push("", "## Exact identifiers (grep keys for recall_folded)", listed(identifiers));
+	if (identifiers.length) parts.push("", `## Exact identifiers (grep keys for recall_folded)${currentTurns}`, listed(identifiers));
 	if (spans.length) {
 		parts.push("", "## Recovery pointers");
 		for (const s of spans) parts.push(`- {#${s.code ?? "?"} FOLDED} ${s.tool ?? "?"} · turn ${s.turn} · ${s.log.lines} lines`);
@@ -106,7 +125,7 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
 		if (earlyFiles.length) lines.push(`Files: ${listed(earlyFiles)}`);
 		if (earlyCommands.length) lines.push(`Commands: ${earlyCommands.map(commandBody).join(" · ")}`);
 		if (earlyErrors.length) lines.push(`Errors: ${earlyErrors.map(errorInline).join(" · ")}`);
-		if (lines.length) parts.push("", "## Earlier indexed material (before the previous compaction)", ...lines);
+		if (lines.length) parts.push("", `## Earlier indexed material (before the previous compaction)${earlierTurns}`, ...lines);
 	}
 	if (input.previousSummary?.trim()) {
 		parts.push(

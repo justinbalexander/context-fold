@@ -127,7 +127,59 @@ describe("summary scoping — handoff path and ordering", () => {
 		});
 		expect(summary).not.toContain("## Files touched");
 		expect(summary).not.toContain("## Commands run");
-		expect(summary).not.toContain("## Error lines observed");
+		expect(summary).not.toContain("## Error lines (verbatim)");
 		expect(summary).not.toContain(EARLIER_HEADER);
+	});
+});
+
+describe("Change D — turn ranges on section titles", () => {
+	const span = (turn: number, blockId: string): SeedIndexRecord["spans"][number] => ({
+		blockId,
+		code: "abc12345",
+		tool: "bash",
+		turn,
+		log: { bytes: 1, lines: 1 },
+	});
+
+	it("a section title carries the range of turns across the source spans", () => {
+		const summary = renderDetCompactionSummary({
+			records: [
+				record({ files: ["a.ts"], spans: [span(3, "r:a")] }),
+				record({ files: ["b.ts"], spans: [span(52, "r:b")] }),
+			],
+		});
+		expect(summary).toContain("## Files touched (turns 3–52)");
+	});
+
+	it("a single source turn renders as (turn N)", () => {
+		const summary = renderDetCompactionSummary({
+			records: [record({ files: ["a.ts"], spans: [span(3, "r:a"), span(3, "r:b")] })],
+		});
+		expect(summary).toContain("## Files touched (turn 3)");
+	});
+
+	it("no spans produce no suffix", () => {
+		const summary = renderDetCompactionSummary({ records: [record({ files: ["a.ts"] })] });
+		expect(summary).toContain("## Files touched\n");
+		expect(summary).not.toContain("## Files touched (");
+	});
+
+	it("the renamed error section carries the range", () => {
+		const summary = renderDetCompactionSummary({
+			records: [record({ errors: [{ line: "boom", turn: 7 }], spans: [span(7, "r:e")] })],
+		});
+		expect(summary).toContain("## Error lines (verbatim) (turn 7)");
+	});
+
+	it("the earlier-material header carries the range of the earlier spans", () => {
+		const summary = renderDetCompactionSummary({
+			records: [
+				record({ seq: 1, trigger: "threshold", files: ["old.ts"], spans: [span(2, "r:o")] }),
+				record({ seq: 2, trigger: "compact" }),
+				record({ seq: 3, trigger: "threshold", files: ["new.ts"], spans: [span(9, "r:n")] }),
+				record({ seq: 4, trigger: "compact" }),
+			],
+		});
+		expect(summary).toContain(`${EARLIER_HEADER} (turn 2)`);
 	});
 });
