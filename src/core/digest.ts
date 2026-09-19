@@ -8,7 +8,7 @@
  * Every digest carries a leading `{#<code> FOLDED}` tag. This is the engine's source-of-truth
  * string: it is the exact text the agent receives in place of the folded content. The agent
  * reads the short `code` from the tag and calls `unfold`/`recall_folded` with it to pull the block
- * back to full content. The code is a 6-char base36 FNV-1a hash of the block's durable id —
+ * back to full content. The code is an 8-char base36 FNV-1a hash of the block's durable id —
  * stateless and globally stable (same block → same code, every session).
  *
  * Ported ~verbatim from Accordion `engine/digest.ts` (pinned commit 0c22434); only the type
@@ -36,14 +36,14 @@ export function wireFoldable(b: DigestBlock): boolean {
 	return FOLDABLE_KINDS.has(b.kind) && !(b as { opaque?: boolean }).opaque;
 }
 
-/** Short, stable handle for a block, derived purely from its durable id (FNV-1a → base36, 6 chars). */
+/** Short, stable handle for a block, derived purely from its durable id (FNV-1a → base36, 8 chars). */
 export function foldCode(id: string): string {
 	let h = 0x811c9dc5; // FNV-1a 32-bit
 	for (let i = 0; i < id.length; i++) {
 		h ^= id.charCodeAt(i);
 		h = Math.imul(h, 0x01000193);
 	}
-	return (h >>> 0).toString(36).padStart(6, "0").slice(-6);
+	return (h >>> 0).toString(36).padStart(8, "0").slice(-8);
 }
 
 /** The folded-block marker the agent sees and passes back to `unfold`, e.g. `{#3f9a2c FOLDED}`. */

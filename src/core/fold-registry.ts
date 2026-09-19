@@ -13,7 +13,7 @@
 export interface FoldEntry {
 	/** Durable id of the folded block. */
 	blockId: string;
-	/** The 6-char fold code (= foldCode(blockId)); the pointer's {#code FOLDED} handle. */
+	/** The 8-char fold code (= foldCode(blockId)); the pointer's {#code FOLDED} handle. */
 	code: string;
 	tool: string;
 	isError: boolean;

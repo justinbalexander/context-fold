@@ -11,9 +11,9 @@ import { protectedFromIndex } from "../src/adapters/pi/store";
 import { assistantWithCalls, toolResult, user, assistantText, bigResult, isBalanced, toolPairIds } from "./helpers";
 
 describe("digest determinism", () => {
-	it("foldCode is a stable 6-char base36 hash of the id", () => {
+	it("foldCode is a stable 8-char base36 hash of the id", () => {
 		expect(foldCode("r:c1")).toBe(foldCode("r:c1"));
-		expect(foldCode("r:c1")).toMatch(/^[0-9a-z]{6}$/);
+		expect(foldCode("r:c1")).toMatch(/^[0-9a-z]{8}$/);
 		expect(foldCode("r:c1")).not.toBe(foldCode("r:c2"));
 	});
 	it("foldable digests carry the {#code FOLDED} tag; the code matches the id", () => {

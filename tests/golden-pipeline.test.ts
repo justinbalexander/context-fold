@@ -20,9 +20,9 @@ import { assistantText, assistantWithCalls, bigResult, toolResult, user } from "
 const NOW = 1_722_200_000_000;
 
 const GOLDEN = {
-	folded: "f759c01722ab2b7eca42453c5ecaf880bbd03298feb754c2087713d3dc67cff2",
-	index: "ee7cdd19956479886a6d9f3aa79c918e526865535f4a9319d27e3784777d2bc9",
-	recall: "60801419797d23a9486f5fe856fade34745b5f1c4d7062f6295b9a9c9e903382",
+	folded: "8e83fd755bef7a53b9ea274b4f18eee25a7ff45e7afd4fd903d687051355bd1c",
+	index: "77fcf6079dbb993d16842a56a70c326c30eccc32d4c1171e32fe94af4b2fc554",
+	recall: "d999a9743e2d83b6fb91358e3fb1bd193ad4881970fe4af6c35747395cc6d833",
 };
 
 function sha(s: string): string {

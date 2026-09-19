@@ -112,7 +112,7 @@ describe("recall — read the original back verbatim", () => {
 		// Find a folded tool result in the output and its fold code.
 		const foldedTR = out.find((m) => m.role === "toolResult" && (m.content as any)[0].text.includes("FOLDED"));
 		expect(foldedTR).toBeDefined();
-		const codeMatch = /\{#([0-9a-z]{6}) FOLDED\}/.exec((foldedTR!.content as any)[0].text)!;
+		const codeMatch = /\{#([0-9a-z]{8}) FOLDED\}/.exec((foldedTR!.content as any)[0].text)!;
 		const code = codeMatch[1];
 
 		// The original block's content (re-derived from the un-folded session).
@@ -135,7 +135,7 @@ describe("unfold — sticky re-expansion next turn", () => {
 
 		const foldedTR = out1.find((m) => m.role === "toolResult" && (m.content as any)[0].text.includes("FOLDED"))!;
 		const callId = foldedTR.toolCallId!;
-		const code = /\{#([0-9a-z]{6}) FOLDED\}/.exec((foldedTR.content as any)[0].text)![1];
+		const code = /\{#([0-9a-z]{8}) FOLDED\}/.exec((foldedTR.content as any)[0].text)![1];
 
 		engine.markUnfold([code]);
 
