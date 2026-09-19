@@ -36,14 +36,15 @@ export function wireFoldable(b: DigestBlock): boolean {
 	return FOLDABLE_KINDS.has(b.kind) && !(b as { opaque?: boolean }).opaque;
 }
 
-/** Short, stable handle for a block, derived purely from its durable id (FNV-1a → base36, 8 chars). */
+/** Short, stable handle for a block, derived purely from its durable id (64-bit FNV-1a → base36, 8 chars).
+ *  64-bit because 32 bits fill only 7 base36 chars — the 8th would be a dead leading zero. */
 export function foldCode(id: string): string {
-	let h = 0x811c9dc5; // FNV-1a 32-bit
+	let h = 0xcbf29ce484222325n; // FNV-1a 64-bit offset basis
 	for (let i = 0; i < id.length; i++) {
-		h ^= id.charCodeAt(i);
-		h = Math.imul(h, 0x01000193);
+		h ^= BigInt(id.charCodeAt(i));
+		h = (h * 0x100000001b3n) & 0xffffffffffffffffn; // FNV prime, mod 2^64
 	}
-	return (h >>> 0).toString(36).padStart(8, "0").slice(-8);
+	return h.toString(36).padStart(8, "0").slice(-8);
 }
 
 /** The folded-block marker the agent sees and passes back to `unfold`, e.g. `{#3f9a2c FOLDED}`. */

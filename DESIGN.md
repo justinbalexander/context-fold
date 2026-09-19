@@ -146,7 +146,7 @@ The fold record and seed-index record are commit preconditions. The engine prepa
 adapter appends both records durably, and only then does the engine freeze and apply its bytes. A
 durability failure (record, index, or layer persistence) rejects the entire event and sends that
 turn raw. A fold-code collision is the one per-block exception. The code space is
-`hash mod 36^6`, so two durable ids can rarely share a code, and the collision is a permanent
+`hash mod 36^8`, so two durable ids can rarely share a code, and the collision is a permanent
 condition for the second id. That block alone is dropped from the event, held raw for the
 session, and announced on stderr, while the rest of the event commits. At hard compaction, every
 foldable block leaving live history that never folded gets a code and a fold record then

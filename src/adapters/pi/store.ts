@@ -339,6 +339,16 @@ export class ContextFoldEngine {
 			for (const id of dropped) this.foldRejected.add(id);
 			const droppedSet = new Set(dropped);
 			kept = entries.filter((e) => !droppedSet.has(e.id));
+			// A kept pointer can name a dropped owner's code — a handle that will never resolve.
+			// Rewrite it to the block's full digest: the drop forfeits dedup for the pair, not the fold.
+			const droppedCodes = new Set([...droppedSet].map((id) => foldCode(id)));
+			const byId = new Map(blocks.map((b) => [b.id, b] as const));
+			kept = kept.map((e) => {
+				const m = /\{#([0-9a-z]+) FOLDED\} identical to \{#([0-9a-z]+) FOLDED\}/.exec(e.digestText);
+				if (!m || !droppedCodes.has(m[2])) return e;
+				const b = byId.get(e.id);
+				return b ? { id: e.id, digestText: this.detDigest(b) } : e;
+			});
 		}
 		if (kept.length === 0) return [];
 
@@ -703,11 +713,12 @@ export class ContextFoldEngine {
 				const b = byId.get(id)!;
 				let digestText: string;
 				if (b.text) {
-					const dup = shaOwner.get(sha256Hex(b.text));
+					const sha = sha256Hex(b.text);
+					const dup = shaOwner.get(sha);
 					if (dup !== undefined) {
 						digestText = `${foldTag(b.id)} identical to {#${dup} FOLDED} — same bytes`;
 					} else {
-						shaOwner.set(sha256Hex(b.text), foldCode(b.id));
+						shaOwner.set(sha, foldCode(b.id));
 						digestText = this.detDigest(b);
 					}
 				} else {

@@ -59,7 +59,7 @@ function spanFor(b: WireBlock, entry: FoldEntry): IndexSpan {
 }
 
 /** code → owning blockId across the registry: the fold-code collision check. The code space is
- *  `hash mod 36^6`, so two durable ids CAN rarely share a code; the second id must never claim
+ *  `hash mod 36^8`, so two durable ids CAN rarely share a code; the second id must never claim
  *  the first one's handle. */
 function codeOwners(registry: MapFoldRegistry): Map<string, string> {
 	const owners = new Map<string, string>();

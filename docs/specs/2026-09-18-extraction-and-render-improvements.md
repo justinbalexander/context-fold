@@ -552,8 +552,15 @@ plausible around ~46k folded blocks in a session). A collision drops a block fro
 for ~2 extra in-context chars per folded block.
 
 ```ts
-return (h >>> 0).toString(36).padStart(8, "0").slice(-8);
+return h.toString(36).padStart(8, "0").slice(-8); // h: 64-bit FNV-1a (BigInt), not 32-bit
 ```
+
+**Revision after code review (2026-09-18):** the original text of this change specified keeping
+the 32-bit FNV-1a and only widening the pad. Review caught that a 32-bit hash is at most 7
+base36 chars, so the 8th char would always be a dead leading zero and the effective space would
+grow ~2×, not 36²×. The implementation widens the hash itself to 64-bit FNV-1a (BigInt — exact,
+platform-independent arithmetic), making all 8 chars meaningful (36⁸ ≈ 2.8×10¹², birthday 50 %
+at ~1.7M blocks).
 
 Already verified, no other code changes needed:
 

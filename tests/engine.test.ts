@@ -185,6 +185,20 @@ describe("dedup — identical outputs fold to a pointer at the first copy", () =
 		}
 	});
 
+	it("a pointer whose owner is collision-dropped is rewritten to a full digest", () => {
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
+		// Simulate the per-block collision drop: c0 owns the shared bytes, so every other masked
+		// result would point at its code. Dropping it must not leave a dead handle behind.
+		engine.onFoldEvent = (ev) => (ev.maskedIds.includes("r:c0") ? ["r:c0"] : []);
+		const out = engine.process(bigSession(12), CW);
+		const c0 = out.find((m) => m.role === "toolResult" && m.toolCallId === "c0")!;
+		expect((c0.content as any)[0].text).toContain("line 0:"); // held raw
+		expect((c0.content as any)[0].text).not.toContain("{#");
+		const c1 = out.find((m) => m.role === "toolResult" && m.toolCallId === "c1")!;
+		expect((c1.content as any)[0].text).toContain("FOLDED"); // still folded…
+		expect((c1.content as any)[0].text).not.toContain("identical to {#"); // …not as a dead pointer
+	});
+
 	it("different content never dedups", () => {
 		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
 		const messages = [
