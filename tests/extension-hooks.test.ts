@@ -60,6 +60,9 @@ const ENV_KEYS = [
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "cf-hooks-"));
 	for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+	// Isolate from the host's real agent dir: without this the extension reads
+	// ~/.pi/agent/context-fold.json and a contributor's saved knobs steer the suite.
+	process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
 });
 afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
