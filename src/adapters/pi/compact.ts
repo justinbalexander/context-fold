@@ -21,6 +21,9 @@ const CAP_IDENTIFIERS = 80;
 const CAP_SPANS = 30;
 const CAP_PREVIOUS_SUMMARY_CHARS = 4_000;
 const COMMAND_RENDER_CLIP = 200;
+const CAP_EARLIER_FILES = 20;
+const CAP_EARLIER_COMMANDS = 12;
+const CAP_EARLIER_ERRORS = 12;
 
 export interface DetCompactionInput {
 	records: SeedIndexRecord[];
@@ -31,18 +34,40 @@ export interface DetCompactionInput {
 	previousSummary?: string;
 }
 
+/**
+ * Split the append-only index into the span leaving live history NOW and material that already
+ * left at an earlier compaction. Records are chronological: the boundary is the compaction before
+ * the final record (the compact record being rendered now), so everything after it is current.
+ *
+ * The union of `current` is load-bearing, not redundant. At compaction time previously-folded
+ * blocks appear in the leaving messages as their digest text, so the new compact record's own
+ * extraction sees digests, not original content. Only the fold records since the previous
+ * compaction carry that original content, so rendering the compact record alone would lose it.
+ */
+function partitionRecords(records: SeedIndexRecord[]): { current: SeedIndexRecord[]; earlier: SeedIndexRecord[] } {
+	// The final record is the compact record being rendered now, so it belongs to the current span,
+	// not the boundary. The boundary is the compaction before it: a block folded before that
+	// compaction already left live history. With no earlier compaction, the whole index is current.
+	const scanEnd =
+		records.length > 0 && records[records.length - 1].trigger === "compact" ? records.length - 1 : records.length;
+	let lastCompact = -1;
+	for (let i = 0; i < scanEnd; i++) if (records[i].trigger === "compact") lastCompact = i;
+	if (lastCompact < 0) return { current: records, earlier: [] };
+	return { current: records.slice(lastCompact + 1), earlier: records.slice(0, lastCompact + 1) };
+}
+
 export function renderDetCompactionSummary(input: DetCompactionInput): string {
-	const { records } = input;
+	const { current, earlier } = partitionRecords(input.records);
 	const userMessages = dedupBy(
-		records.flatMap((r) => r.userMessages),
+		current.flatMap((r) => r.userMessages),
 		(u) => `${u.turn}:${u.firstLine}`,
 	).slice(-CAP_USER);
-	const files = union<string>(records, (r) => r.files, (f) => f, CAP_FILES);
-	const commands = union<CommandEntry>(records, (r) => r.commands, commandKey, CAP_COMMANDS);
-	const errors = union<ErrorEntry>(records, (r) => r.errors, errorKey, CAP_ERRORS);
-	const identifiers = union<string>(records, (r) => r.identifiers, (i) => i, CAP_IDENTIFIERS);
+	const files = union<string>(current, (r) => r.files, (f) => f, CAP_FILES);
+	const commands = union<CommandEntry>(current, (r) => r.commands, commandKey, CAP_COMMANDS);
+	const errors = union<ErrorEntry>(current, (r) => r.errors, errorKey, CAP_ERRORS);
+	const identifiers = union<string>(current, (r) => r.identifiers, (i) => i, CAP_IDENTIFIERS);
 	const spans = dedupBy(
-		records.flatMap((r) => r.spans),
+		current.flatMap((r) => r.spans),
 		(s) => s.blockId,
 	).slice(-CAP_SPANS);
 
@@ -72,6 +97,16 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
 	if (spans.length) {
 		parts.push("", "## Recovery pointers");
 		for (const s of spans) parts.push(`- {#${s.code ?? "?"} FOLDED} ${s.tool ?? "?"} · turn ${s.turn} · ${s.log.lines} lines`);
+	}
+	if (earlier.length) {
+		const earlyFiles = union<string>(earlier, (r) => r.files, (f) => f, CAP_EARLIER_FILES);
+		const earlyCommands = union<CommandEntry>(earlier, (r) => r.commands, commandKey, CAP_EARLIER_COMMANDS);
+		const earlyErrors = union<ErrorEntry>(earlier, (r) => r.errors, errorKey, CAP_EARLIER_ERRORS);
+		const lines: string[] = [];
+		if (earlyFiles.length) lines.push(`Files: ${listed(earlyFiles)}`);
+		if (earlyCommands.length) lines.push(`Commands: ${earlyCommands.map(commandBody).join(" · ")}`);
+		if (earlyErrors.length) lines.push(`Errors: ${earlyErrors.map(errorInline).join(" · ")}`);
+		if (lines.length) parts.push("", "## Earlier indexed material (before the previous compaction)", ...lines);
 	}
 	if (input.previousSummary?.trim()) {
 		parts.push(
@@ -117,10 +152,20 @@ function renderError(e: ErrorEntry): string[] {
 	return e.context ? [head, `  ↳ ${e.context}`] : [head];
 }
 
+/** Render one error line for the compact earlier-material list, without the primary-section bullet. */
+function errorInline(e: ErrorEntry): string {
+	if (typeof e === "string") return e; // v2 record
+	return `${e.toolError ? "⚠ " : ""}${e.line} [turn ${e.turn}${e.code ? ` · ${e.code}` : ""}]`;
+}
+
 /** Render one command: the first line, clipped, with a marker when content was dropped.
  *  Tolerates v2 records, where the entry is a bare string. */
 function renderCommand(c: CommandEntry): string {
-	if (typeof c === "string") return `- \`${c}\``; // v2 record
+	return `- ${commandBody(c)}`;
+}
+
+function commandBody(c: CommandEntry): string {
+	if (typeof c === "string") return `\`${c}\``; // v2 record
 	const lines = c.command.split("\n");
 	const firstRaw = (lines.find((l) => l.trim()) ?? "").trim();
 	const first = clip(firstRaw, COMMAND_RENDER_CLIP);
@@ -131,7 +176,7 @@ function renderCommand(c: CommandEntry): string {
 	if (extraChars > 0) marks.push(`+${extraChars} chars`);
 	const suffix = marks.length ? ` … (${marks.join(", ")})` : "";
 	const prov = ` [turn ${c.turn}${c.code ? ` · ${c.code}` : ""}]`;
-	return `- \`${first}\`${suffix}${prov}`;
+	return `\`${first}\`${suffix}${prov}`;
 }
 
 /** Dedup by key, keeping the newest value per key in first-sighting (chronological) order. */

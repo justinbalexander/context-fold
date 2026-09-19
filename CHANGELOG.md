@@ -7,6 +7,12 @@ Notable changes to context-fold.
 
 ### Changed
 
+- **The deterministic summary describes the span leaving live history.** The summary partitions the
+  seed index at the previous compaction: records at or after that boundary render as the primary
+  sections. Records from before it render under a new "Earlier indexed material" header at halved
+  caps, so a long session with several compactions no longer reads as a random sample of the whole
+  session. The current span unions the new compact record with the fold records since the previous
+  compaction, because a previously-folded block appears in the leaving span as digest text only.
 - **Seed index v3: provenance on errors and commands.** Error entries now carry the source
   `turn`, the source block's fold code, an optional `toolError` flag, and the following
   non-empty line as `context`; command entries carry the source `turn` and the paired result
