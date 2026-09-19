@@ -2,7 +2,7 @@
  * hardening.test.ts — adapter-level regressions: error-lexicon coverage, fold-code collision
  * safety, and the lines= re-flood cap.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,16 @@ import { foldCode } from "../src/core/digest";
 import { categorize } from "../src/core/policy/ledger";
 import { linearize, type AgentMessage } from "../src/core/block";
 import { user, assistantText, assistantWithCalls, toolResult } from "./helpers";
+// The 36^8 code space is too large for a birthday search — force the collision instead of
+// finding one. Everything else in the module stays real, so the guard logic under test is unchanged.
+vi.mock("../src/core/digest", async (importActual) => {
+	const actual = await importActual<typeof import("../src/core/digest")>();
+	return {
+		...actual,
+		foldCode: (id: string) => (id === "r:coll_a" || id === "r:coll_b" ? "deadbeef" : actual.foldCode(id)),
+	};
+});
+
 let dir: string;
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "cf-hardening-"));
@@ -46,16 +56,9 @@ describe("error lexicon covers real failure spellings", () => {
 
 });
 
-/** Two REAL colliding durable ids (birthday search over the 36^6 code space, <100ms). */
+/** Two durable ids that share a fold code (forced via the module mock above). */
 function collidingIds(): [string, string] {
-	const seen = new Map<string, string>();
-	for (let i = 0; ; i++) {
-		const id = `r:call_${i.toString(36)}`;
-		const c = foldCode(id);
-		const prev = seen.get(c);
-		if (prev !== undefined) return [prev, id];
-		seen.set(c, id);
-	}
+	return ["r:coll_a", "r:coll_b"];
 }
 
 describe("fold-code collision guard", () => {
