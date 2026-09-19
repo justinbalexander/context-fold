@@ -35,6 +35,22 @@ export function loadSavedSettings(path = settingsFilePath()): SavedSettings {
 	}
 }
 
+const KNOWN_KEYS = new Set<string>([...KNOBS.map((k) => k.key), "providerCacheIdleMinutes"]);
+
+/** Raw file contents minus the keys we manage. Unknown keys (comments, forward-compat) are
+ *  preserved verbatim across writes. */
+function unknownKeys(path: string): Record<string, unknown> {
+	try {
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		if (!raw || typeof raw !== "object") return {};
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(raw)) if (!KNOWN_KEYS.has(k)) out[k] = v;
+		return out;
+	} catch {
+		return {};
+	}
+}
+
 /** Atomic replace (temp file + rename) so a concurrent reader never sees a truncated file. */
 function writeSettings(saved: SavedSettings, path: string): void {
 	mkdirSync(dirname(path), { recursive: true });
@@ -47,8 +63,8 @@ export function writeSavedSetting(key: KnobKey, value: KnobValue, path = setting
 	const saved = loadSavedSettings(path);
 	if (key === "cacheIdleMinutes" && provider && typeof value === "number") {
 		saved.providerCacheIdleMinutes = { ...saved.providerCacheIdleMinutes, [provider]: value };
-		writeSettings(saved, path);
-	} else writeSettings({ ...saved, [key]: value }, path);
+		writeSettings({ ...unknownKeys(path), ...saved }, path);
+	} else writeSettings({ ...unknownKeys(path), ...saved, [key]: value }, path);
 }
 
 export function removeSavedSetting(key: KnobKey, path = settingsFilePath(), provider?: string): void {
@@ -57,10 +73,10 @@ export function removeSavedSetting(key: KnobKey, path = settingsFilePath(), prov
 		const { [provider]: _cleared, ...rest } = saved.providerCacheIdleMinutes ?? {};
 		if (Object.keys(rest).length) saved.providerCacheIdleMinutes = rest;
 		else delete saved.providerCacheIdleMinutes;
-		writeSettings(saved, path);
+		writeSettings({ ...unknownKeys(path), ...saved }, path);
 	} else {
 		const { [key]: _cleared, ...rest } = saved;
-		writeSettings(rest, path);
+		writeSettings({ ...unknownKeys(path), ...rest }, path);
 	}
 }
 

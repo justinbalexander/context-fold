@@ -51,6 +51,14 @@ describe("settings file", () => {
 		writeFileSync(file, JSON.stringify({ foldAt: 7, compact: "native" }));
 		expect(loadSavedSettings(file)).toEqual({ compact: "native" });
 	});
+
+	it("preserves unknown keys across write and remove", () => {
+		writeFileSync(file, JSON.stringify({ _comment: "hello", foldAt: 0.9 }));
+		writeSavedSetting("tail", 5_000, file);
+		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ _comment: "hello", foldAt: 0.9, tail: 5_000 });
+		removeSavedSetting("foldAt", file);
+		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ _comment: "hello", tail: 5_000 });
+	});
 });
 
 /** Scripted UI: each step answers the next dialog; select answers match options by prefix. */

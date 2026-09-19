@@ -7,6 +7,10 @@ Notable changes to context-fold.
 
 ### Changed
 
+- **Unknown keys in the saved settings file survive a write.** `context-fold.json` may carry keys
+  the extension does not manage, such as a user's `_comment`. `writeSavedSetting` and
+  `removeSavedSetting` used to load the file through the validating parser and write the result,
+  which silently deleted those keys. Both writes now preserve unknown keys verbatim.
 - **Section titles in the deterministic summary carry the turn range they cover.** Each primary
   section title now names the range of source turns, for example `## Files touched (turns 12–52)`
   or `## Files touched (turn 12)` for a single turn. `## Error lines observed (verbatim)` is
