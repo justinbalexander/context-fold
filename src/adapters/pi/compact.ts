@@ -10,7 +10,7 @@
  *
  * Pure rendering: no Pi imports, no disk, no clock. Fully unit-testable.
  */
-import type { SeedIndexRecord } from "../../core/index/seed-index";
+import type { ErrorLine, IndexedCommand, SeedIndexRecord } from "../../core/index/seed-index";
 
 const CAP_USER = 12;
 const CAP_FILES = 40;
@@ -35,10 +35,10 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
 		records.flatMap((r) => r.userMessages),
 		(u) => `${u.turn}:${u.firstLine}`,
 	).slice(-CAP_USER);
-	const files = union(records, (r) => r.files, CAP_FILES);
-	const commands = union(records, (r) => r.commands, CAP_COMMANDS);
-	const errors = union(records, (r) => r.errors, CAP_ERRORS);
-	const identifiers = union(records, (r) => r.identifiers, CAP_IDENTIFIERS);
+	const files = union<string>(records, (r) => r.files, (f) => f, CAP_FILES);
+	const commands = union<CommandEntry>(records, (r) => r.commands, commandKey, CAP_COMMANDS);
+	const errors = union<ErrorEntry>(records, (r) => r.errors, errorKey, CAP_ERRORS);
+	const identifiers = union<string>(records, (r) => r.identifiers, (i) => i, CAP_IDENTIFIERS);
 	const spans = dedupBy(
 		records.flatMap((r) => r.spans),
 		(s) => s.blockId,
@@ -60,11 +60,11 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
 	if (files.length) parts.push("", "## Files touched", listed(files));
 	if (commands.length) {
 		parts.push("", "## Commands run");
-		for (const c of commands) parts.push(`- \`${c}\``);
+		for (const c of commands) parts.push(renderCommand(c));
 	}
 	if (errors.length) {
 		parts.push("", "## Error lines observed (verbatim)");
-		for (const e of errors) parts.push(`- ${e}`);
+		for (const e of errors) parts.push(...renderError(e));
 	}
 	if (identifiers.length) parts.push("", "## Exact identifiers (grep keys for recall_folded)", listed(identifiers));
 	if (spans.length) {
@@ -89,15 +89,35 @@ export function renderDetCompactionSummary(input: DetCompactionInput): string {
  * load-bearing one, and ordering by first sighting would drop it in favour of a one-off from the
  * final record.
  */
-function union(records: SeedIndexRecord[], pick: (r: SeedIndexRecord) => string[], cap: number): string[] {
-	const seen = new Set<string>();
+function union<T>(records: SeedIndexRecord[], pick: (r: SeedIndexRecord) => T[], key: (t: T) => string, cap: number): T[] {
+	const seen = new Map<string, T>();
 	for (const r of records) {
 		for (const v of pick(r)) {
-			seen.delete(v); // re-sighting refreshes position; Set preserves insertion order
-			seen.add(v);
+			const k = key(v);
+			seen.delete(k); // re-sighting refreshes position; Map preserves insertion order
+			seen.set(k, v);
 		}
 	}
-	return [...seen].slice(-cap);
+	return [...seen.values()].slice(-cap);
+}
+
+type CommandEntry = string | IndexedCommand;
+type ErrorEntry = string | ErrorLine;
+
+const commandKey = (c: CommandEntry): string => (typeof c === "string" ? c : c.command);
+const errorKey = (e: ErrorEntry): string => (typeof e === "string" ? e : e.line);
+
+/** Render one error line as one or two output lines. Tolerates v2 records, where the entry is a bare string. */
+function renderError(e: ErrorEntry): string[] {
+	if (typeof e === "string") return [`- ${e}`]; // v2 record
+	const prov = `[turn ${e.turn}${e.code ? ` · ${e.code}` : ""}]`;
+	const head = `- ${e.toolError ? "⚠ " : ""}${prov} ${e.line}`;
+	return e.context ? [head, `  ↳ ${e.context}`] : [head];
+}
+
+/** Render one command. Tolerates v2 records, where the entry is a bare string. */
+function renderCommand(c: CommandEntry): string {
+	return typeof c === "string" ? `- \`${c}\`` : `- \`${c.command}\``;
 }
 
 /** Dedup by key, keeping the newest value per key in first-sighting (chronological) order. */

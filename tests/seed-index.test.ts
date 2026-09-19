@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { linearize } from "../src/core/block";
 import { extractIndex, buildIndexRecord } from "../src/core/index/seed-index";
+import { foldCode } from "../src/core/digest";
 import type { WireBlock } from "../src/core/block";
 import { user, assistantWithCalls, toolResult } from "./helpers";
 
@@ -49,6 +50,23 @@ function fixture() {
 	return { all, masked };
 }
 
+/** Two result blocks that both match the error lexicon: a 3-line isError block and a 30-line
+ *  non-error flood. The isError lines must win the capped slots. */
+function flaggedErrorFixture() {
+	const flagged = Array.from({ length: 3 }, (_, i) => `flagged error ${i}`);
+	const plain = Array.from({ length: 30 }, (_, i) => `plain error ${i}`);
+	const messages = [
+		user("ordering probe"),
+		assistantWithCalls([{ id: "ok", name: "read" }]),
+		toolResult("ok", plain.join("\n"), "read", false),
+		assistantWithCalls([{ id: "bad", name: "read" }]),
+		toolResult("bad", flagged.join("\n"), "read", true),
+	];
+	const all = blocksOf(messages);
+	const masked = all.filter((b) => b.kind === "tool_result");
+	return { all, masked, flagged, plain };
+}
+
 describe("seed-index extraction", () => {
 	it("keeps identifiers planted mid-tool-output (summary-boundary probe class)", () => {
 		const { all, masked } = fixture();
@@ -62,15 +80,15 @@ describe("seed-index extraction", () => {
 	it("carries whole error lines in every lexicon spelling (lowercase failed, npm ERR!, segfault)", () => {
 		const { all, masked } = fixture();
 		const idx = extractIndex({ masked, all });
-		expect(idx.errors).toContain("12 passed, 3 failed");
-		expect(idx.errors).toContain("npm ERR! code ELIFECYCLE");
-		expect(idx.errors).toContain("Segmentation fault (core dumped) in worker 4");
+		expect(idx.errors.map((e) => e.line)).toContain("12 passed, 3 failed");
+		expect(idx.errors.map((e) => e.line)).toContain("npm ERR! code ELIFECYCLE");
+		expect(idx.errors.map((e) => e.line)).toContain("Segmentation fault (core dumped) in worker 4");
 	});
 
 	it("indexes shell commands from paired tool_calls and user first lines across the span", () => {
 		const { all, masked } = fixture();
 		const idx = extractIndex({ masked, all });
-		expect(idx.commands.some((c) => c.includes("npx vitest run tests/ladder.test.ts"))).toBe(true);
+		expect(idx.commands.some((c) => c.command.includes("npx vitest run tests/ladder.test.ts"))).toBe(true);
 		expect(idx.userMessages.map((u) => u.firstLine)).toEqual([
 			"rebuild the fold ladder with discrete events",
 			"now check the capacity table in the big dump",
@@ -104,7 +122,7 @@ describe("seed-index extraction", () => {
 		expect(new Set(idx.identifiers).size).toBe(idx.identifiers.length);
 	});
 
-	it("assembles a complete v2 record", () => {
+	it("assembles a complete v3 record", () => {
 		const { all, masked } = fixture();
 		const rec = buildIndexRecord(
 			{
@@ -127,9 +145,76 @@ describe("seed-index extraction", () => {
 				},
 			],
 		);
-		expect(rec.v).toBe(2);
+		expect(rec.v).toBe(3);
 		expect(rec.kind).toBe("fold-index");
 		expect(rec.spans).toHaveLength(1);
 		expect(rec.errors.length).toBeGreaterThan(0);
+	});
+
+	it("orders tool-flagged error lines before lexicon-only lines when the cap is tight", () => {
+		const { all, masked, flagged } = flaggedErrorFixture();
+		const idx = extractIndex({ masked, all });
+		expect(idx.errors.length).toBe(24); // the cap, still full
+		expect(idx.errors.slice(0, 3).map((e) => e.line)).toEqual(flagged);
+		expect(idx.errors.slice(0, 3).every((e) => e.toolError === true)).toBe(true);
+		expect(idx.errors.slice(3).every((e) => e.toolError === undefined)).toBe(true);
+	});
+
+	it("isError-first ordering is deterministic across runs", () => {
+		const { all, masked } = flaggedErrorFixture();
+		expect(JSON.stringify(extractIndex({ masked, all }))).toBe(JSON.stringify(extractIndex({ masked, all })));
+	});
+
+	it("stamps errors with the source block's turn and foldCode", () => {
+		const { all, masked } = fixture();
+		const idx = extractIndex({ masked, all });
+		const err = idx.errors.find((e) => e.line === "npm ERR! code ELIFECYCLE");
+		const source = masked.find((b) => b.text.includes("npm ERR! code ELIFECYCLE"))!;
+		expect(err).toBeDefined();
+		expect(err!.turn).toBe(source.turn);
+		expect(err!.code).toBe(foldCode(source.id));
+		expect(err!.code).toMatch(/^[a-z0-9]{8}$/);
+	});
+
+	it("captures the follow-on context line, and omits it when the marker line is last", () => {
+		const { all, masked } = fixture();
+		const idx = extractIndex({ masked, all });
+		const err = idx.errors.find((e) => e.line === "npm ERR! code ELIFECYCLE");
+		expect(err!.context).toBe("warning: something minor");
+
+		const messages = [
+			user("tail marker"),
+			assistantWithCalls([{ id: "t1", name: "read" }]),
+			toolResult("t1", "clean output\nfailed at the last line", "read"),
+		];
+		const a2 = blocksOf(messages);
+		const m2 = a2.filter((b) => b.kind === "tool_result");
+		const last = extractIndex({ masked: m2, all: a2 }).errors.find((e) => e.line === "failed at the last line");
+		expect(last).toBeDefined();
+		expect(last!.context).toBeUndefined();
+	});
+
+	it("stamps commands with the paired result block's turn and foldCode", () => {
+		const { all, masked } = fixture();
+		const idx = extractIndex({ masked, all });
+		const cmd = idx.commands.find((c) => c.command.includes("npx vitest run"));
+		const result = masked.find((b) => b.id === "r:c1")!;
+		expect(cmd).toBeDefined();
+		expect(cmd!.turn).toBe(result.turn);
+		expect(cmd!.code).toBe(foldCode(result.id));
+	});
+
+	it("stamps harvested `$ …` commands with the containing block's turn and foldCode", () => {
+		const messages = [
+			user("harvest"),
+			assistantWithCalls([{ id: "h1", name: "read" }]),
+			toolResult("h1", "some output\n$ make test\n$ git status", "read"),
+		];
+		const all = blocksOf(messages);
+		const masked = all.filter((b) => b.kind === "tool_result");
+		const cmd = extractIndex({ masked, all }).commands.find((c) => c.command === "make test");
+		expect(cmd).toBeDefined();
+		expect(cmd!.turn).toBe(masked[0].turn);
+		expect(cmd!.code).toBe(foldCode(masked[0].id));
 	});
 });

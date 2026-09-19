@@ -76,8 +76,8 @@ describe("seed-index emission at fold events", () => {
 		expect(rec.identifiers).toContain("CAP_X9_LIMIT");
 		expect(rec.identifiers).toContain("52418");
 		expect(rec.identifiers).toContain("3f9a2c7e11d04b22");
-		expect(rec.errors).toContain("2 passed, 1 failed");
-		expect(rec.commands.some((c) => c.includes("npx vitest run"))).toBe(true);
+		expect(rec.errors.map((e) => e.line)).toContain("2 passed, 1 failed");
+		expect(rec.commands.some((c) => c.command.includes("npx vitest run"))).toBe(true);
 		expect(rec.userMessages[0].firstLine).toContain("capacity limit");
 	});
 

@@ -15,6 +15,7 @@ import { SeedIndexStore, emitFoldIndex, emitCompactIndex, recordCompactedBlocks 
 import { renderDetCompactionSummary } from "../src/adapters/pi/compact";
 import { linearize, type WireBlock } from "../src/core/block";
 import type { AgentMessage } from "../src/core/block";
+import type { SeedIndexRecord } from "../src/core/index/seed-index";
 import { user, assistantText, assistantWithCalls, bigResult, toolResult } from "./helpers";
 
 /** A LedgerReader over a plain message array shaped like Pi's session entries. */
@@ -147,5 +148,68 @@ describe("compact index record + deterministic summary", () => {
 		const summary = renderDetCompactionSummary({ records: [], sessionFilePath: file });
 		expect(summary).toContain("deterministic seed index");
 		expect(summary).toContain(file);
+	});
+});
+
+function record(overrides: Partial<SeedIndexRecord>): SeedIndexRecord {
+	return {
+		v: 3,
+		kind: "fold-index",
+		harness: "pi-context-fold",
+		session: "s-test",
+		seq: 1,
+		at: "2026-09-18T00:00:00.000Z",
+		trigger: "threshold",
+		usage: { tokens: 1, contextWindow: 2, fraction: 0.5 },
+		files: [],
+		commands: [],
+		errors: [],
+		identifiers: [],
+		userMessages: [],
+		spans: [],
+		...overrides,
+	};
+}
+
+describe("deterministic summary rendering — provenance and v2 tolerance", () => {
+	it("renders v3 error provenance, the toolError mark, and the context line", () => {
+		const summary = renderDetCompactionSummary({
+			records: [
+				record({
+					errors: [
+						{ line: "npm ERR! code ELIFECYCLE", context: "npm ERR! Test failed.", turn: 41, code: "k3f9a2b7", toolError: true },
+						{ line: "grep: error: unknown option", turn: 52, code: "9x2m71c3" },
+					],
+					commands: [{ command: "make test", turn: 3, code: "abc12345" }],
+				}),
+			],
+		});
+		expect(summary).toContain("- ⚠ [turn 41 · k3f9a2b7] npm ERR! code ELIFECYCLE");
+		expect(summary).toContain("  ↳ npm ERR! Test failed.");
+		expect(summary).toContain("- [turn 52 · 9x2m71c3] grep: error: unknown option");
+		expect(summary).toContain("- \`make test\`");
+	});
+
+	it("renders a v2 record (bare-string errors/commands) without error", () => {
+		const v2 = {
+			v: 2,
+			kind: "fold-index",
+			harness: "pi-context-fold",
+			session: "s-test",
+			seq: 1,
+			at: "2026-09-18T00:00:00.000Z",
+			trigger: "threshold",
+			usage: { tokens: 1, contextWindow: 2, fraction: 0.5 },
+			files: [],
+			commands: ["make test"],
+			errors: ["FAIL old style"],
+			identifiers: [],
+			userMessages: [],
+			spans: [],
+		} as unknown as SeedIndexRecord;
+		const summary = renderDetCompactionSummary({ records: [v2] });
+		expect(summary).toContain("## Commands run");
+		expect(summary).toContain("- \`make test\`");
+		expect(summary).toContain("- FAIL old style");
 	});
 });

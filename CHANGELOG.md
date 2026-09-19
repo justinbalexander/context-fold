@@ -3,6 +3,19 @@ Note: This is largely LLM written, I won't hand write much in here unless I have
 
 Notable changes to context-fold.
 
+## Unreleased
+
+### Changed
+
+- **Seed index v3: provenance on errors and commands.** Error entries now carry the source
+  `turn`, the source block's fold code, an optional `toolError` flag, and the following
+  non-empty line as `context`; command entries carry the source `turn` and the paired result
+  block's fold code. Error extraction emits lines from tool-flagged (`isError`) result blocks
+  first, so a failure the tool itself reported wins a capped slot over a line that merely
+  mentions an error word. The deterministic summary marks tool-flagged errors with `⚠` and
+  shows `[turn N · code]` provenance. Renderers normalize v2 string entries, so existing
+  session indexes keep rendering.
+
 ## 0.5.1 - 2026-09-08
 
 ### Fixed
