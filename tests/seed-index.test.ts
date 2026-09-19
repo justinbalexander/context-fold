@@ -217,4 +217,33 @@ describe("seed-index extraction", () => {
 		expect(cmd!.turn).toBe(masked[0].turn);
 		expect(cmd!.code).toBe(foldCode(masked[0].id));
 	});
+
+	it("stores a full multi-line shell command, not its first line", () => {
+		const cmd = "python - <<'PY'\nprint('a')\nprint('b')\nPY";
+		const call: WireBlock = {
+			id: "a:resp:p0", kind: "tool_call", turn: 4, order: 0,
+			text: `bash ${cmd}`, tokens: 10, toolName: "bash", callId: "m1",
+		};
+		const result: WireBlock = {
+			id: "r:m1", kind: "tool_result", turn: 4, order: 1,
+			text: "done", tokens: 1, toolName: "bash", callId: "m1",
+		};
+		const idx = extractIndex({ masked: [result], all: [call, result] });
+		expect(idx.commands.map((c) => c.command)).toEqual([cmd]);
+	});
+
+	it("stores an 8100-char command at the 8000-char hard cap", () => {
+		const cmd = "echo " + "x".repeat(8095);
+		expect(cmd.length).toBe(8100);
+		const call: WireBlock = {
+			id: "a:resp:p0", kind: "tool_call", turn: 4, order: 0,
+			text: `bash ${cmd}`, tokens: 10, toolName: "bash", callId: "m1",
+		};
+		const result: WireBlock = {
+			id: "r:m1", kind: "tool_result", turn: 4, order: 1,
+			text: "done", tokens: 1, toolName: "bash", callId: "m1",
+		};
+		const idx = extractIndex({ masked: [result], all: [call, result] });
+		expect(idx.commands[0].command).toBe(cmd.slice(0, 8000));
+	});
 });

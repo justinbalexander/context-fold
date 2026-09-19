@@ -76,7 +76,9 @@ const MAX_ERRORS = 24;
 const MAX_IDENTIFIERS = 64;
 const ERROR_CLIP = 240;
 const USER_FIRST_LINE_CLIP = 200;
-const COMMAND_CLIP = 200;
+/** Hard bound on a STORED command — bounds pathological inputs (pasted files) without
+ *  destroying normal multi-line commands. Rendering clips to COMMAND_RENDER_CLIP. */
+const COMMAND_STORE_CLIP = 8000;
 
 /** Tool names treated as shell executors: their call args are indexed verbatim as commands. */
 const SHELL_TOOLS = new Set(["bash", "shell", "sh", "cmd", "exec", "run", "terminal", "run_command"]);
@@ -116,8 +118,8 @@ export function extractIndex(input: ExtractInput): ExtractedIndex {
 	for (const b of [...pairedCalls, ...masked]) harvestPaths(b.text, files);
 	out.files = files.values();
 
-	// commands: shell-class tool_call args verbatim (first line), then `$ `-prefixed lines and
-	// tool-invocation-shaped lines inside masked output.
+	// commands: shell-class tool_call args verbatim (full, hard-capped), then `$ `-prefixed lines
+	// and tool-invocation-shaped lines inside masked output.
 	const commands = new DedupKeyed<IndexedCommand>(MAX_COMMANDS, (c) => c.command);
 	for (const call of pairedCalls) {
 		if (!SHELL_TOOLS.has((call.toolName ?? "").toLowerCase())) continue;
@@ -127,7 +129,7 @@ export function extractIndex(input: ExtractInput): ExtractedIndex {
 		// Provenance points at the RESULT block (foldable, recallable), not the call (never folded).
 		const result = masked.find((b) => b.kind === "tool_result" && b.callId === call.callId);
 		commands.add({
-			command: firstLine(args, COMMAND_CLIP),
+			command: safeSlice(args.trim(), COMMAND_STORE_CLIP),
 			turn: result?.turn ?? call.turn,
 			...(result ? { code: foldCode(result.id) } : {}),
 		});
@@ -240,9 +242,9 @@ const TOOL_CMD_RE =
 
 function harvestCommands(b: WireBlock, into: DedupKeyed<IndexedCommand>): void {
 	for (const m of b.text.matchAll(DOLLAR_LINE_RE))
-		into.add({ command: safeSlice(m[1], COMMAND_CLIP), turn: b.turn, code: foldCode(b.id) });
+		into.add({ command: safeSlice(m[1], COMMAND_STORE_CLIP), turn: b.turn, code: foldCode(b.id) });
 	for (const m of b.text.matchAll(TOOL_CMD_RE))
-		into.add({ command: safeSlice(m[0].trim(), COMMAND_CLIP), turn: b.turn, code: foldCode(b.id) });
+		into.add({ command: safeSlice(m[0].trim(), COMMAND_STORE_CLIP), turn: b.turn, code: foldCode(b.id) });
 }
 
 // Identifier shapes for lexical recovery: code symbols with an interior capital/underscore/digit,

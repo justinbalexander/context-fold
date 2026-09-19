@@ -11,6 +11,7 @@
  * Pure rendering: no Pi imports, no disk, no clock. Fully unit-testable.
  */
 import type { ErrorLine, IndexedCommand, SeedIndexRecord } from "../../core/index/seed-index";
+import { clip } from "../../core/tokens";
 
 const CAP_USER = 12;
 const CAP_FILES = 40;
@@ -19,6 +20,7 @@ const CAP_ERRORS = 24;
 const CAP_IDENTIFIERS = 80;
 const CAP_SPANS = 30;
 const CAP_PREVIOUS_SUMMARY_CHARS = 4_000;
+const COMMAND_RENDER_CLIP = 200;
 
 export interface DetCompactionInput {
 	records: SeedIndexRecord[];
@@ -115,9 +117,21 @@ function renderError(e: ErrorEntry): string[] {
 	return e.context ? [head, `  ↳ ${e.context}`] : [head];
 }
 
-/** Render one command. Tolerates v2 records, where the entry is a bare string. */
+/** Render one command: the first line, clipped, with a marker when content was dropped.
+ *  Tolerates v2 records, where the entry is a bare string. */
 function renderCommand(c: CommandEntry): string {
-	return typeof c === "string" ? `- \`${c}\`` : `- \`${c.command}\``;
+	if (typeof c === "string") return `- \`${c}\``; // v2 record
+	const lines = c.command.split("\n");
+	const firstRaw = (lines.find((l) => l.trim()) ?? "").trim();
+	const first = clip(firstRaw, COMMAND_RENDER_CLIP);
+	const extraLines = lines.length - 1;
+	const extraChars = Math.max(0, firstRaw.length - COMMAND_RENDER_CLIP);
+	const marks: string[] = [];
+	if (extraLines > 0) marks.push(`+${extraLines} line${extraLines === 1 ? "" : "s"}`);
+	if (extraChars > 0) marks.push(`+${extraChars} chars`);
+	const suffix = marks.length ? ` … (${marks.join(", ")})` : "";
+	const prov = ` [turn ${c.turn}${c.code ? ` · ${c.code}` : ""}]`;
+	return `- \`${first}\`${suffix}${prov}`;
 }
 
 /** Dedup by key, keeping the newest value per key in first-sighting (chronological) order. */

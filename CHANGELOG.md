@@ -15,6 +15,11 @@ Notable changes to context-fold.
   mentions an error word. The deterministic summary marks tool-flagged errors with `⚠` and
   shows `[turn N · code]` provenance. Renderers normalize v2 string entries, so existing
   session indexes keep rendering.
+- **Commands are stored whole and clipped only at render.** The seed index now keeps the full
+  shell command (hard cap 8000 chars), so multi-line commands such as heredocs and `&&` chains
+  survive extraction instead of being reduced to their first line. The deterministic summary
+  clips the first line to 200 chars and appends a `… (+N lines, +M chars)` marker when content
+  was dropped, so a clipped command is visually distinct from a complete one.
 
 ## 0.5.1 - 2026-09-08
 

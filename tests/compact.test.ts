@@ -187,7 +187,25 @@ describe("deterministic summary rendering — provenance and v2 tolerance", () =
 		expect(summary).toContain("- ⚠ [turn 41 · k3f9a2b7] npm ERR! code ELIFECYCLE");
 		expect(summary).toContain("  ↳ npm ERR! Test failed.");
 		expect(summary).toContain("- [turn 52 · 9x2m71c3] grep: error: unknown option");
-		expect(summary).toContain("- \`make test\`");
+		expect(summary).toContain("- \`make test\` [turn 3 · abc12345]");
+	});
+
+	it("renders a multi-line command as first line plus a truncation marker", () => {
+		const summary = renderDetCompactionSummary({
+			records: [
+				record({
+					commands: [{ command: "python - <<'PY'\nprint(1)\nprint(2)\nPY", turn: 12, code: "9x2m71c3" }],
+				}),
+			],
+		});
+		expect(summary).toContain("- \`python - <<'PY'\` … (+3 lines) [turn 12 · 9x2m71c3]");
+	});
+
+	it("renders a long single-line command with a chars marker", () => {
+		const summary = renderDetCompactionSummary({
+			records: [record({ commands: [{ command: "x".repeat(300), turn: 5 }] })],
+		});
+		expect(summary).toContain("… (+100 chars) [turn 5]");
 	});
 
 	it("renders a v2 record (bare-string errors/commands) without error", () => {
@@ -210,6 +228,7 @@ describe("deterministic summary rendering — provenance and v2 tolerance", () =
 		const summary = renderDetCompactionSummary({ records: [v2] });
 		expect(summary).toContain("## Commands run");
 		expect(summary).toContain("- \`make test\`");
+		expect(summary).not.toContain("… (");
 		expect(summary).toContain("- FAIL old style");
 	});
 });

@@ -96,8 +96,11 @@ Field semantics:
   shell-class tools), verbatim, deduplicated by the stored command text. Each entry
   is an `IndexedCommand`: `command` is the command text, `turn` is the turn of the
   paired result block (or of the call when it has none), and `code` is the paired
-  result block's fold code when a result block is present. The command text is
-  clipped ≤ 200 chars at extraction.
+  result block's fold code when a result block is present. The command is stored
+  whole, hard-capped at 8000 chars to bound pathological inputs (a pasted file).
+  Rendering into the deterministic summary clips the first non-empty line to 200
+  chars and appends a `… (+N lines, +M chars)` marker when content was dropped, so a
+  clipped command is distinguishable from a complete one.
 - `errors`: error lines detected in folded output by the error lexicon,
   which covers lowercase `failed`/`failure`, `fatal`, `npm ERR!`,
   `Segmentation fault`, `Permission denied`, `✗`, tracebacks, and
@@ -138,6 +141,9 @@ Field semantics:
   `command`, `turn`, and optional `code`.
 - Error extraction emits lines from tool-flagged (`isError`) result blocks
   first, and captures the following non-empty line as `context`.
+- Commands are stored whole (hard cap 8000) and clipped only when rendered into
+  the deterministic summary. A `… (+N lines, +M chars)` marker follows a clipped
+  command.
 - v2 records remain valid input: renderers normalize bare-string `errors` and
   `commands` entries, and the tolerance rules above are unchanged.
 
