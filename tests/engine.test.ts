@@ -3,10 +3,15 @@
  * fold-under-budget, provider-safety on the real output, and the recall/unfold roundtrip.
  */
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ContextFoldEngine } from "../src/adapters/pi/store";
 import { FoldLadderPolicy } from "../src/core/policy/fold-ladder";
+import { MapFoldRegistry } from "../src/core/fold-registry";
+import { SeedIndexStore, emitFoldIndex } from "../src/adapters/pi/index-store";
 import type { AgentMessage } from "../src/core/block";
-import { user, assistantWithCalls, toolResult, bigResult, isBalanced, liveTokensOf } from "./helpers";
+import { user, assistantText, assistantWithCalls, toolResult, bigResult, isBalanced, liveTokensOf } from "./helpers";
 
 /** Build an over-budget session: N turns, each a user ask + assistant call + a big tool result. */
 function bigSession(n: number): AgentMessage[] {
@@ -124,6 +129,76 @@ describe("recall — read the original back verbatim", () => {
 		expect(missing).toHaveLength(0);
 		expect(matches).toHaveLength(1);
 		expect(matches[0].text).toBe(origText); // verbatim
+	});
+});
+
+describe("dedup — identical outputs fold to a pointer at the first copy", () => {
+	it("same event: the second identical tool result folds to a pointer, not a full digest", () => {
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
+		const out = engine.process(bigSession(12), CW); // every bigResult body is byte-identical
+		const texts = out.filter((m) => m.role === "toolResult").map((m) => (m.content as any)[0].text as string);
+		const pointers = texts.filter((t) => t.includes("identical to {#"));
+		const fullDigests = texts.filter((t) => t.includes("FOLDED") && !t.includes("identical to {#"));
+		expect(pointers.length).toBeGreaterThan(0);
+		// exactly one full digest for the repeated body; the pointer names its code
+		expect(fullDigests.length).toBe(1);
+		expect(pointers[0]).toMatch(/\{#[0-9a-z]{8} FOLDED\} identical to \{#[0-9a-z]{8} FOLDED\}/);
+	});
+
+	it("a pointer block still recalls its own bytes by its own code", () => {
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
+		const out = engine.process(bigSession(12), CW);
+		const dupMsg = out.find((m) => m.role === "toolResult" && (m.content as any)[0].text.includes("identical to {#"));
+		expect(dupMsg).toBeDefined();
+		const code = /\{#([0-9a-z]{8}) FOLDED\} identical to/.exec((dupMsg!.content as any)[0].text)![1];
+		const { matches, missing } = engine.resolveRecall([code]);
+		expect(missing).toHaveLength(0);
+		expect(matches[0].text).toContain("line 0:"); // the block's own ledger bytes
+	});
+
+	it("later event: an identical output folds to a pointer at the earlier event's code", () => {
+		const registry = new MapFoldRegistry();
+		const dir = mkdtempSync(join(tmpdir(), "cf-dedup-"));
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG, registry);
+		engine.onFoldEvent = (ev) => emitFoldIndex(ev, { registry, index: new SeedIndexStore(dir), sessionId: "t-dedup", now: 0 });
+		try {
+			const m1 = bigSession(6);
+			engine.process(m1, { contextWindow: CW, tokens: 7_900 }); // event 1
+			const m2 = [
+				...m1,
+				user("round two"),
+				assistantWithCalls([{ id: "cX", name: "read" }]),
+				bigResult("cX", 80), // byte-identical to the event-1 bodies
+				assistantText("read it"),
+				assistantWithCalls([{ id: "cY", name: "read" }]),
+				bigResult("cY", 80),
+				assistantText("and that one"),
+				user("done"),
+			];
+			const out2 = engine.process(m2, { contextWindow: CW, tokens: 7_900 }); // event 2
+			for (const id of ["cX", "cY"]) {
+				const r = out2.find((m) => m.role === "toolResult" && m.toolCallId === id)!;
+				expect((r.content as any)[0].text).toContain("identical to {#");
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("different content never dedups", () => {
+		const engine = new ContextFoldEngine(new FoldLadderPolicy(), CONFIG);
+		const messages = [
+			user("start"),
+			assistantWithCalls([{ id: "d1", name: "read" }]),
+			toolResult("d1", `alpha ${"x".repeat(3000)}`),
+			assistantText("ok"),
+			assistantWithCalls([{ id: "d2", name: "read" }]),
+			toolResult("d2", `beta ${"y".repeat(3000)}`),
+			assistantText("done"),
+			user("wrap"),
+		];
+		const out = engine.process(messages, { contextWindow: CW, tokens: 7_900 });
+		expect(JSON.stringify(out)).not.toContain("identical to {#");
 	});
 });
 

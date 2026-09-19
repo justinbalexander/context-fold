@@ -20,7 +20,7 @@ import { assistantText, assistantWithCalls, bigResult, toolResult, user } from "
 const NOW = 1_722_200_000_000;
 
 const GOLDEN = {
-	folded: "8e83fd755bef7a53b9ea274b4f18eee25a7ff45e7afd4fd903d687051355bd1c",
+	folded: "524693062504054875c2c47d53417acbce172379be25454b2b28f11b16841f27",
 	index: "77fcf6079dbb993d16842a56a70c326c30eccc32d4c1171e32fe94af4b2fc554",
 	recall: "d999a9743e2d83b6fb91358e3fb1bd193ad4881970fe4af6c35747395cc6d833",
 };

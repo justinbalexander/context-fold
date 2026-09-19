@@ -16,7 +16,7 @@ import type { FoldPolicy } from "../../core/contract";
 import type { AgentMessage, FoldOp, WireBlock } from "../../core/block";
 import { blockId, linearize, isDurableId } from "../../core/block";
 import { applyPlan } from "../../core/apply";
-import { digest, wireFoldable, foldCode, substTokens } from "../../core/digest";
+import { digest, wireFoldable, foldCode, foldTag, substTokens } from "../../core/digest";
 import { estTokens, safeSlice, BLOCK_OVERHEAD } from "../../core/tokens";
 import { MapFoldRegistry, type FoldEntry } from "../../core/fold-registry";
 import { sha256Hex, type LedgerLookup } from "./ledger";
@@ -690,10 +690,30 @@ export class ContextFoldEngine {
 		const ops: FoldOp[] = [];
 		const opIds = new Set<string>();
 
+		// sha256 → code of the first folded block carrying these bytes. Identical outputs (a file
+		// re-read unchanged) fold to a pointer at the first copy instead of a second full digest.
+		// Registry order first, then event order — deterministic; the map is rebuilt per call, so a
+		// rejected fold event leaks nothing into later turns.
+		const shaOwner = new Map<string, string>();
+		for (const e of this.registry.entries()) if (e.sha256 && !shaOwner.has(e.sha256)) shaOwner.set(e.sha256, e.code);
+
 		for (const cmd of commands) {
 			for (const id of cmd.ids) {
 				if (opIds.has(id) || !canFold(id)) continue;
-				ops.push({ id, digestText: this.detDigest(byId.get(id)!) });
+				const b = byId.get(id)!;
+				let digestText: string;
+				if (b.text) {
+					const dup = shaOwner.get(sha256Hex(b.text));
+					if (dup !== undefined) {
+						digestText = `${foldTag(b.id)} identical to {#${dup} FOLDED} — same bytes`;
+					} else {
+						shaOwner.set(sha256Hex(b.text), foldCode(b.id));
+						digestText = this.detDigest(b);
+					}
+				} else {
+					digestText = this.detDigest(b); // empty text: sha of "" would dedup unrelated empties
+				}
+				ops.push({ id, digestText });
 				opIds.add(id);
 			}
 		}
